@@ -95,9 +95,11 @@ python3 automatic_music_cuer_gemini.py --dry-run "path/to/song.mp3"
 # Analyze and update VirtualDJ database
 python3 automatic_music_cuer_gemini.py "path/to/song.mp3"
 
-# Process an entire folder
+# Process an entire folder (processes 5 songs at a time asynchronously)
 python3 automatic_music_cuer_gemini.py "path/to/folder"
 ```
+
+**Note**: When processing a folder, the script automatically handles multiple files and processes up to 5 songs concurrently for faster analysis.
 
 ## How It Works
 
