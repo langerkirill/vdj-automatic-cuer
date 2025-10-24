@@ -14,9 +14,24 @@ fi
 echo "✅ Python 3 found: $(python3 --version)"
 echo ""
 
+# Create virtual environment
+if [ ! -d "venv" ]; then
+    echo "📦 Creating virtual environment..."
+    python3 -m venv venv
+
+    if [ $? -ne 0 ]; then
+        echo "❌ Failed to create virtual environment"
+        exit 1
+    fi
+
+    echo "✅ Virtual environment created"
+else
+    echo "✅ Virtual environment already exists"
+fi
+
 # Install dependencies
-echo "📦 Installing dependencies..."
-pip3 install -r requirements.txt
+echo "📦 Installing dependencies in virtual environment..."
+./venv/bin/pip install -r requirements.txt
 
 if [ $? -ne 0 ]; then
     echo "❌ Failed to install dependencies"
@@ -55,7 +70,11 @@ echo ""
 
 echo "✅ Setup complete!"
 echo ""
-echo "🚀 To analyze a track, run:"
+echo "🚀 To get started:"
+echo "1. Activate the virtual environment:"
+echo "   source venv/bin/activate"
+echo ""
+echo "2. Analyze a track:"
 echo "   python3 automatic_music_cuer_gemini.py \"path/to/song.mp3\""
 echo ""
 echo "💡 Use --dry-run to preview changes first:"
