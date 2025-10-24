@@ -41,6 +41,7 @@ Before using this script, be aware of these important requirements:
 - **Beat grid required**: The track must have its beat grid aligned in VirtualDJ before running the script
 - **Close VirtualDJ before running**: Do not make any edits in VirtualDJ while the script is running, as changes to the database will cause your edits to be lost
 - **Restart required**: You must close and reopen VirtualDJ after running the script for the cue points to appear
+- **Accuracy limitations**: The AI analysis is not always perfect. Always manually review and adjust the generated cue points. Accuracy should improve with future Gemini models (like Gemini 3)
 
 ## Color System (My Personal DJ Preferences)
 
