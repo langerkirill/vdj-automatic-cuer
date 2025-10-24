@@ -2,6 +2,10 @@
 
 An intelligent music analysis tool that uses Google's Gemini AI to automatically detect musical elements (drums, vocals, melody) and create cue points in your VirtualDJ library.
 
+## Video Walkthrough
+
+[Watch the walkthrough video](./VDJ%20Auto%20Cuer%20Walk%20Through.mov)
+
 ## Quick Start
 
 ```bash
@@ -20,13 +24,15 @@ That's it! The setup script will install everything and help you set up your API
 ## What It Does
 
 This script analyzes your music files and automatically creates:
+
 - **Cue Points**: Marks important transitions (intro, drops, breakdowns, vocal entries, etc.)
 - **Loops**: Creates DJ-friendly loop segments (drum loops, vocal loops, melodic loops)
-- **Color-Coded Comments**: Labels each cue with the musical elements present, making it easy to filter and find specific sounds when DJing
+- **Color Name Comments**: Labels each cue with the musical elements present, making it easy to filter and find specific sounds when DJing
 
 ## Platform Support
 
 **Mac only** - This script automatically finds your VirtualDJ database at:
+
 ```
 ~/Library/Application Support/VirtualDJ/database.xml
 ```
@@ -50,23 +56,28 @@ Before using this script, be aware of these important requirements:
 The colors reflect my DJing style and help me quickly find the right transition points:
 
 - **Blue** - Melodic only (piano, strings, synth, guitar, bass) - NO drums or vocals
-  - *Use case: Smooth ambient transitions, building tension*
+
+  - _Use case: Smooth ambient transitions, building tension_
 
 - **Green** - Melodic + drums - NO vocals
-  - *Use case: Instrumental breaks, building energy without lyrics*
+
+  - _Use case: Instrumental breaks, building energy without lyrics_
 
 - **Purple** - Drums only (80%+ drums/percussion)
-  - *Use case: Perfect for transitions, drum breaks, mixing between tracks*
+
+  - _Use case: Perfect for transitions, drum breaks, mixing between tracks_
 
 - **Yellow** - Full mix (drums + melody + vocals)
-  - *Use case: Peak energy moments, main sections of tracks*
+
+  - _Use case: Peak energy moments, main sections of tracks_
 
 - **Orange** - Vocals + melody - NO drums
-  - *Use case: Acapella sections, vocal-focused moments*
+  - _Use case: Acapella sections, vocal-focused moments_
 
 ### Why Color-Coded Comments Matter
 
 In VirtualDJ, you can **filter cues by color**. This means during a live set, I can:
+
 - Quickly jump to "drums only" sections (purple) when I need a clean transition
 - Find "melodic only" sections (blue) for smooth ambient mixing
 - Locate "full mix" moments (yellow) for peak energy drops
@@ -76,6 +87,7 @@ The comments are automatically added to each cue describing the exact musical el
 ## Setup
 
 The setup script handles everything for you:
+
 - Creates a virtual environment
 - Installs all dependencies
 - Prompts for your Gemini API key
@@ -85,11 +97,13 @@ You'll need a free API key from [Google AI Studio](https://aistudio.google.com/a
 ## Usage
 
 First, activate the virtual environment:
+
 ```bash
 source venv/bin/activate
 ```
 
 Then analyze your tracks:
+
 ```bash
 # Analyze a single track (dry-run to preview changes)
 python3 automatic_music_cuer_gemini.py --dry-run "path/to/song.mp3"
@@ -121,6 +135,7 @@ The script handles all common audio formats including MP3, FLAC, WAV, and M4A. F
 ## What Gets Created
 
 ### Cue Points (5-6 per track)
+
 - Intro
 - Drums In
 - Vocal Entry
@@ -129,6 +144,7 @@ The script handles all common audio formats including MP3, FLAC, WAV, and M4A. F
 - Outro
 
 ### Loop Segments (3 per track)
+
 - **Drum Loop** (16-32 beats): Drums-only section for transitions
 - **Vocal Loop** (16-32 beats): Prominent vocals for crowd engagement
 - **Melodic Loop** (16-32 beats): Melody without drums/vocals for smooth mixing
@@ -136,6 +152,7 @@ The script handles all common audio formats including MP3, FLAC, WAV, and M4A. F
 ## Output Format
 
 Each cue includes:
+
 - **Timestamp**: Precise timing (rounded to 0.01s)
 - **Name**: Descriptive label (e.g., "Drums In", "Vocal Drop")
 - **Color**: Based on musical elements present
@@ -145,9 +162,13 @@ Each cue includes:
 
 After running the script:
 
-1. **Close and reopen VirtualDJ**: You must fully quit and restart VirtualDJ for the cue points to appear
+1. **Refresh VirtualDJ database**:
+
+   - Press `Cmd+Option+R` (Mac)
+   - Or: Options → Reload Database
 
 2. **View your cues**:
+
    - Open the track in VirtualDJ
    - Cues appear in the waveform with assigned colors
    - Hover over cues to see comments
@@ -167,22 +188,24 @@ After running the script:
 ## Troubleshooting
 
 ### "GEMINI_API_KEY not found"
-- Ensure `.env` file exists in the project directory
+
+- Ensure `.env` file exists in `claude_scripts` directory
 - Check that API key is correctly formatted: `GEMINI_API_KEY=AIza...`
 
 ### "Database not found"
+
 - Verify VirtualDJ is installed and has been run at least once
 - Check path: `~/Library/Application Support/VirtualDJ/database.xml`
 
 ### "Upload failed" or "SSL errors"
+
 - Check internet connection
 - Script will automatically retry up to 5 times
 - Large files may take longer to upload
 
 ### Cues not appearing in VirtualDJ
-- Close and reopen VirtualDJ completely (fully quit and restart the application)
-- Ensure file path in VirtualDJ matches file analyzed
-- Check dry-run output for any error messages
+
+- Close and reopen
 
 ## Example Output
 
