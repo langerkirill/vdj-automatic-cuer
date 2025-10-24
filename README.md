@@ -42,6 +42,7 @@ Before using this script, be aware of these important requirements:
 - **Close VirtualDJ before running**: Do not make any edits in VirtualDJ while the script is running, as changes to the database will cause your edits to be lost
 - **Restart required**: You must close and reopen VirtualDJ after running the script for the cue points to appear
 - **Accuracy limitations**: The AI analysis is not always perfect. Always manually review and adjust the generated cue points. Accuracy should improve with future Gemini models (like Gemini 3)
+- **Long song limitations**: Really long songs (extended mixes, DJ sets) tend to have lower accuracy. The AI performs best on standard-length tracks (3-10 minutes)
 
 ## Color System (My Personal DJ Preferences)
 
@@ -100,6 +101,10 @@ python3 automatic_music_cuer_gemini.py "path/to/folder"
 ```
 
 **Note**: When processing a folder, the script automatically handles multiple files and processes up to 5 songs concurrently for faster analysis.
+
+### Supported File Formats
+
+The script handles all common audio formats including MP3, FLAC, WAV, and M4A. File sizes up to 200+ MB are supported, though extremely large files may take longer to upload and analyze.
 
 ## How It Works
 
