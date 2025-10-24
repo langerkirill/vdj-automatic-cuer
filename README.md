@@ -234,14 +234,3 @@ self.color_mappings = {
 ```
 
 And update the color rules in the Gemini prompt (lines 222-227).
-
-## 📚 Related Documentation
-
-- [CLAUDE.md](../CLAUDE.md) - Complete VirtualDJ database handling guide
-- [VirtualDJ XML Format](https://www.virtualdj.com/wiki/XML.html) - Official documentation
-
----
-
-**Last Updated**: January 2025
-**Author**: Kirill Langer
-**License**: Personal use
