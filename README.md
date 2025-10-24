@@ -8,7 +8,10 @@ An intelligent music analysis tool that uses Google's Gemini AI to automatically
 # 1. Run the setup script
 ./setup.sh
 
-# 2. Analyze a track
+# 2. Activate the virtual environment
+source venv/bin/activate
+
+# 3. Analyze a track
 python3 automatic_music_cuer_gemini.py "path/to/song.mp3"
 ```
 
@@ -58,46 +61,23 @@ In VirtualDJ, you can **filter cues by color**. This means during a live set, I 
 
 The comments are automatically added to each cue describing the exact musical elements, making it easy to remember what each color means.
 
-## 🔧 Setup Instructions
+## 🔧 Setup
 
-### 1. Get a Gemini API Key
+The setup script handles everything for you:
+- Creates a virtual environment
+- Installs all dependencies
+- Prompts for your Gemini API key
 
-1. Go to [Google AI Studio](https://aistudio.google.com/app/apikey)
-2. Sign in with your Google account
-3. Click **"Get API Key"** or **"Create API Key"**
-4. Copy your API key (starts with `AIza...`)
-
-**Note**: Gemini has a free tier with generous limits. For music analysis, the free tier is usually sufficient for personal DJ libraries.
-
-### 2. Install Dependencies
-
-```bash
-cd claude_scripts
-pip3 install -r requirements.txt
-```
-
-Required packages:
-- `google-generativeai` - For Gemini AI integration
-- `python-dotenv` - For API key management
-- `pydantic` - For structured data parsing
-
-### 3. Configure Your API Key
-
-Create a `.env` file in the `claude_scripts` directory:
-
-```bash
-echo "GEMINI_API_KEY=your_api_key_here" > .env
-```
-
-Replace `your_api_key_here` with your actual Gemini API key.
-
-**Security Note**: The `.env` file should NOT be committed to git. Add it to your `.gitignore`:
-```bash
-echo ".env" >> .gitignore
-```
+You'll need a free API key from [Google AI Studio](https://aistudio.google.com/app/apikey). Just run `./setup.sh` and it will walk you through the rest.
 
 ## 🚀 Usage
 
+First, activate the virtual environment:
+```bash
+source venv/bin/activate
+```
+
+Then analyze your tracks:
 ```bash
 # Analyze a single track (dry-run to preview changes)
 python3 automatic_music_cuer_gemini.py --dry-run "path/to/song.mp3"
