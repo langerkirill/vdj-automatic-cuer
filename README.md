@@ -41,8 +41,9 @@ Before using this script, be aware of these important requirements:
 - **Beat grid required**: The track must have its beat grid aligned in VirtualDJ before running the script
 - **Close VirtualDJ before running**: Do not make any edits in VirtualDJ while the script is running, as changes to the database will cause your edits to be lost
 - **Restart required**: You must close and reopen VirtualDJ after running the script for the cue points to appear
+- **Platform compatibility**: Primarily tested on Mac. Windows and Linux compatibility is uncertain and may require additional configuration
 - **Accuracy limitations**: The AI analysis is not always perfect. Always manually review and adjust the generated cue points. Accuracy should improve with future Gemini models (like Gemini 3)
-- **Long song limitations**: Really long songs (extended mixes, DJ sets) tend to have lower accuracy. The AI performs best on standard-length tracks (3-10 minutes)
+- **Long song limitations**: Really long songs (extended mixes, DJ sets) tend to have lower accuracy. The AI performs best on standard-length tracks (up to 6-7 minutes)
 
 ## Color System (My Personal DJ Preferences)
 
