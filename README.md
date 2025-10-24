@@ -33,6 +33,15 @@ This script analyzes your music files and automatically creates:
 
 For Windows/Linux support, you would need to manually specify the database path.
 
+## Limitations
+
+Before using this script, be aware of these important requirements:
+
+- **Files must be pre-analyzed**: The audio file needs to have already been analyzed by VirtualDJ (so it exists in the database)
+- **Beat grid required**: The track must have its beat grid aligned in VirtualDJ before running the script
+- **Close VirtualDJ before running**: Do not make any edits in VirtualDJ while the script is running, as changes to the database will cause your edits to be lost
+- **Restart required**: You must close and reopen VirtualDJ after running the script for the cue points to appear
+
 ## Color System (My Personal DJ Preferences)
 
 The colors reflect my DJing style and help me quickly find the right transition points:
