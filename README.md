@@ -145,9 +145,7 @@ Each cue includes:
 
 After running the script:
 
-1. **Refresh VirtualDJ database**:
-   - Press `Cmd+Option+R` (Mac)
-   - Or: Options → Reload Database
+1. **Close and reopen VirtualDJ**: You must fully quit and restart VirtualDJ for the cue points to appear
 
 2. **View your cues**:
    - Open the track in VirtualDJ
@@ -169,7 +167,7 @@ After running the script:
 ## Troubleshooting
 
 ### "GEMINI_API_KEY not found"
-- Ensure `.env` file exists in `claude_scripts` directory
+- Ensure `.env` file exists in the project directory
 - Check that API key is correctly formatted: `GEMINI_API_KEY=AIza...`
 
 ### "Database not found"
@@ -182,7 +180,7 @@ After running the script:
 - Large files may take longer to upload
 
 ### Cues not appearing in VirtualDJ
-- Press `Cmd+Option+R` to refresh database
+- Close and reopen VirtualDJ completely (fully quit and restart the application)
 - Ensure file path in VirtualDJ matches file analyzed
 - Check dry-run output for any error messages
 
