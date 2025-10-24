@@ -4,7 +4,9 @@ An intelligent music analysis tool that uses Google's Gemini AI to automatically
 
 ## Video Walkthrough
 
-[Watch the walkthrough video](./VDJ%20Auto%20Cuer%20Walk%20Through.mov)
+[![Watch the walkthrough video](https://img.youtube.com/vi/8868lOUFJQA/maxresdefault.jpg)](https://youtu.be/8868lOUFJQA)
+
+Click the image above to watch the full walkthrough on YouTube.
 
 ## Quick Start
 
