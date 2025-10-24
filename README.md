@@ -98,28 +98,15 @@ echo ".env" >> .gitignore
 
 ## 🚀 Usage
 
-### Basic Usage
-
 ```bash
 # Analyze a single track (dry-run to preview changes)
 python3 automatic_music_cuer_gemini.py --dry-run "path/to/song.mp3"
 
 # Analyze and update VirtualDJ database
 python3 automatic_music_cuer_gemini.py "path/to/song.mp3"
-```
 
-### Advanced Options
-
-```bash
-# Process multiple files
-for file in ~/Music/DJ/NewTracks/*.mp3; do
-    python3 automatic_music_cuer_gemini.py "$file"
-done
-
-# Dry-run multiple files first to review
-for file in ~/Music/DJ/NewTracks/*.mp3; do
-    python3 automatic_music_cuer_gemini.py --dry-run "$file"
-done
+# Process an entire folder
+python3 automatic_music_cuer_gemini.py "path/to/folder"
 ```
 
 ## 🔍 How It Works
