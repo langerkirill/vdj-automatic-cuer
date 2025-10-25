@@ -11,13 +11,17 @@ Click the image above to watch the full walkthrough on YouTube.
 ## Quick Start
 
 ```bash
-# 1. Run the setup script
+# 1. Clone the repository
+git clone https://github.com/langerkirill/vdj-automatic-cuer.git
+cd vdj-automatic-cuer
+
+# 2. Run the setup script
 ./setup.sh
 
-# 2. Activate the virtual environment
+# 3. Activate the virtual environment
 source venv/bin/activate
 
-# 3. Analyze a track
+# 4. Analyze a track
 python3 automatic_music_cuer_gemini.py "path/to/song.mp3"
 ```
 
@@ -86,15 +90,31 @@ In VirtualDJ, you can **filter cues by color**. This means during a live set, I 
 
 The comments are automatically added to each cue describing the exact musical elements, making it easy to remember what each color means.
 
+## Prerequisites
+
+Before running the setup, make sure you have:
+
+- **Python 3.8 or higher** - Check with `python3 --version`
+- **VirtualDJ installed** - The script modifies the VirtualDJ database
+- **VirtualDJ database created** - Run VirtualDJ at least once to create the database
+- **Gemini API key** - Get a free key from [Google AI Studio](https://aistudio.google.com/app/apikey)
+
 ## Setup
 
-The setup script handles everything for you:
+Run the setup script to get started:
 
-- Creates a virtual environment
-- Installs all dependencies
-- Prompts for your Gemini API key
+```bash
+./setup.sh
+```
 
-You'll need a free API key from [Google AI Studio](https://aistudio.google.com/app/apikey). Just run `./setup.sh` and it will walk you through the rest.
+The setup script will:
+
+- Create a Python virtual environment (venv)
+- Install all required dependencies
+- Prompt you to enter your Gemini API key
+- Create a `.env` file with your configuration
+
+**Note**: This uses Python's built-in `venv` (virtual environment), not `pyenv`. No additional tools needed beyond Python 3.8+.
 
 ## Usage
 
@@ -164,10 +184,7 @@ Each cue includes:
 
 After running the script:
 
-1. **Refresh VirtualDJ database**:
-
-   - Press `Cmd+Option+R` (Mac)
-   - Or: Options → Reload Database
+1. **Close and reopen VirtualDJ**: You must fully quit and restart VirtualDJ for the cue points to appear
 
 2. **View your cues**:
 
