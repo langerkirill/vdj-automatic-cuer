@@ -146,6 +146,57 @@ class AnalysisPostprocessingTests(unittest.TestCase):
         self.assertNotIn("bass", cue["cue_name"].lower())
         self.assertEqual(cue["color"], "yellow")
 
+    def test_shortens_loop_that_would_cross_next_section_change(self):
+        analysis = {
+            "measure_changes": [
+                {"timestamp": 0.0, "elements": ["drums"], "cue_name": "Intro", "color": "purple"},
+                {"timestamp": 34.0, "elements": ["drums", "bass"], "cue_name": "Bass In", "color": "green"},
+            ],
+            "loop_segments": [
+                {
+                    "start": 18.0,
+                    "length_beats": 32,
+                    "elements": ["drums"],
+                    "loop_name": "Drum Loop",
+                    "color": "purple",
+                }
+            ],
+        }
+
+        fixed = self.cuer._postprocess_loop_segments(
+            analysis,
+            bpm=120,
+            song_length=120,
+        )
+
+        self.assertEqual(len(fixed["loop_segments"]), 1)
+        self.assertEqual(fixed["loop_segments"][0]["length_beats"], 16)
+
+    def test_deletes_loop_when_section_change_is_too_close(self):
+        analysis = {
+            "measure_changes": [
+                {"timestamp": 0.0, "elements": ["drums"], "cue_name": "Intro", "color": "purple"},
+                {"timestamp": 20.5, "elements": ["vocals"], "cue_name": "Vocal In", "color": "orange"},
+            ],
+            "loop_segments": [
+                {
+                    "start": 19.5,
+                    "length_beats": 16,
+                    "elements": ["drums"],
+                    "loop_name": "Drum Loop",
+                    "color": "purple",
+                }
+            ],
+        }
+
+        fixed = self.cuer._postprocess_loop_segments(
+            analysis,
+            bpm=120,
+            song_length=120,
+        )
+
+        self.assertEqual(fixed["loop_segments"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -169,7 +169,41 @@ The report writes:
 - `issues.tsv` - likely name/color mismatches and timing-shape review flags
 
 Stem-backed name/color issues are the strongest signal. Tracks without
-`.vdjstems` are limited to mixed-waveform placement review.
+`.vdjstems` are limited to mixed-waveform placement review. When a cue name
+claims a section is a `Drop` or `Breakdown` but the waveform does not show the
+expected energy rise/drop, the audit now includes a concrete fix direction:
+rename the cue when the timing is musically useful but the label is wrong, or
+move the cue when the real drop/breakdown is elsewhere. Rename suggestions
+include labels such as `Rhythm Section`, `Vocal Mix`, or `Synth Section`.
+
+### Curated Cue Fixes
+
+When a cue set is manually reviewed, save the exact corrected POIs as a JSON
+patch under `cue_fixes/`. Apply those corrections without rerunning Gemini:
+
+```bash
+python3 vdj_cue_patch.py --dry-run
+python3 vdj_cue_patch.py
+```
+
+The patcher refuses to write while VirtualDJ is running, creates a timestamped
+backup, validates the replacement XML structure, and reads the patched tracks
+back from the candidate database before replacing `database.xml`.
+
+Use curated patches for obvious manual-review fixes: misleading drop/breakdown
+names, wrong stem-backed colors, or loops labeled drums-only when synth/bass or
+vocals are active. After applying a patch, rerun `cue_visual_audit.py` on the
+track or folder; the goal is for patched tracks to come back with no high-signal
+stem/name/color issues.
+
+### Code Layout
+
+- `automatic_music_cuer_gemini.py` - CLI and backwards-compatible imports
+- `vdj_cuer/` - Gemini analysis, stem handling, beatgrid checks, cue writing, and single/batch processing
+- `cue_visual_audit.py` - CLI and backwards-compatible imports for visual audit reports
+- `vdj_audit/` - database loading, audio envelopes, cue inspection, and report rendering
+- `vdj_cue_patch.py` - curated manual cue correction patches
+- `vdj_database_safety.py` - shared XML/database replacement guard
 
 ### Supported File Formats
 
@@ -184,10 +218,11 @@ The script handles all common audio formats including MP3, FLAC, WAV, and M4A. F
    - Timing of transitions (when elements enter/exit)
    - Loop-friendly sections for DJing
 4. **Stem Validation**: Corrects impossible labels/colors using stem activity, so a section is not marked drums-only if bass or instruments are active
-5. **Beatgrid Verification**: Uses VDJ's BPM as the tempo prior, scores the stored grid against onset energy, applies fine offset correction only with strong kick-stem confidence, and falls back to multi-source bar-phase consensus when the kick stem is silent
-6. **Color Assignment**: Based on detected elements, assigns colors according to the system above
-7. **Database Update**: Safely writes cue points to your VirtualDJ database
-8. **Backup**: Automatically creates timestamped backups before any changes
+5. **Loop Post-processing**: Shortens loops that cross into a clearly different section, and drops loops that cannot fit at least 4 useful beats
+6. **Beatgrid Verification**: Uses VDJ's BPM as the tempo prior, scores the stored grid against onset energy, applies fine offset correction only with strong kick-stem confidence, and falls back to multi-source bar-phase consensus when the kick stem is silent
+7. **Color Assignment**: Based on detected elements, assigns colors according to the system above
+8. **Database Update**: Safely writes cue points to your VirtualDJ database after XML parse, song-count, cue-count, and file-size checks
+9. **Backup**: Automatically creates timestamped backups before any changes
 
 ## What Gets Created
 

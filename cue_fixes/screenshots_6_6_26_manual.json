@@ -1,0 +1,233 @@
+{
+  "description": "Manual cue corrections recovered from audit_reports/screenshots-6-6-26/all_cues.tsv after restoring the full VirtualDJ database.",
+  "tracks": [
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/23. Jennie - Pressure.flac",
+      "source": "audit_reports/screenshots-6-6-26/all_cues.tsv",
+      "comment": "blue orange yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "0.000000",
+          "Num": "1",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Break",
+          "Pos": "16.360000",
+          "Num": "2",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Chorus Synth",
+          "Pos": "54.007162",
+          "Num": "3",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Chorus Synthl",
+          "Pos": "54.007162",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Mixl",
+          "Pos": "75.825210",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "16.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Breakdown",
+          "Pos": "86.734234",
+          "Num": "4",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Chorus 2",
+          "Pos": "124.915818",
+          "Num": "5",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Chorus 3",
+          "Pos": "195.824474",
+          "Num": "6",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Outro Vocal Mixl",
+          "Pos": "228.551546",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "16.0",
+          "Slot": "3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/28. Kane Brown - Last Time I Say Sorry.flac",
+      "source": "audit_reports/screenshots-6-6-26/all_cues.tsv",
+      "comment": "blue orange",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "0.285962",
+          "Num": "1",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocals In",
+          "Pos": "5.559434",
+          "Num": "2",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Verse Vocal",
+          "Pos": "31.926794",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Chorus Vocal",
+          "Pos": "74.114570",
+          "Num": "3",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Breakdown",
+          "Pos": "116.302346",
+          "Num": "4",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Breakdown Buildl",
+          "Pos": "116.302346",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Chorus Vocal 2",
+          "Pos": "137.396234",
+          "Num": "5",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Chorus Vocal Loopl",
+          "Pos": "137.396234",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "3"
+        },
+        {
+          "Type": "cue",
+          "Name": "Outro",
+          "Pos": "179.584010",
+          "Num": "6",
+          "Color": "4294934272"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/04. Adisyn - Sun Kissed Computer.flac",
+      "source": "manual review plus /tmp/vdj_sun_audit generated from current stems",
+      "comment": "green yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro Beats",
+          "Pos": "0.038481",
+          "Num": "1",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Groove",
+          "Pos": "30.758481",
+          "Num": "2",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Mix",
+          "Pos": "61.478481",
+          "Num": "3",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Mixl",
+          "Pos": "61.478481",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section",
+          "Pos": "92.198481",
+          "Num": "4",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Atmosphere",
+          "Pos": "153.638481",
+          "Num": "5",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Atmospherel",
+          "Pos": "153.638481",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section 2",
+          "Pos": "215.078481",
+          "Num": "6",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "loop",
+          "Name": "Outro Rhythm Loopl",
+          "Pos": "337.958481",
+          "Num": "-1",
+          "Color": "4278255360",
+          "Size": "32.0",
+          "Slot": "3"
+        }
+      ]
+    }
+  ]
+}

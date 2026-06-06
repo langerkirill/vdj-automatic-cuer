@@ -29,10 +29,16 @@ class VisualCueAuditTests(unittest.TestCase):
         self.assertIn("outro", issue.lower())
 
     def test_flags_drop_without_energy_rise(self):
-        issue = audit.energy_shape_issue("Main Drop", before_energy=0.8, after_energy=0.85)
+        issue = audit.energy_shape_issue(
+            "Main Drop",
+            before_energy=0.8,
+            after_energy=0.85,
+            elements={"drums", "bass", "synth"},
+        )
 
         self.assertIsNotNone(issue)
         self.assertIn("rise", issue)
+        self.assertIn("Rhythm Section", issue)
 
     def test_no_stems_does_not_claim_missing_vocals_or_drums(self):
         track = audit.Track(
