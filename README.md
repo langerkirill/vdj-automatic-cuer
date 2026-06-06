@@ -50,11 +50,11 @@ For Windows/Linux support, you would need to manually specify the database path.
 Before using this script, be aware of these important requirements:
 
 - **Files must be pre-analyzed**: The audio file needs to have already been analyzed by VirtualDJ (so it exists in the database)
-- **Beat grid required**: The track must have its beat grid aligned in VirtualDJ before running the script
+- **Beat grid required**: The track must have a VirtualDJ beat grid. The script now checks the downbeat phase against audio/kick-stem transients and can correct a clearly shifted "1", but you should still manually review unusual tracks.
 - **Close VirtualDJ before running**: Do not make any edits in VirtualDJ while the script is running, as changes to the database will cause your edits to be lost
 - **Restart required**: You must close and reopen VirtualDJ after running the script for the cue points to appear
 - **Platform compatibility**: Primarily tested on Mac. Windows and Linux compatibility is uncertain and may require additional configuration
-- **Accuracy limitations**: The AI analysis is not always perfect. Always manually review and adjust the generated cue points. Accuracy should improve with future Gemini models (like Gemini 3)
+- **Accuracy limitations**: The AI analysis is not always perfect. Always manually review and adjust the generated cue points. The default model is Gemini 3.1 Pro Preview, which may improve over earlier preview releases but can still have preview-model rate limits.
 - **Long song limitations**: Really long songs (extended mixes, DJ sets) tend to have lower accuracy. The AI performs best on standard-length tracks (up to 6-7 minutes)
 
 ## Color System (My Personal DJ Preferences)
@@ -94,10 +94,10 @@ The comments are automatically added to each cue describing the exact musical el
 
 Before running the setup, make sure you have:
 
-- **Python 3.8 or higher** - Check with `python3 --version`
+- **Python 3.9 or higher** - Check with `python3 --version`
 - **VirtualDJ installed** - The script modifies the VirtualDJ database
 - **VirtualDJ database created** - Run VirtualDJ at least once to create the database
-- **Gemini API key** - Get a free key from [Google AI Studio](https://aistudio.google.com/app/apikey)
+- **Gemini API key** - Get one from [Google AI Studio](https://aistudio.google.com/app/apikey)
 
 ## Setup
 
@@ -112,9 +112,19 @@ The setup script will:
 - Create a Python virtual environment (venv)
 - Install all required dependencies
 - Prompt you to enter your Gemini API key
-- Create a `.env` file with your configuration
+- Create a `.env` file with your API key and default model
 
-**Note**: This uses Python's built-in `venv` (virtual environment), not `pyenv`. No additional tools needed beyond Python 3.8+.
+**Note**: This uses Python's built-in `venv` (virtual environment), not `pyenv`. No additional tools needed beyond Python 3.9+.
+
+### Gemini Model
+
+The default model is `gemini-3.1-pro-preview`. It is the newest Pro model currently listed in the Gemini API docs and supports audio input plus structured JSON output, but it is still a preview model. If it hits rate limits, switch to the latest stable Pro model, `gemini-2.5-pro`, or the newest stable Gemini model overall, `gemini-3.5-flash`.
+
+```bash
+python3 automatic_music_cuer_gemini.py --model gemini-2.5-pro "path/to/song.mp3"
+```
+
+You can also set `GEMINI_MODEL=gemini-2.5-pro` in `.env`.
 
 ## Usage
 
@@ -133,11 +143,33 @@ python3 automatic_music_cuer_gemini.py --dry-run "path/to/song.mp3"
 # Analyze and update VirtualDJ database
 python3 automatic_music_cuer_gemini.py "path/to/song.mp3"
 
+# Force a different Gemini model
+python3 automatic_music_cuer_gemini.py --model gemini-3.5-flash "path/to/song.mp3"
+
 # Process an entire folder (processes 5 songs at a time asynchronously)
 python3 automatic_music_cuer_gemini.py "path/to/folder"
 ```
 
 **Note**: When processing a folder, the script automatically handles multiple files and processes up to 5 songs concurrently for faster analysis.
+
+### Visual Cue Audit
+
+After cueing, generate a read-only visual audit report that overlays every cue on
+the waveform and, when adjacent `.vdjstems` files exist, the separated drum,
+vocal, bass, and instrument lanes:
+
+```bash
+python3 cue_visual_audit.py "path/to/folder" --output audit_reports/my-run
+```
+
+The report writes:
+
+- `index.html` - links to one SVG report per track
+- `all_cues.tsv` - every cue/loop with color, inferred elements, and energy shape
+- `issues.tsv` - likely name/color mismatches and timing-shape review flags
+
+Stem-backed name/color issues are the strongest signal. Tracks without
+`.vdjstems` are limited to mixed-waveform placement review.
 
 ### Supported File Formats
 
@@ -145,14 +177,17 @@ The script handles all common audio formats including MP3, FLAC, WAV, and M4A. F
 
 ## How It Works
 
-1. **Upload**: Sends your audio file to Gemini AI
-2. **Analysis**: Gemini listens to the entire track and identifies:
+1. **Stem Check**: Uses adjacent VirtualDJ `.vdjstems` files when available
+2. **Upload**: Sends your audio file, and available VDJ stems, to Gemini AI
+3. **Analysis**: Gemini listens to the entire track and identifies:
    - Musical elements (drums, bass, vocals, synth, piano)
    - Timing of transitions (when elements enter/exit)
    - Loop-friendly sections for DJing
-3. **Color Assignment**: Based on detected elements, assigns colors according to the system above
-4. **Database Update**: Safely writes cue points to your VirtualDJ database
-5. **Backup**: Automatically creates timestamped backups before any changes
+4. **Stem Validation**: Corrects impossible labels/colors using stem activity, so a section is not marked drums-only if bass or instruments are active
+5. **Beatgrid Verification**: Uses VDJ's BPM as the tempo prior, scores the stored grid against onset energy, applies fine offset correction only with strong kick-stem confidence, and falls back to multi-source bar-phase consensus when the kick stem is silent
+6. **Color Assignment**: Based on detected elements, assigns colors according to the system above
+7. **Database Update**: Safely writes cue points to your VirtualDJ database
+8. **Backup**: Automatically creates timestamped backups before any changes
 
 ## What Gets Created
 
@@ -200,6 +235,8 @@ After running the script:
 
 - **Automatic Backups**: Creates timestamped backup before every change
 - **Dry-Run Mode**: Preview changes without modifying database
+- **VirtualDJ Process Guard**: Refuses real database writes while VirtualDJ is running
+- **Beatgrid Downbeat Check**: Verifies cue snapping against audio transients and persists confident fine-offset or whole-beat downbeat corrections
 - **XML Validation**: Validates database integrity before saving
 - **Atomic Writes**: Uses temporary files to prevent corruption
 - **Retry Logic**: Handles network errors gracefully with automatic retries
@@ -208,8 +245,9 @@ After running the script:
 
 ### "GEMINI_API_KEY not found"
 
-- Ensure `.env` file exists in `claude_scripts` directory
+- Ensure `.env` file exists in this repository directory
 - Check that API key is correctly formatted: `GEMINI_API_KEY=AIza...`
+- Check that `GEMINI_MODEL` is set to a model your API key can access, such as `gemini-3.1-pro-preview` or `gemini-2.5-pro`
 
 ### "Database not found"
 
@@ -248,7 +286,7 @@ Successfully updated VDJ database with cues and loops
 
 ## Customization
 
-To modify the color system for your preferences, edit the `color_mappings` dictionary in [automatic_music_cuer_gemini.py](automatic_music_cuer_gemini.py:96):
+To modify the color system for your preferences, edit the `color_mappings` dictionary in [automatic_music_cuer_gemini.py](automatic_music_cuer_gemini.py):
 
 ```python
 self.color_mappings = {
@@ -258,4 +296,4 @@ self.color_mappings = {
 }
 ```
 
-And update the color rules in the Gemini prompt (lines 222-227).
+And update the color rules in the Gemini prompt.

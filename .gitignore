@@ -25,6 +25,7 @@ Thumbs.db
 
 # Test files
 test_*.py
+!tests/test_*.py
 *.mp3
 *.m4a
 *.flac
@@ -32,3 +33,7 @@ test_*.py
 
 # Backup files
 *.backup.*
+
+# Generated cue audit reports
+audit_reports/
+cue_visual_audit/
