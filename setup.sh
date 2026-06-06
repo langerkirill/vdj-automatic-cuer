@@ -7,16 +7,16 @@ echo ""
 # Check for Python 3
 if ! command -v python3 &> /dev/null; then
     echo "❌ Python 3 is not installed."
-    echo "Please install Python 3.8 or higher from https://www.python.org/downloads/"
+    echo "Please install Python 3.9 or higher from https://www.python.org/downloads/"
     exit 1
 fi
 
-# Check Python version (requires 3.8+)
+# Check Python version (requires 3.9+)
 python_version=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
-required_version="3.8"
+required_version="3.9"
 
 if [ "$(printf '%s\n' "$required_version" "$python_version" | sort -V | head -n1)" != "$required_version" ]; then
-    echo "❌ Python $python_version found, but Python 3.8 or higher is required."
+    echo "❌ Python $python_version found, but Python 3.9 or higher is required."
     echo "Please upgrade Python from https://www.python.org/downloads/"
     exit 1
 fi
@@ -65,7 +65,8 @@ fi
 
 echo "🔑 Setting up Gemini API key..."
 echo ""
-echo "Get your free API key from: https://aistudio.google.com/app/apikey"
+echo "Get your API key from: https://aistudio.google.com/app/apikey"
+echo "Default model: gemini-3.1-pro-preview."
 echo ""
 read -p "Enter your Gemini API key: " api_key
 
@@ -75,6 +76,7 @@ if [ -z "$api_key" ]; then
 fi
 
 echo "GEMINI_API_KEY=$api_key" > .env
+echo "GEMINI_MODEL=gemini-3.1-pro-preview" >> .env
 echo "✅ .env file created"
 echo ""
 

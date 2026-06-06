@@ -1,23 +1,98 @@
 #!/usr/bin/env python3
 """
 Automatic Music Cueing System for VirtualDJ
-Uses Google Gemini Pro 2.0 to analyze music files and generate intelligent
+Uses Google Gemini Pro to analyze music files and generate intelligent
 cues and loops
 """
 
 import os
 import json
+import math
+import re
 import shutil
+import subprocess
+import struct
+import tempfile
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from datetime import datetime
 import argparse
-import google.generativeai as genai
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple, Type
 from dotenv import load_dotenv
 import html
 from pydantic import BaseModel
+from google import genai
+from google.genai import types
 import asyncio
 import time
+
+
+DEFAULT_GEMINI_MODEL = "gemini-3.1-pro-preview"
+DEFAULT_UPLOAD_RETRIES = 5
+DEFAULT_ANALYSIS_RETRIES = 3
+VDJ_STEM_NAMES = ("vocal", "hihat", "bass", "instruments", "kick")
+BEATGRID_ALIGNMENT_DURATION_SECONDS = 90
+BEATGRID_ALIGNMENT_SAMPLE_RATE = 8000
+BEATGRID_ALIGNMENT_FRAME_SECONDS = 0.04
+BEATGRID_ALIGNMENT_HOP_SECONDS = 0.01
+BEATGRID_FINE_ALIGNMENT_STEP_SECONDS = 0.01
+BEATGRID_FINE_ALIGNMENT_MIN_SCORE = 0.05
+BEATGRID_FINE_ALIGNMENT_MIN_GAIN = 0.04
+BEATGRID_FINE_ALIGNMENT_MIN_RATIO = 2.5
+BEATGRID_FINE_ALIGNMENT_MIN_SHIFT_SECONDS = 0.08
+BEATGRID_PHASE_SOURCE_MIN_SCORE = 0.02
+BEATGRID_PHASE_CONSENSUS_MIN_SOURCES = 2
+BEATGRID_PHASE_CONSENSUS_MIN_RATIO = 2.0
+BEATGRID_PHASE_CONSENSUS_MIN_GAIN = 0.04
+
+NETWORK_ERROR_TERMS = (
+    "ssl",
+    "connection",
+    "network",
+    "broken pipe",
+    "timeout",
+    "reset",
+    "errno 32",
+)
+
+RETRYABLE_API_ERROR_TERMS = NETWORK_ERROR_TERMS + (
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "internal error",
+    "unavailable",
+    "resource exhausted",
+    "quota",
+    "rate limit",
+    "too many requests",
+)
+
+
+@dataclass
+class BeatgridAlignment:
+    """Verified beatgrid offset and confidence metadata."""
+
+    offset: float
+    shift_beats: int = 0
+    corrected: bool = False
+    confidence_ratio: float = 1.0
+    phase_scores: Dict[int, float] = field(default_factory=dict)
+    source: str = "database"
+    fine_shift_seconds: float = 0.0
+    beat_score: float = 0.0
+    best_beat_score: float = 0.0
+
+
+class StemActivity(BaseModel):
+    """Per-stem activity around a cue or loop."""
+
+    vocal: Optional[str] = None
+    hihat: Optional[str] = None
+    bass: Optional[str] = None
+    instruments: Optional[str] = None
+    kick: Optional[str] = None
 
 
 class MeasureChange(BaseModel):
@@ -27,6 +102,7 @@ class MeasureChange(BaseModel):
     elements: List[str]
     cue_name: str
     color: str
+    stem_activity: Optional[StemActivity] = None
 
 
 class LoopSegment(BaseModel):
@@ -37,6 +113,7 @@ class LoopSegment(BaseModel):
     elements: List[str]
     loop_name: str
     color: str
+    stem_activity: Optional[StemActivity] = None
 
 
 class MusicAnalysis(BaseModel):
@@ -44,6 +121,12 @@ class MusicAnalysis(BaseModel):
 
     measure_changes: List[MeasureChange]
     loop_segments: List[LoopSegment]
+
+
+class BatchMusicAnalysis(BaseModel):
+    """Complete batch music analysis response from Gemini"""
+
+    analyses: List[MusicAnalysis]
 
 
 class AutomaticMusicCuer:
@@ -71,7 +154,12 @@ class AutomaticMusicCuer:
 
         return sanitized.strip()
 
-    def __init__(self, gemini_api_key: str = None, vdj_database_path: str = None):
+    def __init__(
+        self,
+        gemini_api_key: Optional[str] = None,
+        vdj_database_path: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ):
         """Initialize the automatic music cuer with Gemini Pro API"""
         # Load API key from .env file if not provided
         if gemini_api_key is None:
@@ -81,8 +169,9 @@ class AutomaticMusicCuer:
                 raise ValueError("GEMINI_API_KEY not found in environment or .env file")
 
         self.gemini_api_key = gemini_api_key
-        genai.configure(api_key=gemini_api_key)
-        self.model = genai.GenerativeModel("gemini-2.5-pro")
+        self.model_name = model_name or os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+        self.client = genai.Client(api_key=gemini_api_key)
+        self._beatgrid_alignment_cache: Dict[Tuple[str, float], BeatgridAlignment] = {}
 
         # Default VDJ database path
         if vdj_database_path is None:
@@ -102,7 +191,7 @@ class AutomaticMusicCuer:
             "orange": "4294934272",  # Orange - vocal only (0xffff7f00)
         }
 
-        print("🎵 Automatic Music Cuer initialized with Gemini")
+        print(f"🎵 Automatic Music Cuer initialized with Gemini model: {self.model_name}")
         print(f"📁 VDJ Database: {self.vdj_database_path}")
 
     def backup_database(self) -> str:
@@ -113,65 +202,396 @@ class AutomaticMusicCuer:
         print(f"✅ Database backed up to: {backup_path}")
         return backup_path
 
-    def analyze_audio_with_gemini(self, audio_file_path: str) -> Dict:
+    @staticmethod
+    def is_virtualdj_running() -> bool:
+        """Return True when a VirtualDJ process appears to be active."""
+        try:
+            result = subprocess.run(
+                ["pgrep", "-fl", "VirtualDJ|virtualdj"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception:
+            return False
+
+        if result.returncode != 0:
+            return False
+
+        return any("virtualdj" in line.lower() for line in result.stdout.splitlines())
+
+    @staticmethod
+    def _is_retryable_error(error: Exception, terms=RETRYABLE_API_ERROR_TERMS) -> bool:
+        """Return True for temporary network/server failures worth retrying."""
+        error_text = str(error).lower()
+        return any(term in error_text for term in terms)
+
+    def _upload_audio_file(self, audio_file_path: str):
+        """Upload an audio file once using the current Gemini client."""
+        upload_path = audio_file_path
+        temp_upload_path = None
+
+        try:
+            os.path.basename(audio_file_path).encode("ascii")
+        except UnicodeEncodeError:
+            suffix = os.path.splitext(audio_file_path)[1] or ".audio"
+            with tempfile.NamedTemporaryFile(
+                prefix="vdj_upload_", suffix=suffix, delete=False
+            ) as temp_file:
+                temp_upload_path = temp_file.name
+            shutil.copy2(audio_file_path, temp_upload_path)
+            upload_path = temp_upload_path
+
+        try:
+            return self.client.files.upload(file=upload_path)
+        finally:
+            if temp_upload_path and os.path.exists(temp_upload_path):
+                os.remove(temp_upload_path)
+
+    def _upload_audio_file_with_retry(
+        self, audio_file_path: str, max_retries: int = DEFAULT_UPLOAD_RETRIES
+    ):
+        """Upload a single audio file with retry handling."""
+        audio_file = None
+        for upload_retry in range(max_retries):
+            try:
+                audio_file = self._upload_audio_file(audio_file_path)
+                print("✅ Upload complete")
+                return audio_file
+            except Exception as upload_e:
+                if self._is_retryable_error(upload_e, NETWORK_ERROR_TERMS) and (
+                    upload_retry < max_retries - 1
+                ):
+                    wait_time = min((upload_retry + 1) * 2, 30)
+                    print(
+                        f"⚠️  Upload failed (attempt "
+                        f"{upload_retry + 1}/{max_retries}): {upload_e}"
+                    )
+                    print(f"🔄 Retrying upload in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    continue
+                raise
+
+        return audio_file
+
+    @staticmethod
+    def _find_vdj_stems_file(audio_file_path: str) -> Optional[str]:
+        """Return the adjacent VDJ stems file path when it exists."""
+        stems_path = f"{audio_file_path}.vdjstems"
+        return stems_path if os.path.exists(stems_path) else None
+
+    @staticmethod
+    def _probe_vdj_stem_streams(vdj_stems_path: str) -> List[Tuple[str, int]]:
+        """Read named audio streams from a VDJ stems Matroska file."""
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_streams",
+                "-select_streams",
+                "a",
+                vdj_stems_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        probe_data = json.loads(result.stdout)
+        streams = []
+
+        for stream in probe_data.get("streams", []):
+            title = stream.get("tags", {}).get("title", "").lower()
+            index = stream.get("index")
+            if title in VDJ_STEM_NAMES and index is not None:
+                streams.append((title, index))
+
+        return streams
+
+    def _extract_vdj_stems(
+        self, vdj_stems_path: str, output_dir: str
+    ) -> List[Tuple[str, str]]:
+        """Extract VDJ stem streams into small AAC files for model upload."""
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            print("⚠️  ffmpeg/ffprobe not found; skipping VDJ stem upload")
+            return []
+
+        stem_streams = self._probe_vdj_stem_streams(vdj_stems_path)
+        extracted_files = []
+
+        for stem_name, stream_index in stem_streams:
+            output_path = os.path.join(output_dir, f"{stem_name}.m4a")
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    vdj_stems_path,
+                    "-map",
+                    f"0:{stream_index}",
+                    "-c:a",
+                    "copy",
+                    output_path,
+                ],
+                check=True,
+            )
+            extracted_files.append((stem_name, output_path))
+
+        return extracted_files
+
+    def _prepare_vdj_stems_with_retry(
+        self, audio_file_path: str
+    ) -> Tuple[List[Tuple[str, object]], List[Tuple[str, str]], Optional[str]]:
+        """Extract and upload adjacent VDJ stem files when available."""
+        vdj_stems_path = self._find_vdj_stems_file(audio_file_path)
+        if not vdj_stems_path:
+            return [], [], None
+
+        print(f"🧬 Found VDJ stems: {os.path.basename(vdj_stems_path)}")
+        temp_dir = tempfile.mkdtemp(prefix="vdj-stems-")
+
+        try:
+            extracted_stems = self._extract_vdj_stems(vdj_stems_path, temp_dir)
+            uploaded_stems = []
+
+            for stem_name, stem_path in extracted_stems:
+                file_size = os.path.getsize(stem_path) / (1024 * 1024)
+                print(f"📤 Uploading {stem_name} stem ({file_size:.1f} MB)...")
+                uploaded_stems.append(
+                    (stem_name, self._upload_audio_file_with_retry(stem_path))
+                )
+
+            if uploaded_stems:
+                print(f"✅ Uploaded {len(uploaded_stems)} VDJ stem files")
+            return uploaded_stems, extracted_stems, temp_dir
+        except Exception as e:
+            print(f"⚠️  Could not use VDJ stems for {os.path.basename(audio_file_path)}: {e}")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return [], [], None
+
+    def _upload_vdj_stems_with_retry(self, audio_file_path: str) -> List[Tuple[str, object]]:
+        """Upload adjacent VDJ stem files, then clean local temporary files."""
+        stem_uploads, _, temp_dir = self._prepare_vdj_stems_with_retry(audio_file_path)
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        return stem_uploads
+
+    @staticmethod
+    def _stem_upload_prompt(stem_uploads: List[Tuple[str, object]]) -> str:
+        """Describe uploaded stem files and their order for Gemini."""
+        if not stem_uploads:
+            return (
+                "Only the original full mix is uploaded. Infer elements from the "
+                "full mix, then follow the strict label/color rules."
+            )
+
+        stem_lines = [
+            f"- Uploaded file {index + 2}: isolated {stem_name} stem"
+            for index, (stem_name, _) in enumerate(stem_uploads)
+        ]
+        return "\n".join(
+            [
+                "Uploaded audio files:",
+                "- Uploaded file 1: original full mix",
+                *stem_lines,
+                "",
+                "Use the isolated stems as evidence for element presence. For every",
+                "cue and loop, set stem_activity for vocal, hihat, bass, instruments,",
+                "and kick to one of: none, low, medium, high.",
+            ]
+        )
+
+    @staticmethod
+    def _volume_to_activity(mean_volume_db: Optional[float]) -> str:
+        """Map ffmpeg volumedetect mean volume to a coarse activity level."""
+        if mean_volume_db is None:
+            return "none"
+        if mean_volume_db > -25:
+            return "high"
+        if mean_volume_db > -38:
+            return "medium"
+        if mean_volume_db > -50:
+            return "low"
+        return "none"
+
+    @staticmethod
+    def _measure_mean_volume(
+        audio_file_path: str, timestamp: float, duration_seconds: float = 4.0
+    ) -> Optional[float]:
+        """Measure mean volume around a timestamp using ffmpeg volumedetect."""
+        start = max(float(timestamp) - (duration_seconds / 2), 0.0)
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostats",
+                "-ss",
+                f"{start:.3f}",
+                "-t",
+                f"{duration_seconds:.3f}",
+                "-i",
+                audio_file_path,
+                "-af",
+                "volumedetect",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        match = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?) dB", result.stderr)
+        return float(match.group(1)) if match else None
+
+    def _measure_stem_activity(
+        self, stem_files: List[Tuple[str, str]], timestamp: float
+    ) -> Dict:
+        """Measure activity for every extracted stem near a timestamp."""
+        activity = {}
+        for stem_name, stem_path in stem_files:
+            mean_volume = self._measure_mean_volume(stem_path, timestamp)
+            activity[stem_name] = self._volume_to_activity(mean_volume)
+        return activity
+
+    def _apply_measured_stem_activity(
+        self, analysis_data: Dict, stem_files: List[Tuple[str, str]]
+    ) -> Dict:
+        """Replace model-reported stem activity with measured stem activity."""
+        if not stem_files:
+            return analysis_data
+
+        for cue_data in analysis_data.get("measure_changes", []):
+            timestamp = cue_data.get("timestamp")
+            if timestamp is not None:
+                cue_data["stem_activity"] = self._measure_stem_activity(
+                    stem_files, float(timestamp)
+                )
+
+        for loop_data in analysis_data.get("loop_segments", []):
+            timestamp = loop_data.get("start")
+            if timestamp is not None:
+                loop_data["stem_activity"] = self._measure_stem_activity(
+                    stem_files, float(timestamp)
+                )
+
+        return analysis_data
+
+    @staticmethod
+    def _parse_json_response(response_text: str) -> Dict:
+        """Parse Gemini JSON while normalizing overly precise decimal output."""
+        cleaned_text = re.sub(
+            r"(\d+\.\d{10,})",
+            lambda m: f"{float(m.group(1)):.2f}",
+            response_text,
+        )
+        return json.loads(cleaned_text)
+
+    @staticmethod
+    def _round_analysis_timestamps(analysis_data: Dict) -> Dict:
+        """Normalize cue and loop timestamps to two decimal places."""
+        if "measure_changes" in analysis_data:
+            for cue in analysis_data["measure_changes"]:
+                if "timestamp" in cue:
+                    cue["timestamp"] = round(float(cue["timestamp"]), 2)
+
+        if "loop_segments" in analysis_data:
+            for loop in analysis_data["loop_segments"]:
+                if "start" in loop:
+                    loop["start"] = round(float(loop["start"]), 2)
+
+        return analysis_data
+
+    def _generate_json_content(
+        self,
+        contents: List[object],
+        schema: Type[BaseModel],
+        timeout_seconds: int,
+        max_retries: int = DEFAULT_ANALYSIS_RETRIES,
+    ) -> Dict:
+        """Call Gemini with structured JSON output and retry temporary failures."""
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_json_schema=schema.model_json_schema(),
+            http_options=types.HttpOptions(timeout=timeout_seconds * 1000),
+        )
+
+        for analysis_retry in range(max_retries):
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=contents,
+                    config=config,
+                )
+                if not response or not response.text:
+                    raise ValueError("Empty response from Gemini")
+                return self._parse_json_response(response.text)
+            except Exception as analysis_e:
+                if self._is_retryable_error(analysis_e) and (
+                    analysis_retry < max_retries - 1
+                ):
+                    wait_time = min((analysis_retry + 1) * 3, 30)
+                    print(
+                        f"⚠️  Analysis failed (attempt "
+                        f"{analysis_retry + 1}/{max_retries}): {analysis_e}"
+                    )
+                    print(f"🔄 Retrying analysis in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    continue
+
+                print(f"⚠️  Gemini API error: {analysis_e}")
+                raise
+
+        raise RuntimeError("Failed to get analysis response after retries")
+
+    def _generate_music_analysis(
+        self,
+        prompt: str,
+        audio_file,
+        stem_uploads: Optional[List[Tuple[str, object]]] = None,
+        stem_files: Optional[List[Tuple[str, str]]] = None,
+    ) -> Dict:
+        """Generate and normalize structured analysis for one uploaded file."""
+        stem_uploads = stem_uploads or []
+        stem_files = stem_files or []
+        analysis_data = self._generate_json_content(
+            contents=[prompt, audio_file] + [uploaded for _, uploaded in stem_uploads],
+            schema=MusicAnalysis,
+            timeout_seconds=180,
+        )
+        analysis_data = self._apply_measured_stem_activity(analysis_data, stem_files)
+        return self._normalize_analysis_data(analysis_data)
+
+    def analyze_audio_with_gemini(self, audio_file_path: str, uploaded_file=None) -> Dict:
         """Send audio file to Gemini Pro for musical analysis"""
         print(f"🔍 Analyzing {os.path.basename(audio_file_path)} with Gemini...")
 
         # Get song length for validation
         song_length = self.get_song_length(audio_file_path) or 300  # fallback to 5 min
 
-        # Retry logic for temporary failures
-        max_retries = 3
-        retry_count = 0
-
-        while retry_count < max_retries:
-            try:
-                # Upload audio file to Gemini with retry logic
+        try:
+            # Upload only when the caller has not already uploaded this file.
+            audio_file = uploaded_file
+            if audio_file is None:
                 print(
                     f"📤 Uploading audio file "
                     f"({os.path.getsize(audio_file_path) / 1024 / 1024:.1f} MB)..."
                 )
+                audio_file = self._upload_audio_file_with_retry(audio_file_path)
+            else:
+                print(f"📎 Reusing uploaded file for {os.path.basename(audio_file_path)}")
 
-                # Retry upload up to 5 times for network issues
-                audio_file = None
-                upload_retries = 5
-                for upload_retry in range(upload_retries):
-                    try:
-                        audio_file = genai.upload_file(audio_file_path)
-                        print("✅ Upload complete")
-                        break
-                    except Exception as upload_e:
-                        error_str = str(upload_e).lower()
-                        is_network_error = any(
-                            term in error_str
-                            for term in [
-                                "ssl",
-                                "connection",
-                                "network",
-                                "broken pipe",
-                                "timeout",
-                                "reset",
-                            ]
-                        )
+            stem_uploads, stem_files, stem_temp_dir = self._prepare_vdj_stems_with_retry(
+                audio_file_path
+            )
+            try:
+                stem_prompt = self._stem_upload_prompt(stem_uploads)
 
-                        if is_network_error and upload_retry < upload_retries - 1:
-                            wait_time = (upload_retry + 1) * 2  # 2s, 4s, 6s, 8s delays
-                            print(
-                                f"⚠️  Upload failed (attempt "
-                                f"{upload_retry + 1}/{upload_retries}): {upload_e}"
-                            )
-                            print(f"🔄 Retrying upload in {wait_time} seconds...")
-                            time.sleep(wait_time)
-                        else:
-                            raise upload_e
-
-                if not audio_file:
-                    raise Exception(
-                        f"Failed to upload {audio_file_path} "
-                        f"after {upload_retries} attempts"
-                    )
-
-                # Create prompt for JSON response with more specific instructions
                 prompt = f"""
                 You are analyzing a DJ track for precise cue point placement.
                 Listen to the ENTIRE audio file carefully.
@@ -180,232 +600,134 @@ class AutomaticMusicCuer:
                 - Length: {song_length:.1f} seconds
                 - BPM: {self.get_song_bpm_from_database(audio_file_path) or 'Unknown'}
                 - File: {os.path.basename(audio_file_path)}
-                
+
+                {stem_prompt}
+
                 CRITICAL TIMING INSTRUCTIONS:
-                1. Listen to the actual audio - do NOT make assumptions based on
-                   filename
-                2. Pay attention to when elements ACTUALLY start/stop, not when you
-                   think they should
-                3. For vocals, listen for actual singing voices, not just
-                   background sounds
+                1. Listen to the actual audio - do NOT make assumptions based on filename
+                2. Pay attention to when elements ACTUALLY start/stop, not when you think
+                   they should
+                3. For vocals, listen for actual singing voices, not just background sounds
                 4. For drums, identify when the kick/snare pattern begins, not just
                    percussion
-                5. Be very conservative - only mark transitions where you clearly
-                   hear changes
-                
+                5. Be very conservative - only mark transitions where you clearly hear
+                   changes
+
                 Find 5-6 significant musical changes where elements ACTUALLY change:
                 - Real intro (before main elements start)
                 - When drums ACTUALLY enter (not just percussion)
                 - When vocals ACTUALLY start singing (not just vocal sounds)
                 - Breakdown sections (where elements drop out)
                 - Drops/build-ups (energy changes)
-                
+
                 Find 3 loop sections for DJing (16-32 beats long).
                 IMPORTANT: Try to find ALL THREE types:
-                1. DRUM LOOP (highest priority): A section with ONLY
-                   drums/percussion, no melody, no vocals - perfect for DJ
-                   transitions
-                2. VOCAL LOOP: A section with prominent vocals (with or without
-                   other elements) - great for crowd engagement
-                3. MELODIC LOOP: A section with melody (synth/piano/guitar) but NO
-                   drums and NO vocals - for smooth transitions
-                
+                1. DRUM LOOP (highest priority): A section with ONLY drums/percussion,
+                   no melody, no vocals - perfect for DJ transitions
+                2. VOCAL LOOP: A section with prominent vocals (with or without other
+                   elements) - great for crowd engagement
+                3. MELODIC LOOP: A section with melody (synth/piano/guitar) but NO drums
+                   and NO vocals - for smooth transitions
+
                 Search the ENTIRE track to find these three distinct loop types.
                 DJs need variety!
-                
+
                 Element Detection:
                 - drums: Kick/snare patterns, not just hi-hats
                 - vocals: Actual singing/rapping, not just vocal effects
                 - bass: Prominent bassline
                 - synth/piano: Melodic elements
-                
+                - Include every clearly audible element. If bass, synth, vocals, pads,
+                  or effects are audible during a drum section, it is NOT drums-only.
+
+                Strict Label Rules:
+                - Only use "Melodic" or "Melody" in a name when there is a clear
+                  foreground melody and NO audible drums or vocals.
+                - Bass alone, pads, texture, atmosphere, or filtered chord wash are
+                  NOT enough to call a section melodic. Name those by the actual
+                  element instead, like "Bass Break" or "Synth Break".
+                - Only use "Drum", "Drums", or "Percussion" in a name when drums are
+                  isolated and no bass, synth, melody, vocal, pad, or tonal element is
+                  audible.
+                - If a section has drums plus other elements, use neutral names like
+                  "Rhythm Section", "Groove", "Build", "Drop", or "Outro".
+                - If you are uncertain whether other elements are present, include
+                  those elements and avoid "drums-only" or "melodic-only" names/colors.
+
                 Color Rules (be strict):
                 - blue: Only melody, NO drums, NO vocals
-                - green: Melody + drums, NO vocals  
+                - green: Melody + drums, NO vocals
                 - yellow: Full mix (drums + melody + vocals)
                 - purple: Only drums/percussion
                 - orange: Melody + vocals, NO drums
-                
+
                 RESPONSE FORMAT REQUIREMENTS:
                 - All timestamps must be rounded to 2 decimal places (e.g., 45.67)
                 - Each cue must have: timestamp, elements (array), cue_name (string),
-                  color (string)
+                  color (string), stem_activity (object)
                 - Each loop must have: start, length_beats, elements (array),
-                  loop_name (string), color (string)
+                  loop_name (string), color (string), stem_activity (object)
+                - stem_activity must include vocal, hihat, bass, instruments, and kick,
+                  each set to one of: none, low, medium, high
                 - Use descriptive names like "Intro", "Drums In", "Vocal Drop",
                   "Build Up", "Breakdown"
                 - NEVER use extremely long decimal numbers
-                
+
                 IMPORTANT: If you're not 100% sure about timing, be conservative and
                 don't add that cue.
-                
+
                 LOOP REQUIREMENTS:
                 - You MUST search for all 3 loop types (drum, vocal, melodic)
-                - Even if a track is mostly instrumental, find the best vocal
-                  section you can
-                - Even if a track has constant drums, find a drum-only break
-                  somewhere
-                - Prioritize quality over quantity - find the BEST example of each
-                  loop type
+                - Even if a track is mostly instrumental, find the best vocal section
+                  you can
+                - Even if a track has constant drums, find a drum-only break somewhere
+                - Prioritize quality over quantity - find the BEST example of each loop
+                  type
                 """
 
-                # Generate content with structured output and retry logic
                 print("🤖 Analyzing audio with Gemini...")
-                response = None
-                analysis_retries = 3
-                for analysis_retry in range(analysis_retries):
-                    try:
-                        response = self.model.generate_content(
-                            contents=[prompt, audio_file],
-                            generation_config=genai.GenerationConfig(
-                                response_mime_type="application/json",
-                                response_schema=MusicAnalysis,
-                                temperature=0.1,  # Low temp for consistency
-                            ),
-                            request_options={
-                                "timeout": 180
-                            },  # 3 minute timeout for slow connections
-                        )
-                        break
-                    except Exception as analysis_e:
-                        error_str = str(analysis_e).lower()
-                        is_retryable_error = any(
-                            term in error_str
-                            for term in [
-                                "ssl",
-                                "connection",
-                                "network",
-                                "broken pipe",
-                                "timeout",
-                                "reset",
-                                "internal error",
-                            ]
-                        )
-
-                        if is_retryable_error and analysis_retry < analysis_retries - 1:
-                            wait_time = (analysis_retry + 1) * 3  # 3s, 6s delays
-                            print(
-                                f"⚠️  Analysis failed (attempt "
-                                f"{analysis_retry + 1}/{analysis_retries}): "
-                                f"{analysis_e}"
-                            )
-                            print(f"🔄 Retrying analysis in {wait_time} seconds...")
-                            time.sleep(wait_time)
-                        else:
-                            print(f"⚠️  Gemini API error: {analysis_e}")
-                            raise analysis_e
-
-                if not response:
-                    raise Exception("Failed to get analysis response after retries")
-
-                # Parse structured JSON response
-                try:
-                    # With structured output, we should get clean JSON directly
-                    raw_text = response.text
-
-                    # Clean up any malformed numbers (extremely long decimals)
-                    import re
-
-                    # Replace extremely long decimal numbers with reasonable precision
-                    cleaned_text = re.sub(
-                        r"(\d+\.\d{10,})",
-                        lambda m: f"{float(m.group(1)):.2f}",
-                        raw_text,
-                    )
-
-                    analysis_data = json.loads(cleaned_text)
-
-                    # Round all timestamps to 2 decimal places
-                    if "measure_changes" in analysis_data:
-                        for cue in analysis_data["measure_changes"]:
-                            if "timestamp" in cue:
-                                cue["timestamp"] = round(float(cue["timestamp"]), 2)
-
-                    if "loop_segments" in analysis_data:
-                        for loop in analysis_data["loop_segments"]:
-                            if "start" in loop:
-                                loop["start"] = round(float(loop["start"]), 2)
-
-                    print(
-                        f"✅ Analysis complete: "
-                        f"{len(analysis_data.get('measure_changes', []))} cues, "
-                        f"{len(analysis_data.get('loop_segments', []))} loops"
-                    )
-
-                    # Debug: Show raw Gemini response
-                    print("\n🔍 DEBUG - Raw Gemini response:")
-                    print(f"  Response text: {response.text[:500]}...")
-
-                    print("\n🔍 DEBUG - Structured output timestamps:")
-                    for i, cue in enumerate(
-                        analysis_data.get("measure_changes", []), 1
-                    ):
-                        print(
-                            f"  Cue {i}: {cue.get('cue_name', 'unnamed')} at "
-                            f"{cue.get('timestamp', 0)}s - "
-                            f"{cue.get('elements', [])} - Color: "
-                            f"{cue.get('color', 'none')}"
-                        )
-                    for i, loop in enumerate(analysis_data.get("loop_segments", []), 1):
-                        print(
-                            f"  Loop {i}: {loop.get('loop_name', 'unnamed')} at "
-                            f"{loop.get('start', 0)}s "
-                            f"({loop.get('length_beats', 0)} beats) - Color: "
-                            f"{loop.get('color', 'none')}"
-                        )
-                    print()
-
-                    return analysis_data
-
-                except json.JSONDecodeError as e:
-                    print(f"❌ Failed to parse structured JSON response: {e}")
-                    print(f"Raw response: {response.text}")
-                    return None
-
-            except Exception as e:
-                retry_count += 1
-                error_str = str(e).lower()
-                # Check for retryable errors
-                # (server errors, SSL issues, timeouts)
-                is_retryable = any(
-                    term in error_str
-                    for term in [
-                        "500",
-                        "502",
-                        "503",
-                        "504",
-                        "internal error",
-                        "ssl",
-                        "timeout",
-                        "connection",
-                        "network",
-                    ]
+                analysis_data = self._generate_music_analysis(
+                    prompt, audio_file, stem_uploads, stem_files
                 )
+            finally:
+                if stem_temp_dir:
+                    shutil.rmtree(stem_temp_dir, ignore_errors=True)
 
-                if is_retryable:
-                    if retry_count < max_retries:
-                        print(
-                            f"⚠️  Temporary error (attempt "
-                            f"{retry_count}/{max_retries}): {e}"
-                        )
-                        print(f"🔄 Retrying in {retry_count * 3} seconds...")
-                        time.sleep(retry_count * 3)  # Increasing delay
-                        continue
-                    else:
-                        print(
-                            f"❌ Max retries ({max_retries}) reached. "
-                            f"Gemini API unavailable."
-                        )
-                        return None
-                else:
-                    import traceback
+            print(
+                f"✅ Analysis complete: "
+                f"{len(analysis_data.get('measure_changes', []))} cues, "
+                f"{len(analysis_data.get('loop_segments', []))} loops"
+            )
 
-                    print(f"❌ Error analyzing audio with Gemini: {e}")
-                    print("🔍 Full traceback:")
-                    traceback.print_exc()
-                    return None
+            print("\n🔍 DEBUG - Structured output timestamps:")
+            for i, cue in enumerate(analysis_data.get("measure_changes", []), 1):
+                print(
+                    f"  Cue {i}: {cue.get('cue_name', 'unnamed')} at "
+                    f"{cue.get('timestamp', 0)}s - "
+                    f"{cue.get('elements', [])} - Color: "
+                    f"{cue.get('color', 'none')}"
+                )
+            for i, loop in enumerate(analysis_data.get("loop_segments", []), 1):
+                print(
+                    f"  Loop {i}: {loop.get('loop_name', 'unnamed')} at "
+                    f"{loop.get('start', 0)}s "
+                    f"({loop.get('length_beats', 0)} beats) - Color: "
+                    f"{loop.get('color', 'none')}"
+                )
+            print()
 
-        return None
+            return analysis_data
+
+        except json.JSONDecodeError as e:
+            print(f"❌ Failed to parse structured JSON response: {e}")
+            return None
+        except Exception as e:
+            import traceback
+
+            print(f"❌ Error analyzing audio with Gemini: {e}")
+            print("🔍 Full traceback:")
+            traceback.print_exc()
+            return None
 
     def get_song_bpm_from_database(self, file_path: str) -> Optional[float]:
         """Extract BPM from VDJ database for timing validation"""
@@ -509,6 +831,235 @@ class AutomaticMusicCuer:
         else:
             # Fallback to Gemini's suggestion
             return gemini_color
+
+    @staticmethod
+    def _has_drums(elements: List[str]) -> bool:
+        return any(elem in elements for elem in ["drums", "percussion"])
+
+    @staticmethod
+    def _has_vocals(elements: List[str]) -> bool:
+        return "vocals" in elements
+
+    @staticmethod
+    def _melodic_elements(elements: List[str]) -> List[str]:
+        return [
+            elem
+            for elem in elements
+            if elem in ["piano", "synth", "strings", "guitar", "bass"]
+        ]
+
+    @staticmethod
+    def _activity_is_active(activity: Optional[str]) -> bool:
+        if activity is None:
+            return False
+        if isinstance(activity, (int, float)):
+            return activity >= 0.35
+        return str(activity).strip().lower() in {"medium", "high", "active", "present"}
+
+    @staticmethod
+    def _stem_activity_dict(item_data: Dict) -> Dict:
+        activity = item_data.get("stem_activity") or {}
+        if isinstance(activity, BaseModel):
+            return activity.model_dump()
+        return activity if isinstance(activity, dict) else {}
+
+    @staticmethod
+    def _normalize_elements(elements: List[str]) -> List[str]:
+        """Map raw model/stem names onto the app's supported element vocabulary."""
+        aliases = {
+            "vocal": "vocals",
+            "voice": "vocals",
+            "voices": "vocals",
+            "kick": "drums",
+            "hihat": "drums",
+            "hi-hat": "drums",
+            "hi_hat": "drums",
+            "percussion": "drums",
+            "instrument": "synth",
+            "instruments": "synth",
+            "melody": "synth",
+            "melodic": "synth",
+        }
+        supported = {"drums", "vocals", "bass", "piano", "synth", "strings", "guitar"}
+        normalized = []
+
+        for element in elements:
+            normalized_element = aliases.get(str(element).lower(), str(element).lower())
+            if normalized_element in supported and normalized_element not in normalized:
+                normalized.append(normalized_element)
+
+        return normalized
+
+    def _apply_stem_activity_to_elements(
+        self, elements: List[str], stem_activity: Dict
+    ) -> List[str]:
+        """Use stem activity to correct the model's element list."""
+        elements = self._normalize_elements(elements)
+        if not stem_activity:
+            return elements
+
+        corrected = list(elements)
+
+        def ensure_element(element: str):
+            if element not in corrected:
+                corrected.append(element)
+
+        def remove_elements(elements_to_remove: List[str]):
+            corrected[:] = [
+                element for element in corrected if element not in elements_to_remove
+            ]
+
+        drums_active = self._activity_is_active(
+            stem_activity.get("kick")
+        ) or self._activity_is_active(stem_activity.get("hihat"))
+        vocal_active = self._activity_is_active(stem_activity.get("vocal"))
+        bass_active = self._activity_is_active(stem_activity.get("bass"))
+        instruments_active = self._activity_is_active(
+            stem_activity.get("instruments")
+        )
+
+        if drums_active:
+            ensure_element("drums")
+        else:
+            remove_elements(["drums", "percussion"])
+
+        if vocal_active:
+            ensure_element("vocals")
+        else:
+            remove_elements(["vocals"])
+
+        if bass_active:
+            ensure_element("bass")
+        else:
+            remove_elements(["bass"])
+
+        if instruments_active:
+            if not any(
+                element in corrected for element in ["piano", "synth", "strings", "guitar"]
+            ):
+                ensure_element("synth")
+        else:
+            remove_elements(["piano", "synth", "strings", "guitar"])
+
+        return corrected
+
+    def _is_drum_only(self, elements: List[str]) -> bool:
+        return bool(elements) and self._has_drums(elements) and all(
+            elem in ["drums", "percussion"] for elem in elements
+        )
+
+    def _is_melody_only(self, elements: List[str]) -> bool:
+        melodic_elements = self._melodic_elements(elements)
+        return bool(melodic_elements) and not self._has_drums(
+            elements
+        ) and not self._has_vocals(elements)
+
+    def _element_label(self, elements: List[str]) -> str:
+        """Create a neutral label that matches the returned elements."""
+        has_drums = self._has_drums(elements)
+        has_vocals = self._has_vocals(elements)
+        melodic_elements = self._melodic_elements(elements)
+
+        if has_vocals and has_drums:
+            return "Vocal Mix"
+        if has_vocals:
+            return "Vocal Break"
+        if has_drums and not self._is_drum_only(elements):
+            return "Rhythm Section"
+        if self._is_drum_only(elements):
+            return "Drums"
+        if melodic_elements:
+            return " ".join(elem.capitalize() for elem in melodic_elements[:2])
+        return "Section"
+
+    @staticmethod
+    def _preserved_position_prefix(name: str) -> str:
+        lower_name = name.lower()
+        for prefix in ["intro", "outro", "breakdown", "build", "drop"]:
+            if prefix in lower_name:
+                return prefix.capitalize()
+        return ""
+
+    def _replacement_name(
+        self, original_name: str, elements: List[str], is_loop: bool
+    ) -> str:
+        base_label = self._element_label(elements)
+        prefix = self._preserved_position_prefix(original_name)
+
+        if prefix and not base_label.lower().startswith(prefix.lower()):
+            base_label = f"{prefix} {base_label}"
+
+        return base_label
+
+    def _name_conflicts_with_elements(self, name: str, elements: List[str]) -> bool:
+        """Detect misleading model labels from the model's own element list."""
+        lower_name = name.lower()
+        mentions_melody = "melodic" in lower_name or "melody" in lower_name
+        mentions_drums = "drum" in lower_name or "percussion" in lower_name
+        mentions_vocals = "vocal" in lower_name or "acapella" in lower_name
+        mentions_instrumental = "instrumental" in lower_name
+        mentions_bass = "bass" in lower_name
+        mentions_synth = "synth" in lower_name
+        mentions_piano = "piano" in lower_name
+        mentions_guitar = "guitar" in lower_name
+        mentions_strings = "string" in lower_name
+
+        if mentions_melody:
+            # Generic melody labels are too often hallucinated; prefer instruments.
+            return True
+        if mentions_instrumental and self._has_vocals(elements):
+            return True
+        if mentions_drums and not self._is_drum_only(elements):
+            return True
+        if mentions_vocals and not self._has_vocals(elements):
+            return True
+        if mentions_bass and "bass" not in elements:
+            return True
+        if mentions_synth and "synth" not in elements:
+            return True
+        if mentions_piano and "piano" not in elements:
+            return True
+        if mentions_guitar and "guitar" not in elements:
+            return True
+        if mentions_strings and "strings" not in elements:
+            return True
+        return False
+
+    def _normalize_analysis_data(self, analysis_data: Dict) -> Dict:
+        """Normalize timestamps, colors, and misleading Gemini labels."""
+        analysis_data = self._round_analysis_timestamps(analysis_data)
+
+        for cue_data in analysis_data.get("measure_changes", []):
+            stem_activity = self._stem_activity_dict(cue_data)
+            elements = self._apply_stem_activity_to_elements(
+                cue_data.get("elements", []), stem_activity
+            )
+            cue_data["elements"] = elements
+            color = cue_data.get("color", "green")
+            cue_data["color"] = self.validate_color_assignment(elements, color)
+
+            cue_name = cue_data.get("cue_name", "")
+            if self._name_conflicts_with_elements(cue_name, elements):
+                cue_data["cue_name"] = self._replacement_name(
+                    cue_name, elements, is_loop=False
+                )
+
+        for loop_data in analysis_data.get("loop_segments", []):
+            stem_activity = self._stem_activity_dict(loop_data)
+            elements = self._apply_stem_activity_to_elements(
+                loop_data.get("elements", []), stem_activity
+            )
+            loop_data["elements"] = elements
+            color = loop_data.get("color", "green")
+            loop_data["color"] = self.validate_color_assignment(elements, color)
+
+            loop_name = loop_data.get("loop_name", "")
+            if self._name_conflicts_with_elements(loop_name, elements):
+                loop_data["loop_name"] = self._replacement_name(
+                    loop_name, elements, is_loop=True
+                )
+
+        return analysis_data
 
     def create_cue_name(self, elements: List[str], measure: int) -> str:
         """Generate descriptive cue name based on detected elements"""
@@ -626,25 +1177,568 @@ class AutomaticMusicCuer:
             print(f"⚠️  Could not get beatgrid offset: {e}")
             return 0.0
 
+    @staticmethod
+    def _actual_bpm(bpm: float) -> Optional[float]:
+        """Normalize VDJ fractional BPM or direct BPM into actual BPM."""
+        if bpm <= 0:
+            return None
+        actual_bpm = 60.0 / bpm if bpm < 5 else bpm
+        if actual_bpm < 60 or actual_bpm > 200:
+            return None
+        return actual_bpm
+
+    @staticmethod
+    def _choose_best_downbeat_phase(
+        current_offset: float, beat_duration: float, phase_scores: Dict[int, float]
+    ) -> BeatgridAlignment:
+        """Pick a stronger whole-beat downbeat phase when confidence is high."""
+        current_score = phase_scores.get(0, 0.0)
+        best_score = max(phase_scores.values() or [0.0])
+        confidence_ratio = best_score / max(current_score, 0.001)
+
+        if best_score < 0.02:
+            return BeatgridAlignment(
+                offset=current_offset,
+                confidence_ratio=confidence_ratio,
+                phase_scores=phase_scores,
+            )
+
+        if current_score and (
+            confidence_ratio < 1.75 or (best_score - current_score) < 0.04
+        ):
+            return BeatgridAlignment(
+                offset=current_offset,
+                confidence_ratio=confidence_ratio,
+                phase_scores=phase_scores,
+            )
+
+        near_best_tolerance = max(0.01, best_score * 0.05)
+        near_best_phases = [
+            phase
+            for phase, score in phase_scores.items()
+            if best_score - score <= near_best_tolerance
+        ]
+
+        if 0 in near_best_phases:
+            shift_beats = 0
+        else:
+            non_zero_phases = sorted(phase for phase in near_best_phases if phase != 0)
+            shift_beats = non_zero_phases[0] if non_zero_phases else 0
+
+        return BeatgridAlignment(
+            offset=current_offset + (shift_beats * beat_duration),
+            shift_beats=shift_beats,
+            corrected=shift_beats != 0,
+            confidence_ratio=confidence_ratio,
+            phase_scores=phase_scores,
+        )
+
+    @staticmethod
+    def _choose_best_beat_offset(
+        current_offset: float,
+        beat_duration: float,
+        current_score: float,
+        best_offset: float,
+        best_score: float,
+        source: str,
+    ) -> BeatgridAlignment:
+        """Pick a fine beat-grid offset only with strong kick-stem evidence."""
+        shift_seconds = best_offset - current_offset
+        confidence_ratio = best_score / max(current_score, 0.001)
+
+        if source != "kick stem":
+            return BeatgridAlignment(
+                offset=current_offset,
+                confidence_ratio=confidence_ratio,
+                fine_shift_seconds=0.0,
+                beat_score=current_score,
+                best_beat_score=best_score,
+                source=source,
+            )
+
+        if abs(shift_seconds) < BEATGRID_FINE_ALIGNMENT_MIN_SHIFT_SECONDS:
+            return BeatgridAlignment(
+                offset=current_offset,
+                confidence_ratio=confidence_ratio,
+                fine_shift_seconds=0.0,
+                beat_score=current_score,
+                best_beat_score=best_score,
+                source=source,
+            )
+
+        if (
+            best_score < BEATGRID_FINE_ALIGNMENT_MIN_SCORE
+            or (best_score - current_score) < BEATGRID_FINE_ALIGNMENT_MIN_GAIN
+            or confidence_ratio < BEATGRID_FINE_ALIGNMENT_MIN_RATIO
+        ):
+            return BeatgridAlignment(
+                offset=current_offset,
+                confidence_ratio=confidence_ratio,
+                fine_shift_seconds=0.0,
+                beat_score=current_score,
+                best_beat_score=best_score,
+                source=source,
+            )
+
+        # Only correct within half a beat. Larger shifts are bar-phase decisions.
+        if abs(shift_seconds) > (beat_duration * 0.5):
+            return BeatgridAlignment(
+                offset=current_offset,
+                confidence_ratio=confidence_ratio,
+                fine_shift_seconds=0.0,
+                beat_score=current_score,
+                best_beat_score=best_score,
+                source=source,
+            )
+
+        return BeatgridAlignment(
+            offset=best_offset,
+            corrected=True,
+            confidence_ratio=confidence_ratio,
+            fine_shift_seconds=shift_seconds,
+            beat_score=current_score,
+            best_beat_score=best_score,
+            source=source,
+        )
+
+    @staticmethod
+    def _choose_consensus_downbeat_phase(
+        current_offset: float,
+        beat_duration: float,
+        source_phase_scores: List[Tuple[str, Dict[int, float]]],
+    ) -> BeatgridAlignment:
+        """Use multi-source agreement to correct a weak downbeat phase."""
+        aggregate_scores = {phase: 0.0 for phase in range(4)}
+        best_phase_counts = {phase: 0 for phase in range(4)}
+        used_sources = 0
+
+        for _, phase_scores in source_phase_scores:
+            if not phase_scores:
+                continue
+            best_phase = max(phase_scores, key=phase_scores.get)
+            best_score = phase_scores[best_phase]
+            if best_score < BEATGRID_PHASE_SOURCE_MIN_SCORE:
+                continue
+
+            used_sources += 1
+            best_phase_counts[best_phase] += 1
+            for phase, score in phase_scores.items():
+                aggregate_scores[phase] += score
+
+        if used_sources < BEATGRID_PHASE_CONSENSUS_MIN_SOURCES:
+            return BeatgridAlignment(
+                offset=current_offset,
+                phase_scores=aggregate_scores,
+                source="multi-source consensus",
+            )
+
+        top_phase = max(aggregate_scores, key=aggregate_scores.get)
+        current_score = aggregate_scores.get(0, 0.0)
+        top_score = aggregate_scores[top_phase]
+        confidence_ratio = top_score / max(current_score, 0.001)
+
+        if top_phase == 0:
+            return BeatgridAlignment(
+                offset=current_offset,
+                confidence_ratio=confidence_ratio,
+                phase_scores=aggregate_scores,
+                source="multi-source consensus",
+            )
+
+        if best_phase_counts[top_phase] < BEATGRID_PHASE_CONSENSUS_MIN_SOURCES:
+            return BeatgridAlignment(
+                offset=current_offset,
+                confidence_ratio=confidence_ratio,
+                phase_scores=aggregate_scores,
+                source="multi-source consensus",
+            )
+
+        if (
+            confidence_ratio < BEATGRID_PHASE_CONSENSUS_MIN_RATIO
+            or (top_score - current_score) < BEATGRID_PHASE_CONSENSUS_MIN_GAIN
+        ):
+            return BeatgridAlignment(
+                offset=current_offset,
+                confidence_ratio=confidence_ratio,
+                phase_scores=aggregate_scores,
+                source="multi-source consensus",
+            )
+
+        return BeatgridAlignment(
+            offset=current_offset + (top_phase * beat_duration),
+            shift_beats=top_phase,
+            corrected=True,
+            confidence_ratio=confidence_ratio,
+            phase_scores=aggregate_scores,
+            source="multi-source consensus",
+        )
+
+    def _beatgrid_audio_sources(
+        self, audio_file_path: str
+    ) -> List[Tuple[str, str, Optional[str]]]:
+        """Return candidate audio sources for beatgrid verification."""
+        sources = []
+        stems_path = self._find_vdj_stems_file(audio_file_path)
+        if stems_path and shutil.which("ffmpeg") and shutil.which("ffprobe"):
+            try:
+                stream_map = {
+                    stem_name: stream_index
+                    for stem_name, stream_index in self._probe_vdj_stem_streams(
+                        stems_path
+                    )
+                }
+                for stem_name in ("kick", "hihat", "bass", "instruments", "vocal"):
+                    if stem_name in stream_map:
+                        sources.append(
+                            (
+                                f"{stem_name} stem",
+                                stems_path,
+                                f"0:{stream_map[stem_name]}",
+                            )
+                        )
+            except Exception as e:
+                print(f"⚠️  Could not inspect VDJ stems for beatgrid: {e}")
+
+        sources.append(("mix", audio_file_path, None))
+        return sources
+
+    def _beatgrid_audio_source(
+        self, audio_file_path: str
+    ) -> Tuple[str, Optional[str], str]:
+        """Prefer the VDJ kick stem for beatgrid verification when available."""
+        for source_name, source_path, stream_map in self._beatgrid_audio_sources(
+            audio_file_path
+        ):
+            if source_name == "kick stem":
+                return source_path, stream_map, source_name
+
+        return audio_file_path, None, "mix"
+
+    def _extract_onset_envelope(
+        self, audio_file_path: str, stream_map: Optional[str]
+    ) -> Tuple[List[float], float]:
+        """Extract a compact positive-difference energy envelope via ffmpeg."""
+        if not shutil.which("ffmpeg"):
+            return [], BEATGRID_ALIGNMENT_HOP_SECONDS
+
+        sample_rate = BEATGRID_ALIGNMENT_SAMPLE_RATE
+        frame_samples = max(
+            1, int(sample_rate * BEATGRID_ALIGNMENT_FRAME_SECONDS)
+        )
+        hop_samples = max(1, int(sample_rate * BEATGRID_ALIGNMENT_HOP_SECONDS))
+        hop_seconds = hop_samples / sample_rate
+
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            "0",
+            "-t",
+            str(BEATGRID_ALIGNMENT_DURATION_SECONDS),
+            "-i",
+            audio_file_path,
+        ]
+        if stream_map:
+            command.extend(["-map", stream_map])
+        command.extend(
+            [
+                "-ac",
+                "1",
+                "-ar",
+                str(sample_rate),
+                "-f",
+                "s16le",
+                "-",
+            ]
+        )
+
+        result = subprocess.run(command, capture_output=True, check=True)
+        if not result.stdout:
+            return [], hop_seconds
+
+        sample_count = len(result.stdout) // 2
+        samples = struct.unpack(f"<{sample_count}h", result.stdout)
+        if len(samples) < frame_samples:
+            return [], hop_seconds
+
+        energies = []
+        for start in range(0, len(samples) - frame_samples, hop_samples):
+            frame = samples[start : start + frame_samples]
+            square_sum = sum(sample * sample for sample in frame)
+            rms = math.sqrt(square_sum / frame_samples) / 32768.0
+            energies.append(rms)
+
+        if not energies:
+            return [], hop_seconds
+
+        onsets = [0.0]
+        for index in range(1, len(energies)):
+            onsets.append(max(0.0, energies[index] - energies[index - 1]))
+
+        return onsets, hop_seconds
+
+    @staticmethod
+    def _score_downbeat_phase(
+        onsets: List[float],
+        hop_seconds: float,
+        offset: float,
+        measure_duration: float,
+    ) -> float:
+        """Score how much onset energy appears near each bar downbeat."""
+        if not onsets or hop_seconds <= 0 or measure_duration <= 0:
+            return 0.0
+
+        radius = max(1, int(0.06 / hop_seconds))
+        end_time = len(onsets) * hop_seconds
+        score = 0.0
+        count = 0
+        timestamp = offset
+
+        while timestamp < 0.5:
+            timestamp += measure_duration
+
+        while timestamp < end_time:
+            center = int(round(timestamp / hop_seconds))
+            lo = max(0, center - radius)
+            hi = min(len(onsets), center + radius + 1)
+            if hi > lo:
+                score += max(onsets[lo:hi])
+                count += 1
+            timestamp += measure_duration
+
+        return score / count if count else 0.0
+
+    @staticmethod
+    def _score_beat_grid(
+        onsets: List[float],
+        hop_seconds: float,
+        offset: float,
+        beat_duration: float,
+    ) -> float:
+        """Score onset energy near every beat at a fixed tempo."""
+        if not onsets or hop_seconds <= 0 or beat_duration <= 0:
+            return 0.0
+
+        radius = max(1, int(0.06 / hop_seconds))
+        end_time = len(onsets) * hop_seconds
+        score = 0.0
+        count = 0
+        timestamp = offset
+
+        while timestamp < 0.5:
+            timestamp += beat_duration
+
+        while timestamp < end_time:
+            center = int(round(timestamp / hop_seconds))
+            lo = max(0, center - radius)
+            hi = min(len(onsets), center + radius + 1)
+            if hi > lo:
+                score += max(onsets[lo:hi])
+                count += 1
+            timestamp += beat_duration
+
+        return score / count if count else 0.0
+
+    def _find_best_fine_beat_offset(
+        self,
+        onsets: List[float],
+        hop_seconds: float,
+        current_offset: float,
+        beat_duration: float,
+        source: str,
+    ) -> BeatgridAlignment:
+        """Search within half a beat for a better fixed-tempo beat offset."""
+        current_score = self._score_beat_grid(
+            onsets, hop_seconds, current_offset, beat_duration
+        )
+        best_score = current_score
+        best_offset = current_offset
+
+        max_shift = beat_duration * 0.5
+        steps = int(max_shift / BEATGRID_FINE_ALIGNMENT_STEP_SECONDS)
+        for step in range(-steps, steps + 1):
+            shift = step * BEATGRID_FINE_ALIGNMENT_STEP_SECONDS
+            candidate_offset = current_offset + shift
+            candidate_score = self._score_beat_grid(
+                onsets, hop_seconds, candidate_offset, beat_duration
+            )
+            if candidate_score > best_score:
+                best_score = candidate_score
+                best_offset = candidate_offset
+
+        return self._choose_best_beat_offset(
+            current_offset=current_offset,
+            beat_duration=beat_duration,
+            current_score=current_score,
+            best_offset=best_offset,
+            best_score=best_score,
+            source=source,
+        )
+
+    def _verify_beatgrid_alignment(
+        self, audio_file_path: str, bpm: float
+    ) -> BeatgridAlignment:
+        """Validate VDJ beatgrid downbeat phase against audio transients."""
+        actual_bpm = self._actual_bpm(bpm)
+        current_offset = self.get_beatgrid_offset(audio_file_path)
+        if actual_bpm is None:
+            return BeatgridAlignment(offset=current_offset)
+
+        cache_key = (audio_file_path, round(actual_bpm, 3))
+        if cache_key in self._beatgrid_alignment_cache:
+            return self._beatgrid_alignment_cache[cache_key]
+
+        beat_duration = 60.0 / actual_bpm
+        measure_duration = beat_duration * 4
+
+        try:
+            audio_sources = self._beatgrid_audio_sources(audio_file_path)
+            source_path, stream_map, source_name = self._beatgrid_audio_source(
+                audio_file_path
+            )
+            onsets, hop_seconds = self._extract_onset_envelope(source_path, stream_map)
+            fine_alignment = self._find_best_fine_beat_offset(
+                onsets,
+                hop_seconds,
+                current_offset,
+                beat_duration,
+                source_name,
+            )
+            base_offset = fine_alignment.offset
+            phase_scores = {
+                phase: self._score_downbeat_phase(
+                    onsets,
+                    hop_seconds,
+                    base_offset + (phase * beat_duration),
+                    measure_duration,
+                )
+                for phase in range(4)
+            }
+            alignment = self._choose_best_downbeat_phase(
+                base_offset, beat_duration, phase_scores
+            )
+            alignment.source = source_name
+            alignment.fine_shift_seconds = fine_alignment.fine_shift_seconds
+            alignment.beat_score = fine_alignment.beat_score
+            alignment.best_beat_score = fine_alignment.best_beat_score
+            alignment.confidence_ratio = max(
+                alignment.confidence_ratio, fine_alignment.confidence_ratio
+            )
+            alignment.corrected = alignment.corrected or fine_alignment.corrected
+            primary_evidence = max(
+                max(phase_scores.values() or [0.0]),
+                fine_alignment.best_beat_score,
+            )
+
+            if (
+                not alignment.corrected
+                and primary_evidence < BEATGRID_PHASE_SOURCE_MIN_SCORE
+            ):
+                source_phase_scores = []
+                for candidate_name, candidate_path, candidate_stream in audio_sources:
+                    if (
+                        candidate_name == source_name
+                        and candidate_path == source_path
+                        and candidate_stream == stream_map
+                    ):
+                        candidate_onsets = onsets
+                        candidate_hop_seconds = hop_seconds
+                    else:
+                        candidate_onsets, candidate_hop_seconds = (
+                            self._extract_onset_envelope(
+                                candidate_path, candidate_stream
+                            )
+                        )
+
+                    candidate_scores = {
+                        phase: self._score_downbeat_phase(
+                            candidate_onsets,
+                            candidate_hop_seconds,
+                            current_offset + (phase * beat_duration),
+                            measure_duration,
+                        )
+                        for phase in range(4)
+                    }
+                    source_phase_scores.append((candidate_name, candidate_scores))
+
+                consensus_alignment = self._choose_consensus_downbeat_phase(
+                    current_offset, beat_duration, source_phase_scores
+                )
+                if consensus_alignment.corrected:
+                    alignment = consensus_alignment
+                    alignment.beat_score = fine_alignment.beat_score
+                    alignment.best_beat_score = fine_alignment.best_beat_score
+
+            if alignment.corrected:
+                corrections = []
+                if abs(alignment.fine_shift_seconds) > 0:
+                    corrections.append(
+                        f"fine {alignment.fine_shift_seconds:+.3f}s"
+                    )
+                if alignment.shift_beats:
+                    corrections.append(f"phase +{alignment.shift_beats} beat")
+                correction_text = ", ".join(corrections) or "verified"
+                print(
+                    f"🎚️  Beatgrid correction: "
+                    f"{current_offset:.6f}s → {alignment.offset:.6f}s "
+                    f"({correction_text}, {alignment.source}, "
+                    f"confidence {alignment.confidence_ratio:.1f}x)"
+                )
+            else:
+                print(
+                    f"🎚️  Beatgrid downbeat looks usable at "
+                    f"{current_offset:.6f}s ({alignment.source})"
+                )
+        except Exception as e:
+            print(f"⚠️  Beatgrid verification failed; using VDJ grid: {e}")
+            alignment = BeatgridAlignment(offset=current_offset)
+
+        self._beatgrid_alignment_cache[cache_key] = alignment
+        return alignment
+
+    def _get_verified_beatgrid_offset(self, file_path: str, bpm: float) -> float:
+        """Return a verified beatgrid offset for timing quantization."""
+        return self._verify_beatgrid_alignment(file_path, bpm).offset
+
+    def _apply_verified_beatgrid_to_song(
+        self, song_element, audio_file_path: str, bpm: float
+    ) -> None:
+        """Persist a confident beatgrid correction into the VDJ song XML."""
+        alignment = self._verify_beatgrid_alignment(audio_file_path, bpm)
+        if not alignment.corrected:
+            return
+
+        beatgrid_poi = None
+        for poi in song_element.findall("Poi"):
+            if poi.get("Type") == "beatgrid":
+                beatgrid_poi = poi
+                break
+
+        if beatgrid_poi is None:
+            beatgrid_poi = ET.Element("Poi")
+            beatgrid_poi.set("Type", "beatgrid")
+            song_element.append(beatgrid_poi)
+
+        beatgrid_poi.set("Pos", f"{alignment.offset:.6f}")
+        print(f"✅ Updated VDJ beatgrid '1' to {alignment.offset:.6f}s")
+
     def validate_timing_hybrid(
         self, gemini_timestamp: float, bpm: float, file_path: str
     ) -> float:
         """Hybrid timing validation: use Gemini's timestamp if reasonable,
         otherwise align to nearest '1' beat"""
         # Get beatgrid info
-        beatgrid_offset = self.get_beatgrid_offset(file_path)
+        beatgrid_offset = self._get_verified_beatgrid_offset(file_path, bpm)
 
-        if bpm <= 0 or bpm > 200 or bpm < 60:
+        actual_bpm = self._actual_bpm(bpm)
+        if actual_bpm is None:
             print(
                 f"🎯 Invalid BPM {bpm}, using Gemini timestamp as-is: "
                 f"{gemini_timestamp:.1f}s"
             )
             return gemini_timestamp
-
-        # Convert VDJ fractional BPM to actual BPM if needed
-        actual_bpm = bpm
-        if bpm < 5:  # VDJ fractional format
-            actual_bpm = 60.0 / bpm
 
         beat_duration = 60.0 / actual_bpm  # seconds per beat
         measure_duration = beat_duration * 4  # 4 beats per measure
@@ -717,28 +1811,15 @@ class AutomaticMusicCuer:
 
         for retry in range(max_retries):
             try:
-                # Use a custom retry wrapper for genai.upload_file
-                uploaded_file = await asyncio.get_event_loop().run_in_executor(
-                    None, genai.upload_file, audio_file_path
+                uploaded_file = await asyncio.get_running_loop().run_in_executor(
+                    None, self._upload_audio_file, audio_file_path
                 )
                 print(f"✅ {os.path.basename(audio_file_path)} upload complete")
                 return uploaded_file
             except Exception as e:
-                error_str = str(e).lower()
-                is_network_error = any(
-                    term in error_str
-                    for term in [
-                        "ssl",
-                        "connection",
-                        "network",
-                        "broken pipe",
-                        "timeout",
-                        "reset",
-                        "errno 32",
-                    ]
-                )
-
-                if is_network_error and retry < max_retries - 1:
+                if self._is_retryable_error(e, NETWORK_ERROR_TERMS) and (
+                    retry < max_retries - 1
+                ):
                     wait_time = min(
                         (retry + 1) ** 2, 30
                     )  # Exponential backoff: 1s, 4s, 9s...
@@ -825,9 +1906,12 @@ class AutomaticMusicCuer:
 
                 # Create concurrent analysis tasks
                 analysis_tasks = []
-                for audio_file_path, _ in uploaded_files:
-                    task = asyncio.get_event_loop().run_in_executor(
-                        None, self.analyze_audio_with_gemini, audio_file_path
+                for audio_file_path, uploaded_file in uploaded_files:
+                    task = asyncio.get_running_loop().run_in_executor(
+                        None,
+                        self.analyze_audio_with_gemini,
+                        audio_file_path,
+                        uploaded_file,
                     )
                     analysis_tasks.append(task)
 
@@ -883,9 +1967,12 @@ class AutomaticMusicCuer:
 
             # Create concurrent analysis tasks
             analysis_tasks = []
-            for audio_file_path, _ in uploaded_files:
-                task = asyncio.get_event_loop().run_in_executor(
-                    None, self.analyze_audio_with_gemini, audio_file_path
+            for audio_file_path, uploaded_file in uploaded_files:
+                task = asyncio.get_running_loop().run_in_executor(
+                    None,
+                    self.analyze_audio_with_gemini,
+                    audio_file_path,
+                    uploaded_file,
                 )
                 analysis_tasks.append(task)
 
@@ -1048,45 +2135,8 @@ class AutomaticMusicCuer:
                         f"({file_size:.1f} MB)..."
                     )
 
-                    # Retry upload up to 5 times for network issues
-                    uploaded_file = None
-                    max_retries = 5
-                    for retry in range(max_retries):
-                        try:
-                            uploaded_file = genai.upload_file(audio_file_path)
-                            break
-                        except Exception as e:
-                            error_str = str(e).lower()
-                            is_network_error = any(
-                                term in error_str
-                                for term in [
-                                    "ssl",
-                                    "connection",
-                                    "network",
-                                    "broken pipe",
-                                    "timeout",
-                                    "reset",
-                                ]
-                            )
-
-                            if is_network_error and retry < max_retries - 1:
-                                wait_time = (retry + 1) * 2  # 2s, 4s, 6s, 8s delays
-                                print(
-                                    f"⚠️  Upload failed (attempt "
-                                    f"{retry + 1}/{max_retries}): {e}"
-                                )
-                                print(f"🔄 Retrying in {wait_time} seconds...")
-                                time.sleep(wait_time)
-                            else:
-                                raise e
-
-                    if uploaded_file:
-                        uploaded_files.append((audio_file_path, uploaded_file))
-                    else:
-                        raise Exception(
-                            f"Failed to upload {audio_file_path} "
-                            f"after {max_retries} attempts"
-                        )
+                    uploaded_file = self._upload_audio_file_with_retry(audio_file_path)
+                    uploaded_files.append((audio_file_path, uploaded_file))
 
                 print(f"✅ Upload complete ({total_size:.1f} MB total)")
 
@@ -1137,45 +2187,8 @@ class AutomaticMusicCuer:
                     f"({file_size:.1f} MB)..."
                 )
 
-                # Retry upload up to 5 times for network issues
-                uploaded_file = None
-                max_retries = 5
-                for retry in range(max_retries):
-                    try:
-                        uploaded_file = genai.upload_file(audio_file_path)
-                        break
-                    except Exception as e:
-                        error_str = str(e).lower()
-                        is_network_error = any(
-                            term in error_str
-                            for term in [
-                                "ssl",
-                                "connection",
-                                "network",
-                                "broken pipe",
-                                "timeout",
-                                "reset",
-                            ]
-                        )
-
-                        if is_network_error and retry < max_retries - 1:
-                            wait_time = (retry + 1) * 2  # 2s, 4s, 6s, 8s delays
-                            print(
-                                f"⚠️  Upload failed (attempt "
-                                f"{retry + 1}/{max_retries}): {e}"
-                            )
-                            print(f"🔄 Retrying in {wait_time} seconds...")
-                            time.sleep(wait_time)
-                        else:
-                            raise e
-
-                if uploaded_file:
-                    uploaded_files.append((audio_file_path, uploaded_file))
-                else:
-                    raise Exception(
-                        f"Failed to upload {audio_file_path} "
-                        f"after {max_retries} attempts"
-                    )
+                uploaded_file = self._upload_audio_file_with_retry(audio_file_path)
+                uploaded_files.append((audio_file_path, uploaded_file))
 
             print(f"✅ Upload complete ({total_size:.1f} MB total)")
 
@@ -1353,10 +2366,26 @@ class AutomaticMusicCuer:
             - vocals: Actual singing/rapping, not just vocal effects
             - bass: Prominent bassline
             - synth/piano: Melodic elements
+            - Include every clearly audible element. If bass, synth, vocals, pads,
+              or effects are audible during a drum section, it is NOT drums-only.
+
+            Strict Label Rules:
+            - Only use "Melodic" or "Melody" in a name when there is a clear
+              foreground melody and NO audible drums or vocals.
+            - Bass alone, pads, texture, atmosphere, or filtered chord wash are NOT
+              enough to call a section melodic. Name those by the actual element
+              instead, like "Bass Break" or "Synth Break".
+            - Only use "Drum", "Drums", or "Percussion" in a name when drums are
+              isolated and no bass, synth, melody, vocal, pad, or tonal element is
+              audible.
+            - If a section has drums plus other elements, use neutral names like
+              "Rhythm Section", "Groove", "Build", "Drop", or "Outro".
+            - If you are uncertain whether other elements are present, include those
+              elements and avoid "drums-only" or "melodic-only" names/colors.
 
             Color Rules (be strict):
             - blue: Only melody, NO drums, NO vocals
-            - green: Melody + drums, NO vocals  
+            - green: Melody + drums, NO vocals
             - yellow: Full mix (drums + melody + vocals)
             - purple: Only drums/percussion
             - orange: Melody + vocals, NO drums
@@ -1375,41 +2404,13 @@ Analyze each file independently and return complete analysis for all
 {len(uploaded_files)} files.
 """
 
-            # Use structured output for better JSON parsing
-            class BatchMusicAnalysis(BaseModel):
-                """Complete batch music analysis response from Gemini"""
-
-                analyses: List[MusicAnalysis]
-
-            # Send to Gemini with structured output
-            response = self.model.generate_content(
-                contents=[uf[1] for uf in uploaded_files],
-                generation_config=genai.GenerationConfig(
-                    response_mime_type="application/json",
-                    response_schema=BatchMusicAnalysis,
-                    temperature=0.1,
-                ),
-                request_options={"timeout": 300},  # 5 minute timeout for batch
-            )
-
-            if not response or not response.text:
-                print("❌ Empty response from Gemini")
-                return []
-
             # Parse structured JSON response
             try:
-                raw_text = response.text
-
-                # Clean up any malformed numbers
-                import re
-
-                cleaned_text = re.sub(
-                    r"(\d+\.\d{10,})",
-                    lambda m: f"{float(m.group(1)):.2f}",
-                    raw_text,
+                batch_data = self._generate_json_content(
+                    contents=[prompt] + [uploaded_file for _, uploaded_file in uploaded_files],
+                    schema=BatchMusicAnalysis,
+                    timeout_seconds=300,
                 )
-
-                batch_data = json.loads(cleaned_text)
 
                 # Extract analyses from the structured response
                 if "analyses" in batch_data:
@@ -1418,17 +2419,10 @@ Analyze each file independently and return complete analysis for all
                     # Fallback if the response structure is different
                     analyses_list = batch_data if isinstance(batch_data, list) else []
 
-                # Round all timestamps to 2 decimal places
-                for analysis_data in analyses_list:
-                    if "measure_changes" in analysis_data:
-                        for cue in analysis_data["measure_changes"]:
-                            if "timestamp" in cue:
-                                cue["timestamp"] = round(float(cue["timestamp"]), 2)
-
-                    if "loop_segments" in analysis_data:
-                        for loop in analysis_data["loop_segments"]:
-                            if "start" in loop:
-                                loop["start"] = round(float(loop["start"]), 2)
+                analyses_list = [
+                    self._normalize_analysis_data(analysis_data)
+                    for analysis_data in analyses_list
+                ]
 
                 print(
                     f"✅ Successfully analyzed {len(analyses_list)} " f"songs in batch"
@@ -1437,7 +2431,6 @@ Analyze each file independently and return complete analysis for all
 
             except json.JSONDecodeError as e:
                 print(f"❌ Failed to parse batch JSON response: {e}")
-                print(f"Raw response: {response.text[:500]}...")
                 return []
 
             except Exception as e:
@@ -1466,25 +2459,41 @@ Analyze each file independently and return complete analysis for all
                 # Show what would be created
                 cues = analysis_data.get("measure_changes", [])
                 loops = analysis_data.get("loop_segments", [])
+                working_bpm = self.get_song_bpm_from_database(audio_file_path) or 120
+                alignment = self._verify_beatgrid_alignment(
+                    audio_file_path, working_bpm
+                )
+                if alignment.corrected:
+                    print(
+                        f"  Would update beatgrid '1': "
+                        f"{self.get_beatgrid_offset(audio_file_path):.6f}s → "
+                        f"{alignment.offset:.6f}s"
+                    )
 
                 for i, cue_data in enumerate(cues[:6], 1):
                     cue_name = cue_data.get("cue_name", f"cue{i}")
                     timestamp = cue_data.get("timestamp", 0)
+                    aligned_time = self.validate_timing_hybrid(
+                        timestamp, working_bpm, audio_file_path
+                    )
                     color = cue_data.get("color", "green")
                     elements = cue_data.get("elements", [])
                     print(
-                        f"  Cue {i}: '{cue_name}' at {timestamp:.1f}s | "
+                        f"  Cue {i}: '{cue_name}' at {aligned_time:.1f}s | "
                         f"Color: {color.capitalize()} | Elements: {elements}"
                     )
 
                 for i, loop_data in enumerate(loops[:3], 1):
                     loop_name = loop_data.get("loop_name", f"loop{i}l")
                     start = loop_data.get("start", 0)
+                    aligned_start = self.validate_timing_hybrid(
+                        start, working_bpm, audio_file_path
+                    )
                     beats = loop_data.get("length_beats", 16)
                     color = loop_data.get("color", "green")
                     elements = loop_data.get("elements", [])
                     print(
-                        f"  Loop {i}: '{loop_name}' at {start:.1f}s "
+                        f"  Loop {i}: '{loop_name}' at {aligned_start:.1f}s "
                         f"({beats} beats) | Color: {color.capitalize()} | "
                         f"Elements: {elements}"
                     )
@@ -1528,6 +2537,9 @@ Analyze each file independently and return complete analysis for all
             song_length = self.get_song_length(audio_file_path)
             database_bpm = self.get_song_bpm_from_database(audio_file_path)
             working_bpm = database_bpm or 120
+            self._apply_verified_beatgrid_to_song(
+                song_element, audio_file_path, working_bpm
+            )
 
             # Process cues
             all_pois = []
@@ -1729,6 +2741,9 @@ Analyze each file independently and return complete analysis for all
             song_length = self.get_song_length(audio_file_path)
             database_bpm = self.get_song_bpm_from_database(audio_file_path)
             working_bpm = database_bpm or 120
+            self._apply_verified_beatgrid_to_song(
+                song_element, audio_file_path, working_bpm
+            )
 
             # Process cues
             all_pois = []
@@ -2130,6 +3145,9 @@ Analyze each file independently and return complete analysis for all
                 song_element.remove(poi)
 
             print(f"🧹 Removed {len(pois_to_remove)} existing cues/loops")
+            self._apply_verified_beatgrid_to_song(
+                song_element, audio_file_path, working_bpm
+            )
 
             # Prepare all cues and loops with timing alignment
             all_pois = []
@@ -2475,6 +3493,13 @@ def main():
         "paths", nargs="+", help="Audio files or directories to process"
     )
     parser.add_argument("--api-key", help="Gemini API key (optional if in .env file)")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            f"Gemini model to use (default: GEMINI_MODEL or {DEFAULT_GEMINI_MODEL})"
+        ),
+    )
     parser.add_argument("--database", help="Path to VDJ database.xml")
     parser.add_argument(
         "--dry-run",
@@ -2541,7 +3566,13 @@ def main():
     print(f"📦 Processing in {num_batches} batches of {batch_size} songs each")
 
     # Initialize cuer (will auto-load from .env if api_key not provided)
-    cuer = AutomaticMusicCuer(args.api_key, args.database)
+    cuer = AutomaticMusicCuer(args.api_key, args.database, args.model)
+
+    if not args.dry_run and cuer.is_virtualdj_running():
+        print("❌ VirtualDJ appears to be running.")
+        print("   Close VirtualDJ before making database changes, then run again.")
+        print("   Dry-runs are safe while VirtualDJ is open: add --dry-run.")
+        return
 
     # Create backup if requested (only once at the beginning)
     if args.backup and not args.dry_run:
