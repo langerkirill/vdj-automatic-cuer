@@ -1,5 +1,5 @@
 {
-  "description": "Manual cue corrections recovered from audit_reports/screenshots-6-6-26/all_cues.tsv after restoring the full VirtualDJ database.",
+  "description": "Manual cue corrections recovered from audit reports after restoring the full VirtualDJ database. Stem-backed issues get color/name corrections; no-stem visual shape issues are conservative rename-only fixes.",
   "tracks": [
     {
       "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/23. Jennie - Pressure.flac",
@@ -224,6 +224,1648 @@
           "Pos": "337.958481",
           "Num": "-1",
           "Color": "4278255360",
+          "Size": "32.0",
+          "Slot": "3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/01. Kona Rose - Inori.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "orange yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Vocal Intro",
+          "Pos": "0.014711",
+          "Num": "1",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Intro Padl",
+          "Pos": "0.014711",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "16.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Bass &amp; Snaps In",
+          "Pos": "10.227143",
+          "Num": "2",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Beat Groove",
+          "Pos": "30.652007",
+          "Num": "3",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Main Groovel",
+          "Pos": "30.652007",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Chorus",
+          "Pos": "51.076871",
+          "Num": "4",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "71.501735",
+          "Num": "5",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Outro",
+          "Pos": "91.926599",
+          "Num": "6",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Breakl",
+          "Pos": "91.926599",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/02. Le Yora - EVERYTHING IN ITS RIGHT PLACE.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue orange purple yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "0.155064",
+          "Num": "1",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Intro Synthl",
+          "Pos": "0.155064",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocals In",
+          "Pos": "31.122488",
+          "Num": "2",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Loopl",
+          "Pos": "31.122488",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Mix",
+          "Pos": "62.089912",
+          "Num": "3",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "124.024760",
+          "Num": "4",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Drop",
+          "Pos": "185.959608",
+          "Num": "5",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Drum Outro",
+          "Pos": "278.861880",
+          "Num": "6",
+          "Color": "4288020735"
+        },
+        {
+          "Type": "loop",
+          "Name": "Drum Outro Loopl",
+          "Pos": "278.861880",
+          "Num": "-1",
+          "Color": "4288020735",
+          "Size": "32.0",
+          "Slot": "3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/03. 2814 - \u771f\u5b9f\u306e\u604b.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green orange",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Num": "1",
+          "Color": "4294934272",
+          "Pos": "0.000000"
+        },
+        {
+          "Type": "loop",
+          "Name": "Synthl",
+          "Pos": "12.800000",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Synth",
+          "Pos": "51.200000",
+          "Num": "2",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section",
+          "Pos": "102.400000",
+          "Num": "3",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "loop",
+          "Name": "Rhythm Sectionl",
+          "Pos": "102.400000",
+          "Num": "-1",
+          "Color": "4278255360",
+          "Size": "16.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Synth Section",
+          "Pos": "204.798570",
+          "Num": "4",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section 2",
+          "Pos": "255.998570",
+          "Num": "5",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Outro",
+          "Pos": "358.398570",
+          "Num": "6",
+          "Color": "4278190335"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/05. OMRI. - Release The Pressure.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "orange yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro Vocal",
+          "Pos": "0.058008",
+          "Num": "1",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Groove In",
+          "Pos": "30.534168",
+          "Num": "2",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Main Vocal Groovel",
+          "Pos": "61.010328",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Mix",
+          "Pos": "91.486488",
+          "Num": "3",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Mix 2",
+          "Pos": "121.962648",
+          "Num": "4",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Mix Loopl",
+          "Pos": "121.962648",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Build",
+          "Pos": "152.438808",
+          "Num": "5",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Build Loopl",
+          "Pos": "152.438808",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "3"
+        },
+        {
+          "Type": "cue",
+          "Name": "Main Vocal Mix",
+          "Pos": "182.914968",
+          "Num": "6",
+          "Color": "4294967040"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/06. SPMC - Hunted.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green orange",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "0.000000",
+          "Num": "1",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section",
+          "Pos": "54.084973",
+          "Num": "2",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "108.170093",
+          "Num": "3",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Atmospheric Sectionl",
+          "Pos": "108.170093",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Break",
+          "Pos": "135.212653",
+          "Num": "4",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Spoken Vocal Breakl",
+          "Pos": "135.212653",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Drop",
+          "Pos": "162.255213",
+          "Num": "5",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "loop",
+          "Name": "Main Groovel",
+          "Pos": "216.340333",
+          "Num": "-1",
+          "Color": "4278255360",
+          "Size": "32.0",
+          "Slot": "3"
+        },
+        {
+          "Type": "cue",
+          "Name": "Outro",
+          "Pos": "243.382893",
+          "Num": "6",
+          "Color": "4294934272"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/07. Hraach - Apricot Tree.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green orange purple yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro Drums",
+          "Pos": "0.035850",
+          "Num": "1",
+          "Color": "4288020735"
+        },
+        {
+          "Type": "loop",
+          "Name": "Intro Drum Loopl",
+          "Pos": "0.035850",
+          "Num": "-1",
+          "Color": "4288020735",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove In",
+          "Pos": "32.578634",
+          "Num": "2",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Breakdown",
+          "Pos": "130.206986",
+          "Num": "3",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Break Loopl",
+          "Pos": "130.206986",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Main Groove",
+          "Pos": "162.749770",
+          "Num": "4",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Synth Section",
+          "Pos": "260.378122",
+          "Num": "5",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Synthl",
+          "Pos": "260.378122",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "3"
+        },
+        {
+          "Type": "cue",
+          "Name": "Outro Drums",
+          "Pos": "292.920906",
+          "Num": "6",
+          "Color": "4288020735"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/08. Overmono - Walk Thru Water.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue orange yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "0.023628",
+          "Num": "1",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Build",
+          "Pos": "57.353676",
+          "Num": "2",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Build Loopl",
+          "Pos": "57.353676",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Mix",
+          "Pos": "71.686188",
+          "Num": "3",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Main Groove",
+          "Pos": "114.683724",
+          "Num": "4",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Main Rhythm Loopl",
+          "Pos": "114.683724",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "157.681260",
+          "Num": "5",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Synth Outro",
+          "Pos": "172.013772",
+          "Num": "6",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Synth Outro Loopl",
+          "Pos": "172.013772",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "16.0",
+          "Slot": "3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/09. Ezequiel Arias - Sky Above.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green orange purple yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section",
+          "Pos": "31.224007",
+          "Num": "1",
+          "Color": "4288020735"
+        },
+        {
+          "Type": "cue",
+          "Name": "Bass In",
+          "Pos": "62.443207",
+          "Num": "2",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Breakdown",
+          "Pos": "156.100807",
+          "Num": "3",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Synthl",
+          "Pos": "156.100807",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Break",
+          "Pos": "187.320007",
+          "Num": "4",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Loopl",
+          "Pos": "187.320007",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Build Up",
+          "Pos": "218.539207",
+          "Num": "5",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "249.758407",
+          "Num": "6",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "loop",
+          "Name": "Drum Loopl",
+          "Pos": "437.073607",
+          "Num": "-1",
+          "Color": "4288020735",
+          "Size": "32.0",
+          "Slot": "3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/11. VAPERROR - 808 Dreams.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green purple yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "-0.004059",
+          "Num": "1",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Intro Synthl",
+          "Pos": "-0.004059",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section",
+          "Pos": "13.237477",
+          "Num": "2",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "52.962085",
+          "Num": "3",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Groove",
+          "Pos": "79.445157",
+          "Num": "4",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Groove Loopl",
+          "Pos": "79.445157",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Outro Drums",
+          "Pos": "132.411301",
+          "Num": "5",
+          "Color": "4288020735"
+        },
+        {
+          "Type": "loop",
+          "Name": "Outro Drum Loopl",
+          "Pos": "132.411301",
+          "Num": "-1",
+          "Color": "4288020735",
+          "Size": "32.0",
+          "Slot": "3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/14. Evren Furtuna - All Shades of Blue.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green orange yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section",
+          "Pos": "65.082983",
+          "Num": "1",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "loop",
+          "Name": "Rhythm Section Loopl",
+          "Pos": "65.082983",
+          "Num": "-1",
+          "Color": "4278255360",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocals In",
+          "Pos": "130.168551",
+          "Num": "2",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Loopl",
+          "Pos": "130.168551",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "195.254119",
+          "Num": "3",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove 2",
+          "Pos": "244.068295",
+          "Num": "4",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section Outro",
+          "Pos": "341.696647",
+          "Num": "5",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "loop",
+          "Name": "Synth Loopl",
+          "Pos": "374.239431",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/15. Edu Schwartz - Quiet Inside (Madraas Remix).flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green orange yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "0.038435",
+          "Num": "1",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Intro Synthl",
+          "Pos": "0.038435",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Main Groove",
+          "Pos": "64.038435",
+          "Num": "2",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "loop",
+          "Name": "Rhythm Sectionl",
+          "Pos": "64.038435",
+          "Num": "-1",
+          "Color": "4278255360",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal In",
+          "Pos": "128.038435",
+          "Num": "3",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Loopl",
+          "Pos": "128.038435",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "3"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "192.038435",
+          "Num": "4",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove 2",
+          "Pos": "256.038435",
+          "Num": "5",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Outro Groove",
+          "Pos": "384.038435",
+          "Num": "6",
+          "Color": "4278255360"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/16. Lee Burridge - Moogami.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "green orange purple yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "0.058662",
+          "Num": "1",
+          "Color": "4288020735"
+        },
+        {
+          "Type": "loop",
+          "Name": "Intro Drum Loopl",
+          "Pos": "0.058662",
+          "Num": "-1",
+          "Color": "4288020735",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Bass &amp; Synth In",
+          "Pos": "63.530406",
+          "Num": "2",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocals In",
+          "Pos": "111.134214",
+          "Num": "3",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Groove Loopl",
+          "Pos": "111.134214",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "206.341830",
+          "Num": "4",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Break Loopl",
+          "Pos": "206.341830",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "3"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove 2",
+          "Pos": "269.813574",
+          "Num": "5",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section",
+          "Pos": "460.228806",
+          "Num": "6",
+          "Color": "4278255360"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/17. Tim Engelhardt - When the Distance Disappears.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green purple",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "0.130816",
+          "Num": "1",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section",
+          "Pos": "64.130816",
+          "Num": "2",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section",
+          "Pos": "128.130816",
+          "Num": "3",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "256.130816",
+          "Num": "4",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Synthl",
+          "Pos": "256.130816",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Main Groove",
+          "Pos": "320.130816",
+          "Num": "5",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "loop",
+          "Name": "Rhythm Sectionl",
+          "Pos": "384.130816",
+          "Num": "-1",
+          "Color": "4278255360",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Outro Begins",
+          "Pos": "448.130816",
+          "Num": "6",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "loop",
+          "Name": "Drum Loopl",
+          "Pos": "480.130816",
+          "Num": "-1",
+          "Color": "4288020735",
+          "Size": "32.0",
+          "Slot": "3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/18. Tim Green - To Know Nothing.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green orange purple yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "0.000319",
+          "Num": "1",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Intro Synthl",
+          "Pos": "0.000319",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section",
+          "Pos": "31.736191",
+          "Num": "2",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocals In",
+          "Pos": "126.943807",
+          "Num": "3",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Groovel",
+          "Pos": "126.943807",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "253.887295",
+          "Num": "4",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove 2",
+          "Pos": "317.359039",
+          "Num": "5",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Outro Drums",
+          "Pos": "476.038399",
+          "Num": "6",
+          "Color": "4288020735"
+        },
+        {
+          "Type": "loop",
+          "Name": "Outro Drum Loopl",
+          "Pos": "476.038399",
+          "Num": "-1",
+          "Color": "4288020735",
+          "Size": "32.0",
+          "Slot": "3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/19. Super Flu - Insi.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green orange purple yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "0.230340",
+          "Num": "1",
+          "Color": "4288020735"
+        },
+        {
+          "Type": "loop",
+          "Name": "Drum Loopl",
+          "Pos": "31.705732",
+          "Num": "-1",
+          "Color": "4288020735",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "63.181124",
+          "Num": "2",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Full Mix",
+          "Pos": "126.131908",
+          "Num": "3",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Synth Section",
+          "Pos": "189.082692",
+          "Num": "4",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Synthl",
+          "Pos": "189.082692",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Build",
+          "Pos": "220.558084",
+          "Num": "5",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Loopl",
+          "Pos": "220.558084",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "3"
+        },
+        {
+          "Type": "cue",
+          "Name": "Main Groove",
+          "Pos": "252.033476",
+          "Num": "6",
+          "Color": "4294967040"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/20. Hermanez - Jinx (Volen Sentir Pure Magic Healing).flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green orange yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "-0.001791",
+          "Num": "1",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section",
+          "Pos": "62.948993",
+          "Num": "2",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "loop",
+          "Name": "Rhythm Groovel",
+          "Pos": "62.948993",
+          "Num": "-1",
+          "Color": "4278255360",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocals Enter",
+          "Pos": "125.899777",
+          "Num": "3",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Groovel",
+          "Pos": "125.899777",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "251.801345",
+          "Num": "4",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Breakdown Vocal Breakl",
+          "Pos": "283.276737",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "3"
+        },
+        {
+          "Type": "cue",
+          "Name": "Main Groove",
+          "Pos": "346.227521",
+          "Num": "5",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Outro",
+          "Pos": "472.129089",
+          "Num": "6",
+          "Color": "4278190335"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/21. Swoose - Lotus.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green orange purple yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro Rhythm",
+          "Pos": "-0.000794",
+          "Num": "1",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Synth In",
+          "Pos": "30.235238",
+          "Num": "2",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "90.707302",
+          "Num": "3",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Synth Section Loopl",
+          "Pos": "90.707302",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Groove",
+          "Pos": "120.943334",
+          "Num": "4",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Main Vocal Loopl",
+          "Pos": "120.943334",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Main Breakdown",
+          "Pos": "181.415398",
+          "Num": "5",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Main Groove",
+          "Pos": "226.769446",
+          "Num": "6",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Outro Drumsl",
+          "Pos": "347.713574",
+          "Num": "-1",
+          "Color": "4288020735",
+          "Size": "32.0",
+          "Slot": "3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/22. ELWD - U MAKE ME.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green orange purple yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "0.025986",
+          "Num": "1",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Synth Pianol",
+          "Pos": "0.025986",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section",
+          "Pos": "16.025250",
+          "Num": "2",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Sample",
+          "Pos": "32.024514",
+          "Num": "3",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Groovel",
+          "Pos": "32.024514",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "80.022306",
+          "Num": "4",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Main Groove",
+          "Pos": "96.021570",
+          "Num": "5",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Drum Outro",
+          "Pos": "160.018626",
+          "Num": "6",
+          "Color": "4288020735"
+        },
+        {
+          "Type": "loop",
+          "Name": "Drum Breakl",
+          "Pos": "160.018626",
+          "Num": "-1",
+          "Color": "4288020735",
+          "Size": "32.0",
+          "Slot": "3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/24. JD. Reid - where the flowers grow.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green orange yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "0.094958",
+          "Num": "1",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Mix",
+          "Pos": "23.089230",
+          "Num": "2",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Rhythm Sectionl",
+          "Pos": "46.083502",
+          "Num": "-1",
+          "Color": "4278255360",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Chorus",
+          "Pos": "69.077774",
+          "Num": "3",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Breakdown",
+          "Pos": "115.066318",
+          "Num": "4",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Breakdownl",
+          "Pos": "115.066318",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Groove",
+          "Pos": "138.060590",
+          "Num": "5",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Outro",
+          "Pos": "184.049134",
+          "Num": "6",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Outro Loopl",
+          "Pos": "184.049134",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/25. Tristan De Liege - Raindrop.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue green orange yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "0.937358",
+          "Num": "1",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Intro Synthl",
+          "Pos": "0.937358",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section",
+          "Pos": "18.392238",
+          "Num": "2",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "loop",
+          "Name": "Rhythm Sectionl",
+          "Pos": "18.392238",
+          "Num": "-1",
+          "Color": "4278255360",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocals Enter",
+          "Pos": "35.847118",
+          "Num": "3",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Breakdown",
+          "Pos": "53.301998",
+          "Num": "4",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Vocal Breakdownl",
+          "Pos": "53.301998",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "3"
+        },
+        {
+          "Type": "cue",
+          "Name": "Drop",
+          "Pos": "88.211758",
+          "Num": "5",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Main Groove",
+          "Pos": "123.121518",
+          "Num": "6",
+          "Color": "4294934272"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/26. ALVA - Social Club.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "green purple yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro Vocal Groove",
+          "Pos": "0.063864",
+          "Num": "1",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Rhythm Section",
+          "Pos": "63.014648",
+          "Num": "2",
+          "Color": "4278255360"
+        },
+        {
+          "Type": "loop",
+          "Name": "Rhythm Sectionl",
+          "Pos": "63.014648",
+          "Num": "-1",
+          "Color": "4278255360",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Main Drop",
+          "Pos": "125.965432",
+          "Num": "3",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Main Vocal Dropl",
+          "Pos": "125.965432",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Second Vocal Mix",
+          "Pos": "251.867000",
+          "Num": "4",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Final Vocal Mix",
+          "Pos": "283.342392",
+          "Num": "5",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Outro Drums",
+          "Pos": "346.293176",
+          "Num": "6",
+          "Color": "4288020735"
+        },
+        {
+          "Type": "loop",
+          "Name": "Outro Drumsl",
+          "Pos": "346.293176",
+          "Num": "-1",
+          "Color": "4288020735",
+          "Size": "32.0",
+          "Slot": "3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/27. Yeng Constantino - Ikaw.flac",
+      "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "comment": "blue orange yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Intro",
+          "Pos": "0.094354",
+          "Num": "1",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "loop",
+          "Name": "Intro Synthl",
+          "Pos": "0.094354",
+          "Num": "-1",
+          "Color": "4278190335",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Verse 1 Vocals",
+          "Pos": "16.094354",
+          "Num": "2",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Chorus 1",
+          "Pos": "52.094354",
+          "Num": "3",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "loop",
+          "Name": "Acoustic Chorus Loopl",
+          "Pos": "52.094354",
+          "Num": "-1",
+          "Color": "4294934272",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Instrumental Break",
+          "Pos": "84.094354",
+          "Num": "4",
+          "Color": "4278190335"
+        },
+        {
+          "Type": "cue",
+          "Name": "Full Band Groove",
+          "Pos": "180.094354",
+          "Num": "5",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Climax Full Mixl",
+          "Pos": "196.094354",
+          "Num": "-1",
+          "Color": "4294967040",
           "Size": "32.0",
           "Slot": "3"
         }
