@@ -4,6 +4,7 @@
     {
       "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/23. Jennie - Pressure.flac",
       "source": "audit_reports/screenshots-6-6-26/all_cues.tsv",
+      "stem_ground_truth": true,
       "comment": "blue orange yellow",
       "pois": [
         {
@@ -80,6 +81,7 @@
     {
       "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/28. Kane Brown - Last Time I Say Sorry.flac",
       "source": "audit_reports/screenshots-6-6-26/all_cues.tsv",
+      "stem_ground_truth": true,
       "comment": "blue orange",
       "pois": [
         {
@@ -156,6 +158,7 @@
     {
       "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/04. Adisyn - Sun Kissed Computer.flac",
       "source": "manual review plus /tmp/vdj_sun_audit generated from current stems",
+      "stem_ground_truth": true,
       "comment": "green yellow",
       "pois": [
         {
@@ -384,6 +387,7 @@
     {
       "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/03. 2814 - \u771f\u5b9f\u306e\u604b.flac",
       "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "stem_ground_truth": true,
       "comment": "blue green orange",
       "pois": [
         {
@@ -451,6 +455,7 @@
     {
       "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/05. OMRI. - Release The Pressure.flac",
       "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "stem_ground_truth": true,
       "comment": "orange yellow",
       "pois": [
         {
@@ -1729,6 +1734,7 @@
     {
       "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 6-6-26/26. ALVA - Social Club.flac",
       "source": "audit_reports/screenshots-6-6-26-recheck/issues.tsv plus live VirtualDJ database readback",
+      "stem_ground_truth": true,
       "comment": "green purple yellow",
       "pois": [
         {

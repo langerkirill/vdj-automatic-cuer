@@ -10,6 +10,10 @@ from .common import (
     MeasureChange,
     MusicAnalysis,
     StemActivity,
+    WRITE_SCOPE_ALL,
+    WRITE_SCOPE_CUES,
+    WRITE_SCOPE_LOOPS,
+    WRITE_SCOPES,
 )
 from .core import AutomaticMusicCuer
 
@@ -24,4 +28,8 @@ __all__ = [
     "MeasureChange",
     "MusicAnalysis",
     "StemActivity",
+    "WRITE_SCOPE_ALL",
+    "WRITE_SCOPE_CUES",
+    "WRITE_SCOPE_LOOPS",
+    "WRITE_SCOPES",
 ]

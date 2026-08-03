@@ -128,8 +128,7 @@ class FileProcessorMixin:
             # Process cues
             cue_count = 0
             for cue_data in analysis.get("measure_changes", [])[:6]:  # Max 6 cues
-                # Use hybrid approach: prefer Gemini's timestamp if it's close
-                # to a "1" beat
+                # Cue points always land on a verified bar downbeat.
                 gemini_time = cue_data.get("timestamp", 0)
                 aligned_time = self.validate_timing_hybrid(
                     gemini_time, working_bpm, audio_file_path
@@ -173,8 +172,8 @@ class FileProcessorMixin:
                     cue_data.get("measure", cue_count),
                 )
 
-                # Sanitize cue name for XML safety
-                cue_name = self.sanitize_xml_content(cue_name)
+                # Sanitize cue name (no &, no double-entity encoding)
+                cue_name = self.sanitize_marker_name(cue_name)
 
                 cue_poi = ET.Element("Poi")
                 cue_poi.set("Name", cue_name)
@@ -228,12 +227,14 @@ class FileProcessorMixin:
                     loop_data.get("elements", [])
                 )
 
-                # Ensure loop name ends with 'l' suffix
-                if not loop_name.endswith("l"):
+                # Optional short 'l' suffix for hotcue-style names, not "...Loopl"
+                if loop_name.lower().endswith("loop"):
+                    pass
+                elif not loop_name.endswith("l"):
                     loop_name = f"{loop_name}l"
 
                 # Sanitize loop name for XML safety
-                loop_name = self.sanitize_xml_content(loop_name)
+                loop_name = self.sanitize_marker_name(loop_name)
 
                 # Skip if we already have this type of loop
                 if loop_name in used_loop_types:
@@ -242,11 +243,10 @@ class FileProcessorMixin:
                 loop_count += 1
                 used_loop_types.add(loop_name)
 
-                # Use hybrid approach: prefer Gemini's timestamp if it's close
-                # to a "1" beat
+                # Snap loop starts to a beat (prefer 1 when already near it).
                 gemini_time = loop_data.get("start", 0)
                 aligned_time = self.validate_timing_hybrid(
-                    gemini_time, working_bpm, audio_file_path
+                    gemini_time, working_bpm, audio_file_path, grid_beats=1
                 )
 
                 # Skip loops that are beyond song length (leave some buffer)
@@ -407,5 +407,4 @@ class FileProcessorMixin:
             print("🔍 Full traceback:")
             traceback.print_exc()
             return False
-
 

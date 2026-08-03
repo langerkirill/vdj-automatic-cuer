@@ -1,6 +1,7 @@
 """BatchAnalysisMixin for AutomaticMusicCuer."""
 
 from .common import *
+from .precision_gate import apply_precision_gate
 
 
 class BatchAnalysisMixin:
@@ -34,16 +35,24 @@ class BatchAnalysisMixin:
             5. Be very conservative - only mark transitions where you clearly hear
                changes
 
-            For EACH file, find 5-6 significant musical changes where elements
-            ACTUALLY change:
+            For EACH file, find 4-6 high-confidence musical changes where elements
+            ACTUALLY change. Return fewer when the audio does not support more:
             - Real intro (before main elements start)
             - When drums ACTUALLY enter (not just percussion)
             - When vocals ACTUALLY start singing (not just vocal sounds)
             - Breakdown sections (where elements drop out)
             - Drops/build-ups (energy changes)
 
-            For EACH file, find 3 loop sections for DJing (16-32 beats long).
-            IMPORTANT: Try to find ALL THREE types:
+            For EACH file, find 0-3 loop sections for DJing (8, 16, or 32 beats).
+            Prefer 16-beat loops; use 8 for tight repeating phrases, especially
+            instrument-only intros in the first bars (melodic intro loops).
+            Prefer loop starts on beat 1, but other beats are OK if the wrap is
+            cleaner. Return fewer loops when the audio does not contain a clean
+            candidate — zero loops is correct for many tracks.
+            A loop must wrap cleanly: level and texture at the end must match the
+            start. Evolving jazz, progressive harmony, and non-repeating vocal
+            phrases are not loops — return zero rather than a bad wrap.
+            Never invent a loop type to satisfy a quota. Candidate types are:
             1. DRUM LOOP: A section with ONLY drums/percussion, no melody, no vocals -
                perfect for DJ transitions
             2. VOCAL LOOP: A section with prominent vocals (with or without other
@@ -83,16 +92,17 @@ class BatchAnalysisMixin:
             Color Rules (be strict):
             - blue: Only melody, NO drums, NO vocals
             - green: Melody + drums, NO vocals
-            - yellow: Full mix (drums + melody + vocals)
+            - yellow: Drums + vocals, with or without melody
             - purple: Only drums/percussion
-            - orange: Melody + vocals, NO drums
+            - orange: Vocals with NO drums, with or without melody
 
             RESPONSE FORMAT REQUIREMENTS:
             - All timestamps must be rounded to 2 decimal places (e.g., 45.67)
             - Each cue must have: timestamp, elements (array), cue_name (string),
-              color (string)
+              color (string), role (string), confidence (0.0-1.0)
             - Each loop must have: start, length_beats, elements (array),
-              loop_name (string), color (string)
+              loop_name (string), color (string), role (string),
+              confidence (0.0-1.0)
             - Use descriptive names like "Intro", "Drums In", "Vocal Drop",
               "Build Up", "Breakdown"
             - NEVER use extremely long decimal numbers
@@ -116,10 +126,31 @@ Analyze each file independently and return complete analysis for all
                     # Fallback if the response structure is different
                     analyses_list = batch_data if isinstance(batch_data, list) else []
 
-                analyses_list = [
-                    self._normalize_analysis_data(analysis_data)
-                    for analysis_data in analyses_list
-                ]
+                validated_analyses = []
+                for index, analysis_data in enumerate(analyses_list):
+                    if index >= len(uploaded_files):
+                        break
+                    audio_file_path = uploaded_files[index][0]
+                    bpm = self.get_song_bpm_from_database(audio_file_path)
+                    actual_bpm = self._actual_bpm(bpm)
+                    beatgrid_offset = 0.0
+                    if actual_bpm:
+                        beatgrid_offset = self._get_verified_beatgrid_offset(
+                            audio_file_path, bpm
+                        )
+                    analysis_data = self._align_analysis_candidates(
+                        analysis_data, actual_bpm, beatgrid_offset
+                    )
+                    analysis_data = self._normalize_analysis_data(analysis_data)
+                    analysis_data = self._validate_structural_assertions(
+                        analysis_data, audio_file_path
+                    )
+                    validated_analyses.append(
+                        apply_precision_gate(
+                            analysis_data, actual_bpm, beatgrid_offset
+                        )
+                    )
+                analyses_list = validated_analyses
 
                 print(
                     f"✅ Successfully analyzed {len(analyses_list)} " f"songs in batch"

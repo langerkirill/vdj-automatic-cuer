@@ -127,11 +127,101 @@ def combined_stem_lanes(stems: dict[str, list[float]]) -> dict[str, list[float]]
     return lanes
 
 
+def beat_duration_seconds(track: Track) -> Optional[float]:
+    if track.scan_bpm and 60 <= track.scan_bpm <= 200:
+        return 60.0 / track.scan_bpm
+    return None
+
+
+def grid_alignment_issues(track: Track) -> list[CueIssue]:
+    """Flag cues/loops that are not on the stored VirtualDJ beat/bar grid."""
+    issues: list[CueIssue] = []
+    beat = beat_duration_seconds(track)
+    if beat is None:
+        return issues
+
+    # Prefer beatgrid POI; fall back to Scan Phase (VDJ's stored '1'). Using 0.0
+    # when Phase is non-zero falsely flags phase-aligned cues (No Rhyme / Hold Me).
+    if track.beatgrid is not None:
+        offset = track.beatgrid
+    elif track.scan_phase is not None:
+        offset = track.scan_phase
+    else:
+        offset = 0.0
+    bar = beat * 4.0
+    track_name = Path(track.path).name
+
+    if (
+        track.beatgrid is not None
+        and track.scan_phase is not None
+        and abs(track.beatgrid - track.scan_phase) > 0.02
+    ):
+        issues.append(
+            CueIssue(
+                track=track_name,
+                cue="beatgrid",
+                timestamp=track.beatgrid,
+                severity="high",
+                issue=(
+                    f"Scan Phase ({track.scan_phase:.3f}s) disagrees with beatgrid "
+                    f"({track.beatgrid:.3f}s); VirtualDJ may draw the wrong '1'"
+                ),
+                cue_color="unknown",
+                expected_color="unknown",
+                elements="grid",
+            )
+        )
+
+    for poi in track.pois:
+        if poi.poi_type == "cue":
+            # Cues should land on bar downbeats (beat 1).
+            within = (poi.pos - offset) % bar
+            distance = min(within, bar - within)
+            if distance > beat * 0.12:  # > ~12% of a beat off the bar line
+                beat_in_bar = within / beat + 1.0
+                issues.append(
+                    CueIssue(
+                        track=track_name,
+                        cue=poi.name,
+                        timestamp=poi.pos,
+                        severity="high",
+                        issue=(
+                            f"Cue is off the bar '1' (≈ beat {beat_in_bar:.2f} of the bar, "
+                            f"{distance * 1000:.0f}ms from downbeat)"
+                        ),
+                        cue_color=poi.color_name,
+                        expected_color=poi.color_name,
+                        elements="grid",
+                    )
+                )
+        elif poi.poi_type == "loop":
+            within = (poi.pos - offset) % beat
+            distance = min(within, beat - within)
+            if distance > beat * 0.12:
+                issues.append(
+                    CueIssue(
+                        track=track_name,
+                        cue=poi.name,
+                        timestamp=poi.pos,
+                        severity="medium",
+                        issue=(
+                            f"Loop start is off the beat grid "
+                            f"({distance * 1000:.0f}ms from nearest beat)"
+                        ),
+                        cue_color=poi.color_name,
+                        expected_color=poi.color_name,
+                        elements="grid",
+                    )
+                )
+    return issues
+
+
 def inspect_track(track: Track, analysis: AudioAnalysis) -> tuple[list[CueObservation], list[CueIssue]]:
     observations = []
     issues = []
     stem_envelopes = analysis.stems
     has_stem_evidence = bool(stem_envelopes)
+    issues.extend(grid_alignment_issues(track))
 
     for poi in track.pois:
         raw_scores = {

@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 import automatic_music_cuer_gemini as cuer_module
+from vdj_cuer.stem_evidence import StemProfile
 
 
 class AnalysisPostprocessingTests(unittest.TestCase):
@@ -196,6 +197,62 @@ class AnalysisPostprocessingTests(unittest.TestCase):
         )
 
         self.assertEqual(fixed["loop_segments"], [])
+
+    def test_downgrades_drop_name_when_energy_does_not_rise(self):
+        analysis = {
+            "measure_changes": [
+                {
+                    "timestamp": 4.0,
+                    "elements": ["drums", "synth", "vocals"],
+                    "cue_name": "Main Drop",
+                    "role": "drop",
+                    "color": "yellow",
+                }
+            ],
+            "loop_segments": [],
+        }
+        flat_profile = StemProfile.from_frames([0.5] * 32, frame_seconds=0.5)
+
+        with patch(
+            "vdj_cuer.analysis_postprocess.StemProfile.decode",
+            return_value=flat_profile,
+        ):
+            validated = self.cuer._validate_structural_assertions(
+                analysis, "/tmp/song.flac"
+            )
+
+        cue = validated["measure_changes"][0]
+        self.assertEqual(cue["cue_name"], "Main Vocal Mix")
+        self.assertEqual(cue["role"], "section")
+        self.assertTrue(cue["assertion_downgraded"])
+
+    def test_keeps_drop_name_when_energy_rises(self):
+        analysis = {
+            "measure_changes": [
+                {
+                    "timestamp": 4.0,
+                    "elements": ["drums", "synth"],
+                    "cue_name": "Drop",
+                    "role": "drop",
+                    "color": "green",
+                }
+            ],
+            "loop_segments": [],
+        }
+        rising_profile = StemProfile.from_frames(
+            [0.2] * 8 + [0.8] * 8,
+            frame_seconds=0.5,
+        )
+
+        with patch(
+            "vdj_cuer.analysis_postprocess.StemProfile.decode",
+            return_value=rising_profile,
+        ):
+            validated = self.cuer._validate_structural_assertions(
+                analysis, "/tmp/song.flac"
+            )
+
+        self.assertEqual(validated["measure_changes"][0]["cue_name"], "Drop")
 
 
 if __name__ == "__main__":

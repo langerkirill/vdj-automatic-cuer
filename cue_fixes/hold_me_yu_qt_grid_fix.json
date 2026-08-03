@@ -1,0 +1,70 @@
+{
+  "tracks": [
+    {
+      "path": "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Screenshots 7-15-26/26. Y U QT, Denham Audio - Hold Me.m4a",
+      "comment": "orange yellow",
+      "pois": [
+        {
+          "Type": "cue",
+          "Name": "Vocal Intro",
+          "Pos": "0.451284",
+          "Num": "1",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Groove",
+          "Pos": "28.277524",
+          "Num": "2",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "cue",
+          "Name": "Main Drop",
+          "Pos": "56.103764",
+          "Num": "3",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Drop Loop",
+          "Pos": "56.103764",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "1"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Break",
+          "Pos": "83.930004",
+          "Num": "4",
+          "Color": "4294934272"
+        },
+        {
+          "Type": "cue",
+          "Name": "Second Drop",
+          "Pos": "125.669364",
+          "Num": "5",
+          "Color": "4294967040"
+        },
+        {
+          "Type": "loop",
+          "Name": "Second Drop Loop",
+          "Pos": "125.669364",
+          "Num": "-1",
+          "Color": "4294967040",
+          "Size": "32.0",
+          "Slot": "2"
+        },
+        {
+          "Type": "cue",
+          "Name": "Vocal Outro",
+          "Pos": "153.495604",
+          "Num": "6",
+          "Color": "4294934272"
+        }
+      ]
+    }
+  ]
+}

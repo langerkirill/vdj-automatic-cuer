@@ -18,6 +18,29 @@ from vdj_cuer import (
     MusicAnalysis,
     StemActivity,
 )
+from vdj_cuer.common import (
+    WRITE_SCOPE_ALL,
+    WRITE_SCOPE_CUES,
+    WRITE_SCOPE_LOOPS,
+)
+
+# Default 1: large VirtualDJ libraries make concurrent analysis + DB work crash-prone.
+MAX_BATCH_SIZE = 2
+DEFAULT_BATCH_SIZE = 1
+
+
+def parse_batch_size(value: str) -> int:
+    """Limit concurrent audio work to a machine-safe range."""
+    try:
+        batch_size = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("batch size must be an integer") from error
+    if not 1 <= batch_size <= MAX_BATCH_SIZE:
+        raise argparse.ArgumentTypeError(
+            f"batch size must be between 1 and {MAX_BATCH_SIZE}; "
+            "larger track lists are split into multiple batches"
+        )
+    return batch_size
 
 
 def expand_audio_files(paths):
@@ -109,9 +132,12 @@ def main():
     parser.add_argument(
         "--batch-size",
         "-b",
-        type=int,
-        default=5,
-        help="Number of songs to process in each batch (default: 5)",
+        type=parse_batch_size,
+        default=DEFAULT_BATCH_SIZE,
+        help=(
+            f"Songs processed per batch (default: {DEFAULT_BATCH_SIZE}; "
+            f"max {MAX_BATCH_SIZE}). Use 1 on large libraries to avoid RAM spikes."
+        ),
     )
     parser.add_argument(
         "--batch-delay",
@@ -125,6 +151,44 @@ def main():
         type=int,
         default=None,
         help="Maximum number of songs to process (default: all songs)",
+    )
+    parser.add_argument(
+        "--audit",
+        dest="audit",
+        action="store_true",
+        default=True,
+        help=(
+            "After each successful write, generate a waveform image and compare "
+            "cues against the beatgrid (default: on)"
+        ),
+    )
+    parser.add_argument(
+        "--no-audit",
+        dest="audit",
+        action="store_false",
+        help="Skip post-cue visual/grid audits",
+    )
+    parser.add_argument(
+        "--audit-dir",
+        default=None,
+        help="Directory for post-cue audits (default: audit_reports/auto/<timestamp>)",
+    )
+    retry_group = parser.add_mutually_exclusive_group()
+    retry_group.add_argument(
+        "--cues-only",
+        action="store_true",
+        help=(
+            "Retry cues only: rewrite cue points from analysis, leave existing "
+            "loops unchanged in the database"
+        ),
+    )
+    retry_group.add_argument(
+        "--loops-only",
+        action="store_true",
+        help=(
+            "Retry loops only: rewrite loops from analysis, leave existing "
+            "cue points unchanged in the database"
+        ),
     )
 
     args = parser.parse_args()
@@ -154,6 +218,22 @@ def main():
 
     # Initialize cuer (will auto-load from .env if api_key not provided)
     cuer = AutomaticMusicCuer(args.api_key, args.database, args.model)
+    if args.cues_only:
+        cuer.write_scope = WRITE_SCOPE_CUES
+        print("🎯 Mode: cues only (existing loops will be kept)")
+    elif args.loops_only:
+        cuer.write_scope = WRITE_SCOPE_LOOPS
+        print("🎯 Mode: loops only (existing cues will be kept)")
+    else:
+        cuer.write_scope = WRITE_SCOPE_ALL
+    cuer.post_cue_audit_enabled = bool(args.audit) and not args.dry_run
+    if args.audit_dir:
+        cuer.post_cue_audit_dir = args.audit_dir
+    if cuer.post_cue_audit_enabled:
+        print(
+            "🖼️  Post-cue audits enabled "
+            "(waveform + beatgrid comparison after each write)"
+        )
 
     if not args.dry_run and cuer.is_virtualdj_running():
         print("❌ VirtualDJ appears to be running.")
@@ -165,62 +245,64 @@ def main():
     if args.backup and not args.dry_run:
         cuer.backup_database()
 
-    # Process files in batches using efficient batch processing
+    # One event loop for the whole run. Recreating asyncio.run() per batch leaves
+    # the Gemini async client bound to a closed loop ("Event loop is closed").
     success_count = 0
 
-    for batch_num in range(num_batches):
-        start_idx = batch_num * batch_size
-        end_idx = min(start_idx + batch_size, total_files)
-        batch_files = audio_files[start_idx:end_idx]
-
-        print(
-            f"\n🔄 Batch {batch_num + 1}/{num_batches} - "
-            f"Processing {len(batch_files)} files"
-        )
-        print(f"📊 Overall Progress: {start_idx}/{total_files} files completed")
-
-        # Check if all batch files exist
-        valid_batch_files = []
-        for audio_file in batch_files:
-            if os.path.exists(audio_file):
-                valid_batch_files.append(audio_file)
-            else:
-                print(f"❌ File not found: {audio_file}")
-
-        if not valid_batch_files:
-            print(f"❌ No valid files in batch {batch_num + 1}")
-            continue
-
-        try:
-            # Use async batch processing for concurrent uploads and retries
-            batch_results = asyncio.run(
-                cuer.process_audio_batch_async(valid_batch_files, args.dry_run)
-            )
-
-            # Count successes
-            batch_success = sum(batch_results)
-            success_count += batch_success
+    async def process_all_batches() -> int:
+        completed = 0
+        for batch_num in range(num_batches):
+            start_idx = batch_num * batch_size
+            end_idx = min(start_idx + batch_size, total_files)
+            batch_files = audio_files[start_idx:end_idx]
 
             print(
-                f"\n✅ Batch {batch_num + 1} complete: {batch_success}/"
-                f"{len(valid_batch_files)} files processed successfully"
+                f"\n🔄 Batch {batch_num + 1}/{num_batches} - "
+                f"Processing {len(batch_files)} files"
             )
+            print(f"📊 Overall Progress: {start_idx}/{total_files} files completed")
 
-        except KeyboardInterrupt:
-            print("\n⏹️  Processing interrupted by user")
-            print(f"📊 Processed {success_count} files before interruption")
-            return
-        except Exception as e:
-            print(f"❌ Error processing batch {batch_num + 1}: {e}")
-            import traceback
+            valid_batch_files = []
+            for audio_file in batch_files:
+                if os.path.exists(audio_file):
+                    valid_batch_files.append(audio_file)
+                else:
+                    print(f"❌ File not found: {audio_file}")
 
-            traceback.print_exc()
-            continue
+            if not valid_batch_files:
+                print(f"❌ No valid files in batch {batch_num + 1}")
+                continue
 
-        # Add delay between batches if specified
-        if args.batch_delay > 0 and batch_num < num_batches - 1:
-            print(f"⏳ Waiting {args.batch_delay} seconds before next batch...")
-            time.sleep(args.batch_delay)
+            try:
+                batch_results = await cuer.process_audio_batch_async(
+                    valid_batch_files, args.dry_run
+                )
+                batch_success = sum(batch_results)
+                completed += batch_success
+                print(
+                    f"\n✅ Batch {batch_num + 1} complete: {batch_success}/"
+                    f"{len(valid_batch_files)} files processed successfully"
+                )
+            except Exception as e:
+                print(f"❌ Error processing batch {batch_num + 1}: {e}")
+                import traceback
+
+                traceback.print_exc()
+
+            if args.batch_delay > 0 and batch_num < num_batches - 1:
+                print(
+                    f"⏳ Waiting {args.batch_delay} seconds before next batch..."
+                )
+                await asyncio.sleep(args.batch_delay)
+
+        return completed
+
+    try:
+        success_count = asyncio.run(process_all_batches())
+    except KeyboardInterrupt:
+        print("\n⏹️  Processing interrupted by user")
+        print(f"📊 Processed {success_count} files before interruption")
+        return
 
     print(
         f"\n🎯 All batches complete: {success_count}/{total_files} files "

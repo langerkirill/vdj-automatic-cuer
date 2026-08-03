@@ -62,6 +62,40 @@ def render_svg(track: Track, analysis: AudioAnalysis, issues: list[CueIssue], ou
 
     plot_y = top
     plot_h = (lane_h + 12) * len(lanes) - 12
+
+    # Draw bar downbeats so cues can be visually compared against the grid.
+    if analysis.duration > 0 and track.scan_bpm and 60 <= track.scan_bpm <= 200:
+        beat = 60.0 / track.scan_bpm
+        bar = beat * 4.0
+        if track.beatgrid is not None:
+            offset = track.beatgrid
+        elif track.scan_phase is not None:
+            offset = track.scan_phase
+        else:
+            offset = 0.0
+        first = offset
+        while first > 0:
+            first -= bar
+        t = first
+        while t < analysis.duration:
+            if t >= 0:
+                x = plot_x + (t / analysis.duration) * plot_w
+                parts.append(
+                    f'<line x1="{x:.1f}" y1="{plot_y}" x2="{x:.1f}" y2="{plot_y + plot_h}" '
+                    f'stroke="#475569" stroke-width="1" stroke-dasharray="2 6" opacity="0.7"/>'
+                )
+            t += bar
+        if track.beatgrid is not None and track.beatgrid >= 0:
+            x = plot_x + (track.beatgrid / analysis.duration) * plot_w
+            parts.append(
+                f'<line x1="{x:.1f}" y1="{plot_y}" x2="{x:.1f}" y2="{plot_y + plot_h}" '
+                f'stroke="#f8fafc" stroke-width="2" opacity="0.9"/>'
+            )
+            parts.append(
+                f'<text x="{x + 4:.1f}" y="{plot_y - 6}" fill="#f8fafc" '
+                f'font-family="Arial" font-size="11">1 @ {track.beatgrid:.2f}s</text>'
+            )
+
     for poi in track.pois:
         if analysis.duration <= 0:
             continue

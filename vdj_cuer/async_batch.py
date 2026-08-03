@@ -1,14 +1,18 @@
-"""AsyncBatchMixin for AutomaticMusicCuer."""
+"""Resource-bounded asynchronous batch processing with surgical DB writes."""
 
 from .common import *
 
 
+# Keep concurrent Gemini/ffmpeg work low to protect host RAM.
+MAX_CONCURRENT_AUDIO_TASKS = 1
+
+
 class AsyncBatchMixin:
     async def upload_file_with_retry(
-        self, audio_file_path: str, max_retries: int = 5
+        self, audio_file_path: str, max_retries: int = DEFAULT_UPLOAD_RETRIES
     ) -> Optional[object]:
-        """Upload a single file with exponential backoff retry logic"""
-        file_size = os.path.getsize(audio_file_path) / (1024 * 1024)  # MB
+        """Upload one file asynchronously with cancellable retry delays."""
+        file_size = os.path.getsize(audio_file_path) / (1024 * 1024)
         print(
             f"📤 Uploading {os.path.basename(audio_file_path)} "
             f"({file_size:.1f} MB)..."
@@ -16,292 +20,157 @@ class AsyncBatchMixin:
 
         for retry in range(max_retries):
             try:
-                uploaded_file = await asyncio.get_running_loop().run_in_executor(
-                    None, self._upload_audio_file, audio_file_path
-                )
+                uploaded_file = await self._upload_audio_file_async(audio_file_path)
                 print(f"✅ {os.path.basename(audio_file_path)} upload complete")
                 return uploaded_file
-            except Exception as e:
-                if self._is_retryable_error(e, NETWORK_ERROR_TERMS) and (
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if self._is_retryable_error(error, NETWORK_ERROR_TERMS) and (
                     retry < max_retries - 1
                 ):
-                    wait_time = min(
-                        (retry + 1) ** 2, 30
-                    )  # Exponential backoff: 1s, 4s, 9s...
+                    wait_time = min((retry + 1) ** 2, 30)
                     print(
-                        f"⚠️  {os.path.basename(audio_file_path)} upload "
-                        f"failed (attempt {retry + 1}/{max_retries}): {e}"
+                        f"⚠️  {os.path.basename(audio_file_path)} upload failed "
+                        f"(attempt {retry + 1}/{max_retries}): {error}"
                     )
                     print(f"🔄 Retrying in {wait_time} seconds...")
                     await asyncio.sleep(wait_time)
-                else:
-                    print(
-                        f"❌ Failed to upload {os.path.basename(audio_file_path)} "
-                        f"after {max_retries} attempts: {e}"
-                    )
-                    return None
-
+                    continue
+                print(
+                    f"❌ Failed to upload {os.path.basename(audio_file_path)} "
+                    f"after {max_retries} attempts: {error}"
+                )
+                return None
         return None
+
+    async def _run_bounded(self, entries, operation):
+        """Run an async per-entry operation with a hard concurrency ceiling."""
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_AUDIO_TASKS)
+
+        async def run_one(entry):
+            async with semaphore:
+                return await operation(entry)
+
+        return await asyncio.gather(
+            *(run_one(entry) for entry in entries), return_exceptions=True
+        )
 
     async def process_audio_batch_async(
         self, audio_file_paths: List[str], dry_run: bool = False
     ) -> List[bool]:
-        """Process multiple audio files concurrently using asyncio"""
-        print(f"\n🎶 Processing batch of {len(audio_file_paths)} songs concurrently:")
+        """
+        Process tracks with bounded analysis and surgical per-song DB writes.
+
+        Never materializes the full VirtualDJ XML tree for multi-song batches.
+        """
+        print(f"\n🎶 Processing batch of {len(audio_file_paths)} songs:")
         for path in audio_file_paths:
             print(f"   - {os.path.basename(path)}")
 
-        results = []
-        valid_files = []
-
-        # First, validate all files exist in VDJ database
-        for audio_file_path in audio_file_paths:
-            if self._validate_file_in_database(audio_file_path):
-                valid_files.append(audio_file_path)
-                results.append(True)  # Placeholder, will be updated
-            else:
-                results.append(False)
-
-        if not valid_files:
+        results = [False] * len(audio_file_paths)
+        valid_entries = [
+            (index, path)
+            for index, path in enumerate(audio_file_paths)
+            if self._validate_file_in_database(path)
+        ]
+        if not valid_entries:
             print("❌ No valid files found in VDJ database")
             return results
+        print(f"✅ {len(valid_entries)} files validated in VDJ database")
 
-        print(f"✅ {len(valid_files)} files validated in VDJ database")
-
+        uploaded_entries = []
         try:
-            # Upload all files concurrently
-            print(f"📤 Uploading {len(valid_files)} audio files concurrently...")
-            upload_tasks = [
-                self.upload_file_with_retry(file_path) for file_path in valid_files
-            ]
-            uploaded_results = await asyncio.gather(
-                *upload_tasks, return_exceptions=True
-            )
+            print(f"📤 Uploading {len(valid_entries)} audio files...")
 
-            # Filter successful uploads
-            uploaded_files = []
-            successful_uploads = 0
-            for i, (file_path, result) in enumerate(zip(valid_files, uploaded_results)):
-                if isinstance(result, Exception):
+            async def upload(entry):
+                index, file_path = entry
+                return index, file_path, await self.upload_file_with_retry(file_path)
+
+            upload_results = await self._run_bounded(valid_entries, upload)
+            for entry, upload_result in zip(valid_entries, upload_results):
+                index, file_path = entry
+                if isinstance(upload_result, Exception):
                     print(
-                        f"❌ Failed to upload "
-                        f"{os.path.basename(file_path)}: {result}"
+                        f"❌ Failed to upload {os.path.basename(file_path)}: "
+                        f"{upload_result}"
                     )
-                elif result is not None:
-                    uploaded_files.append((file_path, result))
-                    successful_uploads += 1
-                else:
+                    continue
+                _, _, uploaded_file = upload_result
+                if uploaded_file is None:
                     print(f"❌ Upload failed for {os.path.basename(file_path)}")
+                    continue
+                uploaded_entries.append((index, file_path, uploaded_file))
 
-            if not uploaded_files:
+            if not uploaded_entries:
                 print("❌ No files uploaded successfully")
-                return [False] * len(audio_file_paths)
-
+                return results
             print(
-                f"✅ Successfully uploaded "
-                f"{successful_uploads}/{len(valid_files)} files"
+                f"✅ Successfully uploaded {len(uploaded_entries)}/"
+                f"{len(valid_entries)} files"
             )
 
-            if dry_run:
-                # For dry run, analyze each song individually
-                print(
-                    f"🤖 Analyzing {len(uploaded_files)} songs with Gemini "
-                    f"(concurrent individual calls)..."
-                )
+            print(f"🤖 Analyzing {len(uploaded_entries)} songs with Gemini...")
 
-                # Create concurrent analysis tasks
-                analysis_tasks = []
-                for audio_file_path, uploaded_file in uploaded_files:
-                    task = asyncio.get_running_loop().run_in_executor(
-                        None,
-                        self.analyze_audio_with_gemini,
-                        audio_file_path,
-                        uploaded_file,
+            async def analyze(entry):
+                index, file_path, uploaded_file = entry
+                analysis = await self.analyze_audio_with_gemini_async(
+                    file_path, uploaded_file
+                )
+                return index, file_path, analysis
+
+            analysis_results = await self._run_bounded(uploaded_entries, analyze)
+            analyzed_entries = []
+            for uploaded_entry, analysis_result in zip(
+                uploaded_entries, analysis_results
+            ):
+                index, file_path, _ = uploaded_entry
+                if isinstance(analysis_result, Exception):
+                    print(
+                        f"❌ Analysis failed for {os.path.basename(file_path)}: "
+                        f"{analysis_result}"
                     )
-                    analysis_tasks.append(task)
+                    self._release_track_resources(file_path)
+                    continue
+                _, _, analysis = analysis_result
+                if not analysis:
+                    print(f"❌ No analysis result for {os.path.basename(file_path)}")
+                    self._release_track_resources(file_path)
+                    continue
+                analyzed_entries.append((index, file_path, analysis))
 
-                # Run all analyses concurrently
-                analysis_results = await asyncio.gather(
-                    *analysis_tasks, return_exceptions=True
-                )
-
-                # Process each song's results (dry run)
-                batch_success = []
-                for i, (audio_file_path, _) in enumerate(uploaded_files):
-                    if (
-                        i < len(analysis_results)
-                        and not isinstance(analysis_results[i], Exception)
-                        and analysis_results[i]
-                    ):
-                        song_analysis = analysis_results[i]
-                        success = self._apply_cues_to_database(
-                            audio_file_path, song_analysis, dry_run=True
-                        )
-                        batch_success.append(success)
-                    else:
-                        if isinstance(analysis_results[i], Exception):
-                            print(
-                                f"❌ Analysis failed for "
-                                f"{os.path.basename(audio_file_path)}: "
-                                f"{analysis_results[i]}"
-                            )
-                        else:
-                            print(
-                                f"❌ No analysis result for "
-                                f"{os.path.basename(audio_file_path)}"
-                            )
-                        batch_success.append(False)
-
-                # Update results for valid files
-                valid_idx = 0
-                for i, success in enumerate(results):
-                    if success:  # This was a valid file
-                        if valid_idx < len(batch_success):
-                            results[i] = batch_success[valid_idx]
-                        else:
-                            results[i] = False
-                        valid_idx += 1
-
+            if not analyzed_entries:
+                print("❌ Failed to analyze any songs")
                 return results
 
-            # For actual processing, analyze each song individually
-            print(
-                f"🤖 Analyzing {len(uploaded_files)} songs with Gemini "
-                f"(concurrent individual calls)..."
-            )
-
-            # Create concurrent analysis tasks
-            analysis_tasks = []
-            for audio_file_path, uploaded_file in uploaded_files:
-                task = asyncio.get_running_loop().run_in_executor(
-                    None,
-                    self.analyze_audio_with_gemini,
-                    audio_file_path,
-                    uploaded_file,
-                )
-                analysis_tasks.append(task)
-
-            # Run all analyses concurrently
-            analysis_results = await asyncio.gather(
-                *analysis_tasks, return_exceptions=True
-            )
-
-            # Filter successful analyses
-            valid_analyses = []
-            valid_file_paths = []
-            for i, (audio_file_path, _) in enumerate(uploaded_files):
-                if (
-                    i < len(analysis_results)
-                    and not isinstance(analysis_results[i], Exception)
-                    and analysis_results[i]
-                ):
-                    valid_analyses.append(analysis_results[i])
-                    valid_file_paths.append(audio_file_path)
-                else:
-                    if isinstance(analysis_results[i], Exception):
-                        print(
-                            f"❌ Analysis failed for "
-                            f"{os.path.basename(audio_file_path)}: "
-                            f"{analysis_results[i]}"
-                        )
-                    else:
-                        print(
-                            f"❌ No analysis result for "
-                            f"{os.path.basename(audio_file_path)}"
-                        )
-
-            if not valid_analyses:
-                print("❌ Failed to analyze any songs")
-                return [False] * len(audio_file_paths)
-
-            # Load the VDJ database once for the entire batch
-            print("📂 Loading VDJ database for batch processing...")
-            root = self.parse_vdj_database()
-            if root is None:
-                print("❌ Could not parse VDJ database for batch modification")
-                return [False] * len(audio_file_paths)
-
-            # Process each song's results and modify the XML tree
-            batch_success = []
-            songs_processed = 0
-
-            # Process valid analyses
-            for audio_file_path, song_analysis in zip(valid_file_paths, valid_analyses):
-                success = self._apply_cues_to_batch_database(
-                    root, audio_file_path, song_analysis
-                )
-                batch_success.append(success)
-                if success:
-                    songs_processed += 1
-
-            # Add failures for songs that couldn't be analyzed
-            failed_songs = len(uploaded_files) - len(valid_analyses)
-            batch_success.extend([False] * failed_songs)
-
-            # Save the database once after processing all songs
-            if songs_processed > 0:
+            # Surgical per-song write: only one Song block is rewritten at a time.
+            for index, file_path, analysis in analyzed_entries:
                 try:
-                    print(
-                        f"💾 Saving database with changes for "
-                        f"{songs_processed} songs..."
+                    wrote = self._apply_cues_to_database(
+                        file_path, analysis, dry_run=dry_run
                     )
-                    original_stats = self._database_integrity_stats(
-                        self.vdj_database_path
-                    )
-                    xml_str = ET.tostring(root, encoding="unicode")
+                    results[index] = wrote
+                    if wrote and not dry_run:
+                        # Customary: render waveform + compare cues to the grid.
+                        self.audit_track_after_cue(file_path, dry_run=False)
+                finally:
+                    self._release_track_resources(file_path)
 
-                    # Ensure CRLF line endings for VDJ compatibility
-                    if "\r\n" not in xml_str and "\n" in xml_str:
-                        xml_str = xml_str.replace("\n", "\r\n")
-
-                    # Validate XML is well-formed
-                    try:
-                        ET.fromstring(xml_str)
-                    except ET.ParseError as e:
-                        raise ValueError(f"Generated XML is malformed: {e}")
-
-                    # Atomic write
-                    temp_path = f"{self.vdj_database_path}.tmp"
-                    with open(temp_path, "w", encoding="utf-8", newline="") as f:
-                        f.write(xml_str)
-
-                    # Verify before replacing
-                    try:
-                        ET.parse(temp_path)
-                        self._validate_database_replacement(temp_path, original_stats)
-                        shutil.move(temp_path, self.vdj_database_path)
-                        print("✅ Batch database update completed successfully")
-                    except Exception as e:
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
-                        raise ValueError(f"Generated XML file failed verification: {e}")
-
-                except Exception as e:
-                    print(f"❌ Error saving database after batch processing: {e}")
-                    # Set all successes to False since database save failed
-                    batch_success = [False] * len(batch_success)
-
-            # Update results for valid files
-            valid_idx = 0
-            for i, success in enumerate(results):
-                if success:  # This was a valid file
-                    if valid_idx < len(batch_success):
-                        results[i] = batch_success[valid_idx]
-                    else:
-                        results[i] = False
-                    valid_idx += 1
-
-            successful_count = sum(batch_success)
             print(
-                f"🎯 Async batch complete: {successful_count}/"
-                f"{len(uploaded_files)} songs processed successfully"
+                f"🎯 Async batch complete: {sum(results)}/"
+                f"{len(audio_file_paths)} songs processed successfully"
             )
             return results
-
-        except Exception as e:
-            print(f"❌ Error processing async batch: {e}")
+        except asyncio.CancelledError:
+            print("⏹️  Batch cancelled; cleaning up remote files...")
+            raise
+        except Exception as error:
+            print(f"❌ Error processing async batch: {error}")
             import traceback
 
             traceback.print_exc()
-            return [False] * len(audio_file_paths)
-
+            return results
+        finally:
+            remote_files = [uploaded for _, _, uploaded in uploaded_entries]
+            if remote_files:
+                await asyncio.shield(self._delete_uploaded_files_async(remote_files))

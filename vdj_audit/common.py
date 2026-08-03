@@ -62,6 +62,8 @@ class Track:
     length: float
     pois: list[Poi]
     beatgrid: Optional[float] = None
+    scan_phase: Optional[float] = None
+    scan_bpm: Optional[float] = None
 
 
 @dataclass

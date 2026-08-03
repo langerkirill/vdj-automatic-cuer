@@ -23,9 +23,10 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Test files
+# Test files (allow package tests/ trees, including ui/tests)
 test_*.py
 !tests/test_*.py
+!**/tests/test_*.py
 *.mp3
 *.m4a
 *.flac
@@ -37,3 +38,6 @@ test_*.py
 # Generated cue audit reports
 audit_reports/
 cue_visual_audit/
+
+# Music Sorter UI local venv
+ui/.venv/

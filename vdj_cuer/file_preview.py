@@ -38,7 +38,9 @@ class FilePreviewMixin:
             loop_name = loop_data.get("loop_name") or self.create_loop_name(
                 loop_data.get("elements", [])
             )
-            if not loop_name.endswith("l"):
+            if loop_name.lower().endswith("loop"):
+                pass
+            elif not loop_name.endswith("l"):
                 loop_name = f"{loop_name}l"
 
             if loop_name in used_loop_types:
@@ -49,7 +51,7 @@ class FilePreviewMixin:
 
             gemini_time = loop_data.get("start", 0)
             aligned_time = self.validate_timing_hybrid(
-                gemini_time, working_bpm, audio_file_path
+                gemini_time, working_bpm, audio_file_path, grid_beats=1
             )
             gemini_color = loop_data.get("color", "green")
             color_name = gemini_color.capitalize()

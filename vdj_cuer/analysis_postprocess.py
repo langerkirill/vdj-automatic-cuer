@@ -1,6 +1,7 @@
 """AnalysisPostprocessMixin for AutomaticMusicCuer."""
 
 from .common import *
+from .stem_evidence import StemProfile, energy_ratio
 
 
 class AnalysisPostprocessMixin:
@@ -241,33 +242,42 @@ class AnalysisPostprocessMixin:
 
         for cue_data in analysis_data.get("measure_changes", []):
             stem_activity = self._stem_activity_dict(cue_data)
-            elements = self._apply_stem_activity_to_elements(
-                cue_data.get("elements", []), stem_activity
-            )
+            if cue_data.get("assertion_source") == "calibrated_vdj_stems":
+                elements = self._normalize_elements(cue_data.get("elements", []))
+            else:
+                elements = self._apply_stem_activity_to_elements(
+                    cue_data.get("elements", []), stem_activity
+                )
             cue_data["elements"] = elements
             color = cue_data.get("color", "green")
             cue_data["color"] = self.validate_color_assignment(elements, color)
 
             cue_name = cue_data.get("cue_name", "")
             if self._name_conflicts_with_elements(cue_name, elements):
-                cue_data["cue_name"] = self._replacement_name(
+                cue_name = self._replacement_name(
                     cue_name, elements, is_loop=False
                 )
+            # Never keep & / &amp; in cue labels (shows as &amp;amp; in VDJ).
+            cue_data["cue_name"] = self.sanitize_marker_name(cue_name)
 
         for loop_data in analysis_data.get("loop_segments", []):
             stem_activity = self._stem_activity_dict(loop_data)
-            elements = self._apply_stem_activity_to_elements(
-                loop_data.get("elements", []), stem_activity
-            )
+            if loop_data.get("assertion_source") == "calibrated_vdj_stems":
+                elements = self._normalize_elements(loop_data.get("elements", []))
+            else:
+                elements = self._apply_stem_activity_to_elements(
+                    loop_data.get("elements", []), stem_activity
+                )
             loop_data["elements"] = elements
             color = loop_data.get("color", "green")
             loop_data["color"] = self.validate_color_assignment(elements, color)
 
             loop_name = loop_data.get("loop_name", "")
             if self._name_conflicts_with_elements(loop_name, elements):
-                loop_data["loop_name"] = self._replacement_name(
+                loop_name = self._replacement_name(
                     loop_name, elements, is_loop=True
                 )
+            loop_data["loop_name"] = self.sanitize_marker_name(loop_name)
 
         return analysis_data
 
@@ -358,6 +368,53 @@ class AnalysisPostprocessMixin:
         analysis_data["loop_segments"] = fixed_loops
         return analysis_data
 
+    def _validate_structural_assertions(
+        self, analysis_data: Dict, audio_file_path: Optional[str]
+    ) -> Dict:
+        """Downgrade strong transition names that lack waveform evidence."""
+        if not audio_file_path:
+            return analysis_data
+
+        try:
+            cache = getattr(self, "_track_audio_cache", None)
+            if cache is not None:
+                mix_profile = cache.get_or_load_mix_profile(audio_file_path)
+            else:
+                mix_profile = StemProfile.decode(audio_file_path)
+        except Exception as exc:
+            print(f"⚠️  Could not validate cue energy shapes: {exc}")
+            return analysis_data
+
+        for cue_data in analysis_data.get("measure_changes", []):
+            timestamp = self._safe_float(cue_data.get("timestamp"))
+            ratio = energy_ratio(mix_profile, timestamp)
+            cue_data["energy_ratio"] = round(ratio, 4)
+            name = str(cue_data.get("cue_name", ""))
+            role = str(cue_data.get("role", "")).lower()
+            lower_name = name.lower()
+
+            invalid_drop = ("drop" in lower_name or role == "drop") and ratio < 1.12
+            invalid_breakdown = (
+                "breakdown" in lower_name or role == "breakdown"
+            ) and ratio > 0.88
+            if not invalid_drop and not invalid_breakdown:
+                continue
+
+            replacement = self._element_label(cue_data.get("elements", []))
+            if lower_name.startswith("main "):
+                replacement = f"Main {replacement}"
+            elif lower_name.startswith("final "):
+                replacement = f"Final {replacement}"
+            cue_data["cue_name"] = replacement
+            cue_data["role"] = "section"
+            cue_data["assertion_downgraded"] = True
+            print(
+                f"  🔎 Renamed unsupported transition '{name}' to "
+                f"'{replacement}' (energy ratio {ratio:.2f}x)"
+            )
+
+        return analysis_data
+
     def create_cue_name(self, elements: List[str], measure: int) -> str:
         """Generate descriptive cue name based on detected elements"""
         # Sort elements for consistent naming
@@ -412,4 +469,3 @@ class AnalysisPostprocessMixin:
         if base_name.startswith("mix"):
             return "loopl"
         return f"{base_name}l"
-

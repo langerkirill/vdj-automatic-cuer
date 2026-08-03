@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-theme="lime">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Music Sorter</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260803-delete-placement" />
+  </head>
+  <body>
+    <div class="topbar">
+      <div class="brand">
+        <strong>Music Sorter</strong>
+        <span class="subtitle">VDJ-aware cue pipeline</span>
+      </div>
+      <div class="seg mode-seg" id="modeSeg">
+        <button type="button" class="active" data-mode="sort">Sort</button>
+        <button type="button" data-mode="add_cues">Add Cues</button>
+      </div>
+      <div class="topbar-right">
+        <div class="accent-picker" id="accentPicker" role="group" aria-label="Accent color">
+          <span class="accent-picker-label" aria-hidden="true">Accent</span>
+          <button
+            type="button"
+            class="theme-swatch theme-swatch-lime"
+            data-accent-theme="lime"
+            aria-label="Use lime accent"
+            aria-pressed="true"
+            title="Lime"
+          ></button>
+          <button
+            type="button"
+            class="theme-swatch theme-swatch-cyan"
+            data-accent-theme="cyan"
+            aria-label="Use cyan accent"
+            aria-pressed="false"
+            title="Cyan"
+          ></button>
+          <button
+            type="button"
+            class="theme-swatch theme-swatch-violet"
+            data-accent-theme="violet"
+            aria-label="Use violet accent"
+            aria-pressed="false"
+            title="Violet"
+          ></button>
+          <button
+            type="button"
+            class="theme-swatch theme-swatch-coral"
+            data-accent-theme="coral"
+            aria-label="Use coral accent"
+            aria-pressed="false"
+            title="Coral"
+          ></button>
+        </div>
+        <button type="button" class="btn ghost" id="actionsLogBtn" title="Show action log">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 6h11M8 12h11M8 18h11M3.5 6h.01M3.5 12h.01M3.5 18h.01" />
+          </svg>
+          <span>Action log</span>
+        </button>
+        <span id="countsBadge" class="badge neutral">—</span>
+        <span id="vdjBadge" class="badge neutral">VDJ</span>
+      </div>
+    </div>
+
+    <div id="actionsLogPanel" class="actions-log-panel" hidden>
+      <div class="actions-log-header">
+        <div class="actions-log-heading">
+          <div class="actions-log-title-row">
+            <strong>Action log</strong>
+            <span class="actions-log-count" id="actionsLogCount">—</span>
+          </div>
+          <div class="subtitle">Recent file and cue operations</div>
+          <div class="actions-log-path" id="actionsLogPath" title="">—</div>
+        </div>
+        <button type="button" class="btn ghost" id="actionsLogClose">Close</button>
+      </div>
+      <div id="actionsLogBody" class="actions-log-body">
+        <div class="empty">Loading…</div>
+      </div>
+    </div>
+
+    <div class="app">
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h1 id="listTitle">Ready for Sort</h1>
+            <div class="subtitle" id="listSubtitle">Cued tracks only can be moved</div>
+          </div>
+        </div>
+        <div class="toolbar" id="listToolbar" hidden>
+          <div class="seg" id="readinessFilter">
+            <button type="button" class="active" data-filter="all">All</button>
+            <button type="button" data-filter="ready">Ready</button>
+            <button type="button" data-filter="partial">Partial</button>
+            <button type="button" data-filter="not_cued">Not cued</button>
+          </div>
+          <button
+            type="button"
+            class="btn ghost"
+            id="batchAddCuesBtn"
+            hidden
+            title="Queue AutoCue for all Not cued tracks that pass the beatgrid preflight"
+          >
+            Batch add cues
+          </button>
+        </div>
+        <div class="track-search-wrap">
+          <input
+            type="search"
+            id="trackSearch"
+            class="track-search"
+            placeholder="Search tracks…"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+        <div id="trackList" class="track-list"></div>
+        <div class="status-bar" id="status">Loading…</div>
+      </section>
+
+      <section class="main">
+        <div class="panel player">
+          <div class="panel-header" style="border: 0; padding: 0 0 8px">
+            <div>
+              <h2>Now playing</h2>
+              <div class="subtitle" id="playerSubtitle">
+                Listen, then confirm or override the AI pick
+              </div>
+            </div>
+            <div class="actions" style="margin: 0">
+              <button type="button" class="btn ghost" id="refreshBtn">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M20 11a8 8 0 1 0 1 4M20 4v7h-7" />
+                </svg>
+                <span>Refresh</span>
+              </button>
+              <button type="button" class="btn ghost" id="rerunRecBtn">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m12 3 1.2 3.1L16 7.4l-2.8 1.3L12 12l-1.2-3.3L8 7.4l2.8-1.3L12 3ZM5.5 13l.8 2.1 2.2.9-2.2 1-.8 2-.8-2-2.2-1 2.2-.9.8-2.1Zm12 1 .9 2.4L21 17.5l-2.6 1.1-.9 2.4-.9-2.4-2.6-1.1 2.6-1.1.9-2.4Z" />
+                </svg>
+                <span>Re-run AI</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="track-identity">
+            <div class="track-art" aria-hidden="true">
+              <svg viewBox="0 0 32 32">
+                <path d="M12 23.5a4 4 0 1 1-2-3.46V8l14-3v14.5a4 4 0 1 1-2-3.46V10.1l-10 2.15V23.5Z" />
+              </svg>
+            </div>
+            <div class="track-identity-copy">
+              <p class="now-playing" id="nowPlaying">—</p>
+              <div class="meta-row" id="playerMeta"></div>
+            </div>
+          </div>
+
+          <audio id="audio" preload="metadata"></audio>
+          <div class="transport" aria-label="Audio transport controls">
+            <button
+              type="button"
+              class="transport-btn"
+              id="previousTrackBtn"
+              aria-label="Previous track"
+              title="Previous track (K)"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 5v14M18 6l-9 6 9 6V6Z" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              class="transport-btn transport-play"
+              id="playPauseBtn"
+              aria-label="Play"
+              title="Play or pause (Space)"
+            >
+              <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m8 5 11 7-11 7V5Z" />
+              </svg>
+              <svg class="pause-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M8 5v14M16 5v14" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              class="transport-btn"
+              id="nextTrackBtn"
+              aria-label="Next track"
+              title="Next track (J)"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M18 5v14M6 6l9 6-9 6V6Z" />
+              </svg>
+            </button>
+            <span class="transport-time" id="transportTime">0:00 / 0:00</span>
+            <input
+              id="transportProgress"
+              class="transport-progress"
+              type="range"
+              min="0"
+              max="0"
+              step="0.01"
+              value="0"
+              aria-label="Track progress"
+            />
+            <label class="transport-volume">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 10v4h4l5 4V6l-5 4H5Zm12-1.5a5 5 0 0 1 0 7" />
+              </svg>
+              <input
+                id="transportVolume"
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value="1"
+                aria-label="Volume"
+              />
+            </label>
+          </div>
+
+          <div class="speed-panel" id="speedPanel">
+            <div class="speed-row">
+              <button type="button" class="btn primary" id="zoukSpeedBtn" title="Slow to ~75 BPM zouk speed">
+                Zouk ~75 BPM
+              </button>
+              <button type="button" class="btn ghost" id="normalSpeedBtn">1× normal</button>
+              <button
+                type="button"
+                class="btn ghost"
+                id="halfBpmBtn"
+                title="VDJ often double-times (e.g. 140 instead of 70). Halve the source BPM for speed math. Shortcut: H"
+              >
+                ½ BPM
+              </button>
+              <label class="speed-label">
+                Target
+                <input
+                  id="targetBpmInput"
+                  type="number"
+                  min="50"
+                  max="100"
+                  step="1"
+                  value="75"
+                />
+                BPM
+              </label>
+              <span class="badge neutral" id="bpmBadge">BPM —</span>
+              <span class="badge neutral" id="rateBadge">1.00×</span>
+            </div>
+            <div class="speed-row">
+              <input
+                id="speedSlider"
+                type="range"
+                min="0.35"
+                max="1.15"
+                step="0.01"
+                value="1"
+              />
+              <span class="subtitle" id="speedHint">Native speed</span>
+            </div>
+          </div>
+
+          <div class="notes-panel" id="notesPanel">
+            <div class="notes-header">
+              <div>
+                <h3>VDJ notes</h3>
+                <div class="subtitle">Writes to VirtualDJ Comment · live save while typing</div>
+              </div>
+              <span class="badge neutral" id="vdjNotesStatus">—</span>
+            </div>
+            <textarea
+              id="vdjNotes"
+              class="vdj-notes"
+              rows="3"
+              placeholder="Track notes (shown in VirtualDJ Comment field)…"
+              spellcheck="true"
+            ></textarea>
+          </div>
+
+          <div class="cues-panel" id="cuesPanel">
+            <div class="cues-header">
+              <div>
+                <h3>Waveform + cues</h3>
+                <div class="subtitle" id="cuesSubtitle">
+                  Scroll to zoom · Shift+scroll to pan · double-click reset · click to jump
+                </div>
+              </div>
+              <div class="cues-header-actions">
+                <button
+                  type="button"
+                  class="btn ghost"
+                  id="loopPlayBtn"
+                  title="Loop playback: when playhead hits a loop end, jump back to its start. Click a loop cue to audition it. Shortcut: L"
+                  aria-pressed="false"
+                >
+                  Loop play
+                </button>
+                <div class="autocue-scope-btns" id="autocueScopeHeader" hidden>
+                  <button
+                    type="button"
+                    class="btn ghost"
+                    id="retryBothBtn"
+                    data-write-scope="all"
+                    title="AutoCue cues and loops (default for first-time add)"
+                  >
+                    Both
+                  </button>
+                  <button
+                    type="button"
+                    class="btn ghost"
+                    id="retryCuesOnlyBtn"
+                    data-write-scope="cues"
+                    title="Rewrite cue points only — keep existing loops"
+                  >
+                    Cues
+                  </button>
+                  <button
+                    type="button"
+                    class="btn ghost"
+                    id="retryLoopsOnlyBtn"
+                    data-write-scope="loops"
+                    title="Rewrite loops only — keep existing cue points"
+                  >
+                    Loops
+                  </button>
+                </div>
+                <span class="badge neutral" id="cuesCountBadge">0</span>
+              </div>
+            </div>
+            <div class="retry-status" id="retryStatus" hidden></div>
+            <div id="gridPreflightCard" class="grid-preflight-card" hidden></div>
+            <div class="waveform-wrap" id="waveformWrap">
+              <canvas id="waveformCanvas" height="120"></canvas>
+              <div class="waveform-status" id="waveformStatus">Loading waveform…</div>
+            </div>
+            <div class="cue-timeline" id="cueTimeline" title="Click a marker to jump">
+              <div class="cue-timeline-track"></div>
+              <div class="cue-timeline-playhead" id="cuePlayhead"></div>
+            </div>
+            <div class="cue-list-toolbar">
+              <div class="seg" id="cueKindFilter" role="tablist" aria-label="Show cues or loops">
+                <button type="button" class="active" data-cue-filter="all" role="tab" aria-selected="true">
+                  Both
+                </button>
+                <button type="button" data-cue-filter="cues" role="tab" aria-selected="false">
+                  Cues
+                </button>
+                <button type="button" data-cue-filter="loops" role="tab" aria-selected="false">
+                  Loops
+                </button>
+              </div>
+              <span class="subtitle" id="cueKindFilterHint"></span>
+            </div>
+            <div class="cue-list" id="cueList">
+              <div class="empty">No cues for this track.</div>
+            </div>
+          </div>
+
+          <div id="blockBanner" class="block-banner" hidden></div>
+          <div id="placementCard" class="placement-card" hidden></div>
+          <div id="recommendation" class="recommendation loading">
+            Asking Gemini for a folder recommendation…
+          </div>
+
+          <div class="actions" id="sortActions">
+            <button type="button" class="btn primary" id="sortBtn" disabled>
+              Sort into folder
+            </button>
+            <button
+              type="button"
+              class="btn ghost"
+              id="demoteReadyBtn"
+              title="Send back to Add Cues for re-review / re-cueing (keeps VDJ markers)"
+            >
+              Back to Add Cues
+            </button>
+            <button
+              type="button"
+              class="btn ghost danger"
+              id="removeReadyBtn"
+              title="Remove from Ready for Sort only — does not place into House/Zouk/Cues Sorted"
+            >
+              Remove from Ready only
+            </button>
+            <span class="subtitle" style="align-self: center"
+              >Selected: <strong id="selectedFolder">None selected</strong></span
+            >
+          </div>
+
+          <div class="actions" id="reviewActions" hidden>
+            <button type="button" class="btn primary" id="approveBtn" disabled>
+              Move to Ready for Sort
+            </button>
+            <div class="autocue-scope-btns" id="autocueScopeReview">
+              <button
+                type="button"
+                class="btn ghost"
+                id="retryBothBtnReview"
+                data-write-scope="all"
+                title="AutoCue cues and loops"
+              >
+                Retry both
+              </button>
+              <button
+                type="button"
+                class="btn ghost"
+                id="retryCuesOnlyBtnReview"
+                data-write-scope="cues"
+                title="Rewrite cue points only — keep existing loops"
+              >
+                Retry cues
+              </button>
+              <button
+                type="button"
+                class="btn ghost"
+                id="retryLoopsOnlyBtnReview"
+                data-write-scope="loops"
+                title="Rewrite loops only — keep existing cue points"
+              >
+                Retry loops
+              </button>
+            </div>
+            <button type="button" class="btn ghost" id="skipBtn">Skip</button>
+          </div>
+
+          <div class="subtitle" style="margin-top: 10px" id="shortcutsHint">
+            Shortcuts: <span class="kbd">Space</span> play/pause ·
+            <span class="kbd">J</span>/<span class="kbd">K</span> tracks ·
+            <span class="kbd">1</span>–<span class="kbd">9</span> jump cues ·
+            <span class="kbd">Z</span> zouk ~75 ·
+            <span class="kbd">N</span> normal speed ·
+            <span class="kbd">⌘</span>+<span class="kbd">Enter</span> sort
+          </div>
+        </div>
+
+        <div class="panel folders" id="foldersPanel">
+          <div class="panel-header">
+            <div>
+              <h2>Destination folders</h2>
+              <div class="subtitle">
+                Sorts into House/Zouk <em>and</em> Cues Sorted archive
+              </div>
+            </div>
+          </div>
+          <div class="toolbar">
+            <div class="seg" id="libraryPathSeg">
+              <button type="button" data-library="House">House</button>
+              <button type="button" class="active" data-library="Zouk">Zouk</button>
+              <button type="button" data-library="Both">Both</button>
+            </div>
+            <input
+              id="folderFilter"
+              type="search"
+              placeholder="Filter folders…"
+              autocomplete="off"
+            />
+          </div>
+          <div class="hint path-hint" id="pathHint">
+            Sort path: Zouk only · also archives to Cues Sorted
+          </div>
+          <div id="folderTree" class="folder-tree"></div>
+          <div class="create-box">
+            <div class="hint" id="createParentHint">
+              New folder will be created at top level of House
+            </div>
+            <div class="create-row">
+              <input
+                id="newFolderName"
+                type="text"
+                placeholder="New folder name (e.g. Dreamy)"
+                autocomplete="off"
+              />
+              <button type="button" class="btn" id="createFolderBtn">Create</button>
+            </div>
+            <div class="hint">
+              Tip: select Chill or Energy first, then create a subfolder under it.
+            </div>
+          </div>
+        </div>
+
+        <div class="panel folders" id="reviewPanel" hidden>
+          <div class="panel-header">
+            <div>
+              <h2>Cue review</h2>
+              <div class="subtitle">Approve only when markers sound right</div>
+            </div>
+          </div>
+          <div class="review-body">
+            <div id="readinessCard" class="readiness-card">
+              <div class="subtitle">Select a track to assess readiness</div>
+            </div>
+            <div class="review-section review-section-autocue">
+              <div class="subtitle" id="autocueSectionLabel">Fix cues</div>
+              <div
+                class="autocue-busy-label"
+                id="autocueBusyLabel"
+                hidden
+                aria-live="polite"
+              ></div>
+              <div
+                class="autocue-busy-bar"
+                id="autocueBusyBar"
+                hidden
+                aria-hidden="true"
+                role="progressbar"
+                aria-valuetext="AutoCue running"
+              >
+                <div class="autocue-busy-bar-fill"></div>
+              </div>
+              <div class="autocue-scope-stack" id="autocueScopeSide">
+                <button
+                  type="button"
+                  class="btn full primary"
+                  id="retryBothBtnSide"
+                  data-write-scope="all"
+                  title="AutoCue cues and loops (use this for first-time add)"
+                >
+                  ↻ Add both (cues + loops)
+                </button>
+                <button
+                  type="button"
+                  class="btn full"
+                  id="retryCuesOnlyBtnSide"
+                  data-write-scope="cues"
+                  title="Rewrite cue points only — keep existing loops"
+                >
+                  ↻ Cues only
+                </button>
+                <button
+                  type="button"
+                  class="btn full"
+                  id="retryLoopsOnlyBtnSide"
+                  data-write-scope="loops"
+                  title="Rewrite loops only — keep existing cue points"
+                >
+                  ↻ Loops only
+                </button>
+              </div>
+            </div>
+            <div class="review-section review-section-primary">
+              <div class="subtitle">If cues look good</div>
+              <button type="button" class="btn primary full" id="approveBtnSide" disabled>
+                ✓ Move to Ready for Sort
+              </button>
+            </div>
+            <div class="review-section review-section-secondary">
+              <div class="subtitle">If not ready</div>
+              <button type="button" class="btn full" id="toNoCuesBtn" disabled>
+                → No Cues Found
+              </button>
+              <button type="button" class="btn full" id="toLowSkipBtn" disabled>
+                → Low Quality Skip
+              </button>
+              <button type="button" class="btn full" id="toAcLowBtn" disabled>
+                → AC Low Quality
+              </button>
+            </div>
+            <div class="hint review-footnote">
+              Approve requires real VDJ cue points and rewrites FilePath so cues stay
+              attached after the move. Secondary destinations do not require cues.
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <dialog class="confirm-dialog" id="confirmDialog" aria-labelledby="confirmTitle">
+      <form method="dialog" class="confirm-dialog-card">
+        <button
+          type="submit"
+          class="confirm-dialog-close"
+          value="cancel"
+          aria-label="Close confirmation"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m6 6 12 12M18 6 6 18" />
+          </svg>
+        </button>
+        <div class="confirm-dialog-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <path d="M12 8v5M12 17h.01" />
+            <path d="M10.3 3.7 2.7 17a2 2 0 0 0 1.7 3h15.2a2 2 0 0 0 1.7-3L13.7 3.7a2 2 0 0 0-3.4 0Z" />
+          </svg>
+        </div>
+        <div class="confirm-dialog-copy">
+          <h2 id="confirmTitle">Confirm action</h2>
+          <p class="confirm-dialog-track" id="confirmTrack"></p>
+          <p class="confirm-dialog-message" id="confirmMessage"></p>
+          <p class="confirm-dialog-note" id="confirmNote"></p>
+        </div>
+        <div class="confirm-dialog-actions">
+          <button
+            type="submit"
+            class="btn ghost"
+            id="confirmCancelBtn"
+            value="cancel"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            class="btn primary"
+            id="confirmAcceptBtn"
+            value="confirm"
+          >
+            Continue
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/static/app.js?v=20260803-delete-placement"></script>
+  </body>
+</html>

@@ -63,10 +63,32 @@ class GeminiModernizationTests(unittest.TestCase):
         call_kwargs = cuer.client.models.generate_content.call_args.kwargs
         self.assertEqual(call_kwargs["model"], "gemini-3.1-pro-preview")
         self.assertEqual(call_kwargs["config"].response_mime_type, "application/json")
+        self.assertEqual(
+            call_kwargs["config"].thinking_config.thinking_level.value,
+            "HIGH",
+        )
         self.assertIn(
             "measure_changes",
             call_kwargs["config"].response_json_schema["properties"],
         )
+        cue_schema = call_kwargs["config"].response_json_schema["$defs"][
+            "MeasureChange"
+        ]
+        self.assertIn("role", cue_schema["required"])
+        self.assertIn("confidence", cue_schema["required"])
+
+    def test_precision_prompt_does_not_force_missing_loop_types(self):
+        prompt = cuer_module.AutomaticMusicCuer._build_precision_prompt(
+            "/tmp/song.flac",
+            180.0,
+            120.0,
+            "isolated stems available",
+        )
+
+        self.assertIn("0-3 high-confidence loops", prompt)
+        self.assertIn("Never invent", prompt)
+        self.assertIn("first beat of the bar", prompt)
+        self.assertNotIn("MUST search for all 3", prompt)
 
     def test_detects_virtualdj_running_from_process_list(self):
         result = Mock()

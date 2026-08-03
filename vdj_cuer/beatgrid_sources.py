@@ -7,16 +7,8 @@ class BeatgridSourceMixin:
     def get_beatgrid_offset(self, file_path: str) -> float:
         """Get beatgrid offset (where '1' beat starts) from VDJ database"""
         try:
-            root = self.parse_vdj_database()
-            if root is None:
-                return 0.0
-
-            for song in root.findall("Song"):
-                if song.get("FilePath") == file_path:
-                    for poi in song.findall("Poi"):
-                        if poi.get("Type") == "beatgrid":
-                            return float(poi.get("Pos", "0"))
-            return 0.0  # Default if no beatgrid found
+            metadata = self._get_song_metadata(file_path)
+            return metadata.beatgrid_offset if metadata is not None else 0.0
         except Exception as e:
             print(f"⚠️  Could not get beatgrid offset: {e}")
             return 0.0
@@ -37,8 +29,12 @@ class BeatgridSourceMixin:
     ) -> BeatgridAlignment:
         """Pick a stronger whole-beat downbeat phase when confidence is high."""
         current_score = phase_scores.get(0, 0.0)
-        best_score = max(phase_scores.values() or [0.0])
+        best_phase = max(phase_scores, key=phase_scores.get) if phase_scores else 0
+        best_score = phase_scores.get(best_phase, 0.0)
         confidence_ratio = best_score / max(current_score, 0.001)
+        ordered = sorted(phase_scores.values(), reverse=True)
+        second_best = ordered[1] if len(ordered) > 1 else 0.0
+        near_tie = best_score <= max(second_best * BEATGRID_PHASE_NEAR_TIE_RATIO, second_best + 0.01)
 
         if best_score < 0.02:
             return BeatgridAlignment(
@@ -46,6 +42,21 @@ class BeatgridSourceMixin:
                 confidence_ratio=confidence_ratio,
                 phase_scores=phase_scores,
             )
+
+        # Near-ties among *strong* alternatives: keep current only when the
+        # current phase is itself competitive. Vortex Number 9: phase 0 is ~0
+        # while +1 and +3 are both strong — still correct to the best phase.
+        if near_tie and best_phase != 0:
+            current_is_competitive = (
+                current_score >= second_best * BEATGRID_PHASE_NEAR_TIE_RATIO
+                or current_score >= best_score * 0.5
+            )
+            if current_is_competitive:
+                return BeatgridAlignment(
+                    offset=current_offset,
+                    confidence_ratio=confidence_ratio,
+                    phase_scores=phase_scores,
+                )
 
         if current_score and (
             confidence_ratio < 1.75 or (best_score - current_score) < 0.04
@@ -56,19 +67,7 @@ class BeatgridSourceMixin:
                 phase_scores=phase_scores,
             )
 
-        near_best_tolerance = max(0.01, best_score * 0.05)
-        near_best_phases = [
-            phase
-            for phase, score in phase_scores.items()
-            if best_score - score <= near_best_tolerance
-        ]
-
-        if 0 in near_best_phases:
-            shift_beats = 0
-        else:
-            non_zero_phases = sorted(phase for phase in near_best_phases if phase != 0)
-            shift_beats = non_zero_phases[0] if non_zero_phases else 0
-
+        shift_beats = 0 if best_phase == 0 else best_phase
         return BeatgridAlignment(
             offset=current_offset + (shift_beats * beat_duration),
             shift_beats=shift_beats,
@@ -146,28 +145,45 @@ class BeatgridSourceMixin:
         )
 
     @staticmethod
+    def _source_phase_is_usable(phase_scores: Dict[int, float]) -> bool:
+        """Accept a stem/mix vote when absolute or relative evidence is clear."""
+        if not phase_scores:
+            return False
+        ordered = sorted(phase_scores.values(), reverse=True)
+        best = ordered[0]
+        second = ordered[1] if len(ordered) > 1 else 0.0
+        if best >= BEATGRID_PHASE_SOURCE_MIN_SCORE:
+            return True
+        return (
+            best >= BEATGRID_PHASE_SOURCE_RELATIVE_MIN_SCORE
+            and best >= second * BEATGRID_PHASE_SOURCE_RELATIVE_RATIO
+        )
+
+    @staticmethod
     def _choose_consensus_downbeat_phase(
         current_offset: float,
         beat_duration: float,
         source_phase_scores: List[Tuple[str, Dict[int, float]]],
     ) -> BeatgridAlignment:
-        """Use multi-source agreement to correct a weak downbeat phase."""
+        """Use multi-source agreement to correct a weak or ambiguous downbeat phase."""
         aggregate_scores = {phase: 0.0 for phase in range(4)}
         best_phase_counts = {phase: 0 for phase in range(4)}
         used_sources = 0
+        used_names: List[str] = []
 
-        for _, phase_scores in source_phase_scores:
-            if not phase_scores:
+        for source_name, phase_scores in source_phase_scores:
+            if not phase_scores or not BeatgridSourceMixin._source_phase_is_usable(
+                phase_scores
+            ):
                 continue
             best_phase = max(phase_scores, key=phase_scores.get)
-            best_score = phase_scores[best_phase]
-            if best_score < BEATGRID_PHASE_SOURCE_MIN_SCORE:
-                continue
-
             used_sources += 1
+            used_names.append(source_name)
             best_phase_counts[best_phase] += 1
+            # Normalize per source so a loud kick cannot drown quieter stems.
+            total = sum(phase_scores.values()) or 1.0
             for phase, score in phase_scores.items():
-                aggregate_scores[phase] += score
+                aggregate_scores[phase] += score / total
 
         if used_sources < BEATGRID_PHASE_CONSENSUS_MIN_SOURCES:
             return BeatgridAlignment(
@@ -176,7 +192,16 @@ class BeatgridSourceMixin:
                 source="multi-source consensus",
             )
 
-        top_phase = max(aggregate_scores, key=aggregate_scores.get)
+        # Prefer majority vote; break ties with normalized aggregate energy.
+        top_vote = max(best_phase_counts.values())
+        vote_leaders = [
+            phase for phase, count in best_phase_counts.items() if count == top_vote
+        ]
+        if len(vote_leaders) == 1:
+            top_phase = vote_leaders[0]
+        else:
+            top_phase = max(vote_leaders, key=lambda phase: aggregate_scores[phase])
+
         current_score = aggregate_scores.get(0, 0.0)
         top_score = aggregate_scores[top_phase]
         confidence_ratio = top_score / max(current_score, 0.001)
@@ -199,7 +224,7 @@ class BeatgridSourceMixin:
 
         if (
             confidence_ratio < BEATGRID_PHASE_CONSENSUS_MIN_RATIO
-            or (top_score - current_score) < BEATGRID_PHASE_CONSENSUS_MIN_GAIN
+            and (top_score - current_score) < BEATGRID_PHASE_CONSENSUS_MIN_GAIN
         ):
             return BeatgridAlignment(
                 offset=current_offset,
@@ -262,6 +287,20 @@ class BeatgridSourceMixin:
         self, audio_file_path: str, stream_map: Optional[str]
     ) -> Tuple[List[float], float]:
         """Extract a compact positive-difference energy envelope via ffmpeg."""
+        cache = getattr(self, "_track_audio_cache", None)
+        cache_key = (audio_file_path, stream_map)
+
+        def load() -> Tuple[List[float], float]:
+            return self._decode_onset_envelope(audio_file_path, stream_map)
+
+        if cache is not None:
+            return cache.get_or_load_onset(cache_key, load)
+        return load()
+
+    def _decode_onset_envelope(
+        self, audio_file_path: str, stream_map: Optional[str]
+    ) -> Tuple[List[float], float]:
+        """Decode onset envelope once (used through the track audio cache)."""
         if not shutil.which("ffmpeg"):
             return [], BEATGRID_ALIGNMENT_HOP_SECONDS
 

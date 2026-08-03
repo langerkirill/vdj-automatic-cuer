@@ -5,6 +5,23 @@ from .common import *
 
 class BeatgridAlignmentMixin:
     @staticmethod
+    def _quantize_grid_time(
+        timestamp: float,
+        actual_bpm: float,
+        beatgrid_offset: float,
+        grid_beats: int,
+    ) -> float:
+        """Return the nearest nonnegative point on a beat or bar grid."""
+        beat_duration = 60.0 / actual_bpm
+        grid_beats = max(1, int(grid_beats))
+        grid_duration = beat_duration * grid_beats
+        grid_steps = (timestamp - beatgrid_offset) / grid_duration
+        nearest_step = math.floor(grid_steps + 0.5)
+        first_nonnegative_step = math.ceil(-beatgrid_offset / grid_duration)
+        nearest_step = max(nearest_step, first_nonnegative_step)
+        return beatgrid_offset + (nearest_step * grid_duration)
+
+    @staticmethod
     def _score_downbeat_phase(
         onsets: List[float],
         hop_seconds: float,
@@ -157,10 +174,10 @@ class BeatgridAlignmentMixin:
                 fine_alignment.best_beat_score,
             )
 
-            if (
-                not alignment.corrected
-                and primary_evidence < BEATGRID_PHASE_SOURCE_MIN_SCORE
-            ):
+            # Always try multi-source consensus when the primary stem/mix did not
+            # confidently correct the grid. Primary kick can look "strong" while
+            # still being phase-ambiguous (near-tie) or simply wrong for a track.
+            if not alignment.corrected and len(audio_sources) >= 2:
                 source_phase_scores = []
                 for candidate_name, candidate_path, candidate_stream in audio_sources:
                     if (
@@ -177,11 +194,14 @@ class BeatgridAlignmentMixin:
                             )
                         )
 
+                    # Score from the fine-aligned base when available so phase
+                    # candidates share the same sub-beat origin.
+                    phase_base = base_offset
                     candidate_scores = {
                         phase: self._score_downbeat_phase(
                             candidate_onsets,
                             candidate_hop_seconds,
-                            current_offset + (phase * beat_duration),
+                            phase_base + (phase * beat_duration),
                             measure_duration,
                         )
                         for phase in range(4)
@@ -189,10 +209,11 @@ class BeatgridAlignmentMixin:
                     source_phase_scores.append((candidate_name, candidate_scores))
 
                 consensus_alignment = self._choose_consensus_downbeat_phase(
-                    current_offset, beat_duration, source_phase_scores
+                    base_offset, beat_duration, source_phase_scores
                 )
                 if consensus_alignment.corrected:
                     alignment = consensus_alignment
+                    alignment.fine_shift_seconds = fine_alignment.fine_shift_seconds
                     alignment.beat_score = fine_alignment.beat_score
                     alignment.best_beat_score = fine_alignment.best_beat_score
 
@@ -250,10 +271,13 @@ class BeatgridAlignmentMixin:
         print(f"✅ Updated VDJ beatgrid '1' to {alignment.offset:.6f}s")
 
     def validate_timing_hybrid(
-        self, gemini_timestamp: float, bpm: float, file_path: str
+        self,
+        gemini_timestamp: float,
+        bpm: float,
+        file_path: str,
+        grid_beats: int = 4,
     ) -> float:
-        """Hybrid timing validation: use Gemini's timestamp if reasonable,
-        otherwise align to nearest '1' beat"""
+        """Quantize a model timestamp to a verified downbeat or beat grid."""
         # Get beatgrid info
         beatgrid_offset = self._get_verified_beatgrid_offset(file_path, bpm)
 
@@ -265,61 +289,26 @@ class BeatgridAlignmentMixin:
             )
             return gemini_timestamp
 
-        beat_duration = 60.0 / actual_bpm  # seconds per beat
-        measure_duration = beat_duration * 4  # 4 beats per measure
-
-        # Find possible "1" beats around Gemini's timestamp
-        measures_from_beatgrid = (gemini_timestamp - beatgrid_offset) / measure_duration
-
-        # Check both floor and ceiling to find the closest "1" beat
-        measure_before = int(measures_from_beatgrid)
-        measure_after = measure_before + 1
-
-        beat_one_before = beatgrid_offset + (measure_before * measure_duration)
-        beat_one_after = beatgrid_offset + (measure_after * measure_duration)
-
-        # Calculate distances to both potential "1" beats
-        distance_to_before = abs(gemini_timestamp - beat_one_before)
-        distance_to_after = abs(gemini_timestamp - beat_one_after)
-
-        # Choose the closer "1" beat
-        if distance_to_before <= distance_to_after:
-            nearest_beat_one = beat_one_before
-            distance_to_beat_one = distance_to_before
-        else:
-            nearest_beat_one = beat_one_after
-            distance_to_beat_one = distance_to_after
-
-        # If Gemini's timestamp is within 1.5 seconds of a "1" beat,
-        # use the "1" beat. This ensures alignment to the corrected beatgrid
-        if distance_to_beat_one <= 1.5:  # Within 1.5 seconds tolerance
-            print(
-                f"🎯 Aligned: {gemini_timestamp:.1f}s → "
-                f"{nearest_beat_one:.1f}s "
-                f"(distance: {distance_to_beat_one:.1f}s)"
-            )
-            return nearest_beat_one
-        else:
-            print(
-                f"🎯 Keeping Gemini timing: {gemini_timestamp:.1f}s "
-                f"(distance to nearest '1': {distance_to_beat_one:.1f}s)"
-            )
-            return gemini_timestamp
+        grid_beats = max(1, int(grid_beats))
+        aligned_time = self._quantize_grid_time(
+            gemini_timestamp,
+            actual_bpm,
+            beatgrid_offset,
+            grid_beats,
+        )
+        distance = abs(gemini_timestamp - aligned_time)
+        target = "downbeat" if grid_beats == 4 else "beat"
+        print(
+            f"🎯 Aligned to {target}: {gemini_timestamp:.1f}s → "
+            f"{aligned_time:.1f}s (distance: {distance:.1f}s)"
+        )
+        return aligned_time
 
     def get_song_length(self, file_path: str) -> Optional[float]:
         """Get song length from VDJ database"""
         try:
-            root = self.parse_vdj_database()
-            if root is None:
-                return None
-
-            for song in root.findall("Song"):
-                if song.get("FilePath") == file_path:
-                    infos = song.find("Infos")
-                    if infos is not None:
-                        length_str = infos.get("SongLength", "0")
-                        return float(length_str)
-            return None
+            metadata = self._get_song_metadata(file_path)
+            return metadata.song_length if metadata is not None else None
         except Exception as e:
             print(f"⚠️  Could not get song length: {e}")
             return None

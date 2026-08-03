@@ -1,0 +1,395 @@
+"""Move + VDJ FilePath relocate, including uncued gate."""
+
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from sorter import relocate as relocate_mod
+
+
+def sample_db(path: str) -> bytes:
+    return (
+        "<VirtualDJ_Database>\r\n"
+        f'<Song FilePath="{path}" Flag="1">\r\n'
+        '  <Tags Author="A" Title="T" />\r\n'
+        '  <Scan Bpm="0.5" />\r\n'
+        '  <Poi Pos="0.1" Type="beatgrid" />\r\n'
+        '  <Poi Name="Intro" Pos="0.1" Num="1" Color="4278190335" Type="cue" />\r\n'
+        '  <Poi Name="Loop" Pos="8.0" Num="-1" Color="1" Type="loop" Size="16.0" Slot="1" />\r\n'
+        "</Song>\r\n"
+        "</VirtualDJ_Database>\r\n"
+    ).encode("utf-8")
+
+
+def sample_db_uncued(path: str) -> bytes:
+    return (
+        "<VirtualDJ_Database>\r\n"
+        f'<Song FilePath="{path}">\r\n'
+        '  <Poi Pos="0.1" Type="beatgrid" />\r\n'
+        "</Song>\r\n"
+        "</VirtualDJ_Database>\r\n"
+    ).encode("utf-8")
+
+
+class RelocateTests(unittest.TestCase):
+    def test_sort_moves_file_and_updates_filepath(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ready = root / "Ready"
+            house = root / "House" / "Chill"
+            cues_sorted = root / "Cues Sorted"
+            ready.mkdir()
+            house.mkdir(parents=True)
+            cues_sorted.mkdir()
+            src = ready / "track.flac"
+            src.write_bytes(b"audio-bytes")
+            stems = Path(f"{src}.vdjstems")
+            stems.write_bytes(b"stems")
+
+            db = root / "database.xml"
+            db.write_bytes(sample_db(str(src.resolve())))
+
+            with patch(
+                "sorter.library.LIBRARIES",
+                {"House": root / "House", "Zouk": root / "Zouk"},
+            ), patch.object(
+                relocate_mod, "CUES_SORTED", cues_sorted
+            ), patch(
+                "sorter.relocate.is_virtualdj_running", return_value=False
+            ), patch(
+                "sorter.relocate.VDJ_DATABASE", db
+            ):
+                result = relocate_mod.sort_track(
+                    src,
+                    library_name="House",
+                    relative_folder="Chill",
+                    database_path=db,
+                    ready_root=ready,
+                    create_backup=True,
+                    also_cues_sorted=True,
+                )
+
+            dest = house / "track.flac"
+            archive = cues_sorted / "Chill" / "track.flac"
+            self.assertTrue(dest.is_file())
+            self.assertFalse(src.exists())
+            self.assertTrue(Path(f"{dest}.vdjstems").is_file())
+            self.assertTrue(archive.is_file())
+            self.assertTrue(Path(f"{archive}.vdjstems").is_file())
+            self.assertTrue(result.database_updated)
+            self.assertTrue(result.cues_sorted_copied)
+            self.assertTrue(result.cues_sorted_db_cloned)
+            self.assertEqual(result.library_mode, "House")
+            raw = db.read_bytes()
+            self.assertIn(str(dest.resolve()).encode(), raw)
+            self.assertIn(str(archive.resolve()).encode(), raw)
+            self.assertNotIn(str(src.resolve()).encode(), raw)
+            self.assertIn(b'Name="Intro"', raw)
+            self.assertIn(b"\r\n", raw)
+
+    def test_sort_both_writes_house_and_zouk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ready = root / "Ready"
+            house = root / "House"
+            zouk = root / "Zouk" / "Chill"
+            cues_sorted = root / "Cues Sorted"
+            ready.mkdir()
+            house.mkdir()
+            zouk.mkdir(parents=True)
+            cues_sorted.mkdir()
+            src = ready / "both.flac"
+            src.write_bytes(b"audio")
+            db = root / "database.xml"
+            db.write_bytes(sample_db(str(src.resolve())))
+
+            with patch(
+                "sorter.library.LIBRARIES",
+                {"House": house, "Zouk": root / "Zouk"},
+            ), patch.object(
+                relocate_mod, "CUES_SORTED", cues_sorted
+            ), patch(
+                "sorter.relocate.is_virtualdj_running", return_value=False
+            ):
+                result = relocate_mod.sort_track(
+                    src,
+                    library_name="Both",
+                    relative_folder="Chill",
+                    database_path=db,
+                    ready_root=ready,
+                    create_backup=True,
+                )
+
+            zouk_dest = zouk / "both.flac"
+            house_dest = house / "Chill" / "both.flac"
+            self.assertTrue(zouk_dest.is_file(), "Zouk is primary for Both")
+            self.assertTrue(house_dest.is_file(), "House receives a copy")
+            self.assertTrue((cues_sorted / "Chill" / "both.flac").is_file())
+            self.assertEqual(result.library_mode, "Both")
+            libs = {d["library"] for d in result.library_dests}
+            self.assertEqual(libs, {"House", "Zouk"})
+            raw = db.read_bytes()
+            self.assertIn(str(zouk_dest.resolve()).encode(), raw)
+            self.assertIn(str(house_dest.resolve()).encode(), raw)
+
+    def test_uncued_track_cannot_sort(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ready = root / "Ready"
+            house = root / "House" / "Chill"
+            ready.mkdir()
+            house.mkdir(parents=True)
+            src = ready / "track.flac"
+            src.write_bytes(b"audio")
+            db = root / "database.xml"
+            db.write_bytes(sample_db_uncued(str(src.resolve())))
+
+            with patch(
+                "sorter.library.LIBRARIES",
+                {"House": root / "House"},
+            ), patch(
+                "sorter.relocate.is_virtualdj_running", return_value=False
+            ):
+                with self.assertRaises(PermissionError):
+                    relocate_mod.sort_track(
+                        src,
+                        library_name="House",
+                        relative_folder="Chill",
+                        database_path=db,
+                        ready_root=ready,
+                    )
+            self.assertTrue(src.exists())
+
+    def test_summarize_is_cued(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "a.flac"
+            audio.write_bytes(b"x")
+            db = root / "database.xml"
+            db.write_bytes(sample_db(str(audio.resolve())))
+            cues = relocate_mod.summarize_cues(audio, db)
+            self.assertTrue(cues.is_cued)
+            self.assertEqual(cues.cue_count, 1)
+            self.assertEqual(cues.loop_count, 1)
+            self.assertEqual(len(cues.points), 2)
+            self.assertEqual(cues.points[0].name, "Intro")
+            self.assertAlmostEqual(cues.points[0].pos, 0.1)
+            self.assertEqual(cues.points[0].color_name, "blue")
+            self.assertEqual(cues.points[1].kind, "loop")
+            self.assertAlmostEqual(cues.bpm or 0, 120.0, places=1)
+            payload = cues.to_dict()
+            self.assertEqual(payload["points"][0]["name"], "Intro")
+
+    def test_vdj_bpm_conversion(self):
+        self.assertAlmostEqual(relocate_mod.vdj_bpm_to_actual(0.5), 120.0)
+        self.assertAlmostEqual(relocate_mod.vdj_bpm_to_actual(128.0), 128.0)
+        self.assertIsNone(relocate_mod.vdj_bpm_to_actual(None))
+
+    def test_remove_from_ready_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ready = Path(tmp) / "Ready"
+            ready.mkdir()
+            src = ready / "skip-me.flac"
+            src.write_bytes(b"audio")
+            stems = Path(f"{src}.vdjstems")
+            stems.write_bytes(b"stems")
+
+            result = relocate_mod.remove_from_ready_for_sort(
+                src,
+                ready_root=ready,
+                to_trash=False,
+            )
+            self.assertFalse(src.exists())
+            self.assertFalse(stems.exists())
+            self.assertEqual(result["name"], "skip-me.flac")
+            self.assertEqual(len(result["removed"]), 2)
+
+            with self.assertRaises(ValueError):
+                other = Path(tmp) / "elsewhere.flac"
+                other.write_bytes(b"x")
+                relocate_mod.remove_from_ready_for_sort(
+                    other, ready_root=ready, to_trash=False
+                )
+
+    def test_assess_cue_readiness(self):
+        empty = relocate_mod.CueSummary(
+            cue_count=0,
+            loop_count=0,
+            has_beatgrid=False,
+            title="",
+            author="",
+            in_database=False,
+        )
+        self.assertEqual(relocate_mod.assess_cue_readiness(empty)["status"], "missing")
+
+        partial = relocate_mod.CueSummary(
+            cue_count=1,
+            loop_count=0,
+            has_beatgrid=True,
+            title="t",
+            author="a",
+            in_database=True,
+        )
+        self.assertEqual(relocate_mod.assess_cue_readiness(partial)["status"], "partial")
+
+        ready = relocate_mod.CueSummary(
+            cue_count=3,
+            loop_count=1,
+            has_beatgrid=True,
+            title="t",
+            author="a",
+            in_database=True,
+        )
+        assessment = relocate_mod.assess_cue_readiness(ready)
+        self.assertTrue(assessment["ready"])
+        self.assertEqual(assessment["status"], "ready")
+
+    def test_promote_add_cues_to_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            add = root / "Add Cues" / "Batch"
+            ready = root / "Ready For Sort"
+            add.mkdir(parents=True)
+            ready.mkdir()
+            src = add / "track.flac"
+            src.write_bytes(b"audio")
+            db = root / "database.xml"
+            db.write_bytes(sample_db(str(src.resolve())))
+
+            with patch.object(relocate_mod, "ADD_CUES", root / "Add Cues"), patch.object(
+                relocate_mod, "READY_FOR_SORT", ready
+            ), patch.object(
+                relocate_mod,
+                "CUE_STAGES",
+                {
+                    "ready_for_sort": ready,
+                    "no_cues_found": root / "No Cues Found",
+                    "ac_low_quality": root / "AC Low Quality",
+                    "low_quality_skip": root / "Low Quality Skip",
+                },
+            ), patch.object(relocate_mod, "CUES_ROOT", root), patch(
+                "sorter.relocate.is_virtualdj_running", return_value=False
+            ):
+                result = relocate_mod.promote_add_cues_track(
+                    src,
+                    destination_stage="ready_for_sort",
+                    database_path=db,
+                    create_backup=True,
+                )
+
+            dest = ready / "track.flac"
+            self.assertTrue(dest.is_file())
+            self.assertFalse(src.exists())
+            self.assertTrue(result.database_updated)
+            self.assertIn(str(dest.resolve()).encode(), db.read_bytes())
+
+    def test_demote_ready_to_add_cues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            add = root / "Add Cues"
+            ready = root / "Ready For Sort"
+            add.mkdir(parents=True)
+            ready.mkdir()
+            src = ready / "track.flac"
+            src.write_bytes(b"audio")
+            stems = Path(f"{src}.vdjstems")
+            stems.write_bytes(b"stems")
+            db = root / "database.xml"
+            db.write_bytes(sample_db(str(src.resolve())))
+
+            with patch.object(relocate_mod, "ADD_CUES", add), patch.object(
+                relocate_mod, "READY_FOR_SORT", ready
+            ), patch.object(relocate_mod, "CUES_ROOT", root), patch.object(
+                relocate_mod, "VDJ_DATABASE", db
+            ), patch(
+                "sorter.relocate.is_virtualdj_running", return_value=False
+            ):
+                result = relocate_mod.demote_ready_to_add_cues(
+                    src,
+                    database_path=db,
+                    create_backup=False,
+                    subfolder="Back from Ready",
+                )
+
+            dest = add / "Back from Ready" / "track.flac"
+            self.assertTrue(dest.is_file())
+            self.assertFalse(src.exists())
+            self.assertTrue(Path(f"{dest}.vdjstems").is_file())
+            self.assertEqual(Path(result.dest_path).resolve(), dest.resolve())
+            self.assertTrue(result.database_updated)
+            self.assertIn(str(dest.resolve()).encode(), db.read_bytes())
+
+    def test_delete_library_placement_removes_file_and_vdj_song(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zouk = root / "Zouk" / "Chill"
+            zouk.mkdir(parents=True)
+            audio = zouk / "dup.flac"
+            audio.write_bytes(b"audio")
+            stems = Path(f"{audio}.vdjstems")
+            stems.write_bytes(b"stems")
+            other = root / "other.flac"
+            other.write_bytes(b"keep")
+            db = root / "database.xml"
+            # Two songs: placement + unrelated keep.
+            db.write_bytes(
+                (
+                    "<VirtualDJ_Database>\r\n"
+                    f'<Song FilePath="{audio.resolve()}" Flag="1">\r\n'
+                    '  <Tags Author="A" Title="T" />\r\n'
+                    '  <Scan Bpm="0.5" />\r\n'
+                    '  <Poi Pos="0.1" Type="beatgrid" />\r\n'
+                    '  <Poi Name="Intro" Pos="0.1" Num="1" Color="4278190335" Type="cue" />\r\n'
+                    '  <Poi Name="Loop" Pos="8.0" Num="-1" Color="1" Type="loop" Size="16.0" Slot="1" />\r\n'
+                    "</Song>\r\n"
+                    f'<Song FilePath="{other.resolve()}">\r\n'
+                    '  <Poi Pos="0.1" Type="beatgrid" />\r\n'
+                    '  <Poi Name="Keep" Pos="1.0" Num="1" Type="cue" />\r\n'
+                    "</Song>\r\n"
+                    "</VirtualDJ_Database>\r\n"
+                ).encode("utf-8")
+            )
+
+            with patch.object(
+                relocate_mod, "LIBRARIES", {"Zouk": root / "Zouk", "House": root / "House"}
+            ), patch.object(
+                relocate_mod, "CUES_SORTED", root / "Cues Sorted"
+            ), patch.object(
+                relocate_mod, "VDJ_DATABASE", db
+            ), patch(
+                "sorter.relocate.is_virtualdj_running", return_value=False
+            ):
+                result = relocate_mod.delete_library_placement(
+                    audio,
+                    database_path=db,
+                    to_trash=False,
+                    create_backup=True,
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertFalse(audio.exists())
+            self.assertFalse(stems.exists())
+            self.assertTrue(other.exists())
+            text = db.read_text(encoding="utf-8")
+            self.assertNotIn(str(audio.resolve()), text)
+            self.assertIn(str(other.resolve()), text)
+            self.assertIn('Name="Keep"', text)
+            self.assertNotIn('Name="Intro"', text)
+            self.assertTrue(result["database"]["removed_from_db"])
+            self.assertEqual(result["had_cues"], 1)
+            self.assertEqual(result["had_loops"], 1)
+
+            # Safety: refuse Ready for Sort / random paths.
+            with patch.object(
+                relocate_mod, "LIBRARIES", {"Zouk": root / "Zouk"}
+            ), patch.object(relocate_mod, "CUES_SORTED", root / "Cues Sorted"):
+                with self.assertRaises(ValueError):
+                    relocate_mod.delete_library_placement(
+                        other, database_path=db, to_trash=False
+                    )
+
+
+if __name__ == "__main__":
+    unittest.main()
