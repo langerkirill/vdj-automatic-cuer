@@ -95,6 +95,49 @@ class LibraryTests(unittest.TestCase):
             self.assertEqual(groups["song.m4a"], "Screenshots 7-15-26")
             self.assertEqual(groups["tune.flac"], "artist")
 
+    def test_add_cues_section_splits_pajamathon(self):
+        self.assertEqual(
+            library_mod.add_cues_section(
+                group="Pajamathon", relative_path="Pajamathon/Moonlight.flac"
+            ),
+            "pajamathon",
+        )
+        self.assertEqual(
+            library_mod.add_cues_section(
+                group="pajamathon 2026", relative_path="Pajamathon 2026/x.flac"
+            ),
+            "pajamathon",
+        )
+        self.assertEqual(
+            library_mod.add_cues_section(group="Add Cues", relative_path="tune.flac"),
+            "inbox",
+        )
+        self.assertEqual(
+            library_mod.add_cues_section(
+                group="Screenshots 7-15-26",
+                relative_path="Screenshots 7-15-26/song.m4a",
+            ),
+            "inbox",
+        )
+
+    def test_list_add_cues_tracks_marks_pajamathon_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paj = root / "Pajamathon"
+            paj.mkdir()
+            (paj / "Moonlight.flac").write_bytes(b"a")
+            (root / "inbox.m4a").write_bytes(b"b")
+            tracks = library_mod.list_add_cues_tracks(root)
+            by_name = {t.name: t for t in tracks}
+            self.assertEqual(by_name["Moonlight.flac"].section, "pajamathon")
+            self.assertEqual(by_name["Moonlight.flac"].group, "Pajamathon")
+            self.assertEqual(by_name["inbox.m4a"].section, "inbox")
+            self.assertEqual(by_name["inbox.m4a"].group, "Add Cues")
+            paj_only = library_mod.add_cues_tracks_by_crate("pajamathon", root)
+            self.assertEqual([t.name for t in paj_only], ["Moonlight.flac"])
+            inbox_only = library_mod.add_cues_tracks_by_crate("inbox", root)
+            self.assertEqual([t.name for t in inbox_only], ["inbox.m4a"])
+
 
 if __name__ == "__main__":
     unittest.main()

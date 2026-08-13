@@ -27,6 +27,7 @@ class TrackInfo:
     size_bytes: int
     relative_path: str = ""
     group: str = ""
+    section: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -108,11 +109,88 @@ def find_matches_by_filename(
     return hits
 
 
-def find_cues_sorted_matches(filename: str) -> list[dict[str, str]]:
+def build_audio_basename_index(
+    roots: Iterable[Path],
+    *,
+    max_per_name: int = 8,
+) -> dict[str, list[dict[str, str]]]:
+    """
+    One-pass index of audio basenames under library / archive roots.
+
+    Used by Add Cues (and optionally Sort) so N tracks don't each rglob the tree.
+    Keys are exact basenames (case-sensitive match to source filename).
+    """
+    index: dict[str, list[dict[str, str]]] = {}
+    for root in roots:
+        root = Path(root)
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if not _is_audio_file(path):
+                continue
+            if path.name.endswith(".vdjstems"):
+                continue
+            try:
+                rel_parts = path.relative_to(root).parts
+            except ValueError:
+                continue
+            if any(_should_skip_dir(part) for part in rel_parts[:-1]):
+                continue
+            rel = path.relative_to(root).as_posix()
+            bucket = index.setdefault(path.name, [])
+            if len(bucket) >= max_per_name:
+                continue
+            bucket.append(
+                {
+                    "path": str(path),
+                    "relative_path": rel,
+                    "root": str(root),
+                    "root_name": root.name,
+                }
+            )
+    return index
+
+
+def find_matches_from_index(
+    filename: str,
+    index: dict[str, list[dict[str, str]]],
+    *,
+    root_names: Optional[set[str]] = None,
+    max_hits: int = 8,
+) -> list[dict[str, str]]:
+    """Filter a prebuilt basename index for one filename (optionally by root)."""
+    hits = index.get(filename) or []
+    out: list[dict[str, str]] = []
+    for hit in hits:
+        if root_names is not None and hit.get("root_name") not in root_names:
+            continue
+        out.append(hit)
+        if len(out) >= max_hits:
+            break
+    return out
+
+
+def find_cues_sorted_matches(
+    filename: str,
+    *,
+    index: Optional[dict[str, list[dict[str, str]]]] = None,
+) -> list[dict[str, str]]:
+    if index is not None:
+        return find_matches_from_index(
+            filename, index, root_names={CUES_SORTED.name}
+        )
     return find_matches_by_filename(filename, [CUES_SORTED])
 
 
-def find_library_matches(filename: str) -> list[dict[str, str]]:
+def find_library_matches(
+    filename: str,
+    *,
+    index: Optional[dict[str, list[dict[str, str]]]] = None,
+) -> list[dict[str, str]]:
+    if index is not None:
+        return find_matches_from_index(
+            filename, index, root_names=set(LIBRARIES.keys())
+        )
     return find_matches_by_filename(filename, list(LIBRARIES.values()))
 
 
@@ -137,6 +215,29 @@ def list_ready_tracks(source_dir: Path | None = None) -> list[TrackInfo]:
             )
         )
     return tracks
+
+
+def add_cues_section(*, group: str = "", relative_path: str = "") -> str:
+    """Split Add Cues into the Pajamathon crate vs the general inbox."""
+    rel = (relative_path or "").replace("\\", "/").strip("/")
+    top = rel.split("/", 1)[0] if rel else ""
+    name = (group or top or "").strip().lower()
+    if name.startswith("pajamathon"):
+        return "pajamathon"
+    return "inbox"
+
+
+def add_cues_tracks_by_crate(
+    crate: str = "all",
+    source_dir: Path | None = None,
+) -> list[TrackInfo]:
+    """Add Cues tracks for one crate: all, pajamathon, or inbox."""
+    tracks = list_add_cues_tracks(source_dir)
+    if crate == "pajamathon":
+        return [t for t in tracks if t.section == "pajamathon"]
+    if crate == "inbox":
+        return [t for t in tracks if t.section != "pajamathon"]
+    return list(tracks)
 
 
 def list_add_cues_tracks(source_dir: Path | None = None) -> list[TrackInfo]:
@@ -167,6 +268,7 @@ def list_add_cues_tracks(source_dir: Path | None = None) -> list[TrackInfo]:
         else:
             # Prefer top-level batch/artist folder for grouping.
             group = path.relative_to(root).parts[0]
+        section = add_cues_section(group=group, relative_path=rel)
 
         stems = Path(f"{path}.vdjstems")
         tracks.append(
@@ -177,6 +279,7 @@ def list_add_cues_tracks(source_dir: Path | None = None) -> list[TrackInfo]:
                 size_bytes=path.stat().st_size,
                 relative_path=rel,
                 group=group,
+                section=section,
             )
         )
     return tracks

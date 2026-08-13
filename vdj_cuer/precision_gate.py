@@ -6,8 +6,10 @@ import math
 from typing import Dict, Iterable, Optional
 
 
+from .common import TARGET_MAX_LOOPS
+
 MIN_CUE_CONFIDENCE = 0.70
-MIN_LOOP_CONFIDENCE = 0.75
+MIN_LOOP_CONFIDENCE = 0.62
 ALLOWED_LOOP_BEATS = frozenset({4, 8, 16, 32})
 
 
@@ -103,7 +105,7 @@ def apply_precision_gate(
     analysis_data["measure_changes"] = unique_cues[:6]
     analysis_data["loop_segments"] = sorted(
         accepted_loops, key=lambda loop: float(loop["start"])
-    )[:3]
+    )[:TARGET_MAX_LOOPS]
     analysis_data["precision_gate"] = {
         "accepted_cues": len(analysis_data["measure_changes"]),
         "accepted_loops": len(analysis_data["loop_segments"]),

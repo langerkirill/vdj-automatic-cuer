@@ -162,7 +162,7 @@ The setup script will:
 
 ### Gemini Model
 
-The default model is `gemini-3.1-pro-preview`. It is the newest Pro model currently listed in the Gemini API docs and supports audio input plus structured JSON output, but it is still a preview model. If it hits rate limits, switch to the latest stable Pro model, `gemini-2.5-pro`, or the newest stable Gemini model overall, `gemini-3.5-flash`.
+The default AutoCue model is `gemini-2.5-pro` (stable Pro, its own daily quota). Preview `gemini-3.1-pro-preview` is capped at 250 requests/day on many paid tiers. If 2.5 Pro is exhausted, AutoCue falls back to `gemini-pro-latest`. Assemble still defaults to `gemini-3.5-flash`.
 
 ```bash
 python3 automatic_music_cuer_gemini.py --model gemini-2.5-pro "path/to/song.mp3"

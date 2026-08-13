@@ -101,15 +101,12 @@ class AutomaticMusicCuer(
         model_name: Optional[str] = None,
     ):
         """Initialize the automatic music cuer with Gemini Pro API"""
-        # Load API key from .env file if not provided
+        # Load API key from env / known .env paths (not just process CWD).
         if gemini_api_key is None:
-            load_dotenv()
-            gemini_api_key = os.getenv("GEMINI_API_KEY")
-            if not gemini_api_key:
-                raise ValueError("GEMINI_API_KEY not found in environment or .env file")
+            gemini_api_key = load_gemini_api_key()
 
         self.gemini_api_key = gemini_api_key
-        self.model_name = model_name or os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+        self.model_name = resolve_gemini_model(model_name)
         self.client = genai.Client(api_key=gemini_api_key)
         self._beatgrid_alignment_cache: Dict[Tuple[str, float], BeatgridAlignment] = {}
         self._vdj_metadata_cache = None
@@ -182,25 +179,42 @@ class AutomaticMusicCuer(
     def is_virtualdj_running() -> bool:
         """Return True when a VirtualDJ process appears to be active."""
         try:
-            result = subprocess.run(
-                ["pgrep", "-fl", "VirtualDJ|virtualdj"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            from vdj_database_safety import is_virtualdj_running as _shared
+
+            return _shared()
         except Exception:
-            return False
-
-        if result.returncode != 0:
-            return False
-
-        return any("virtualdj" in line.lower() for line in result.stdout.splitlines())
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-x", "VirtualDJ"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except Exception:
+                return False
+            return result.returncode == 0 and bool(result.stdout.strip())
 
     @staticmethod
     def _is_retryable_error(error: Exception, terms=RETRYABLE_API_ERROR_TERMS) -> bool:
         """Return True for temporary network/server failures worth retrying."""
         error_text = str(error).lower()
         return any(term in error_text for term in terms)
+
+    @staticmethod
+    def _is_daily_quota_error(error: Exception) -> bool:
+        """True when this model is out of daily requests — try another Pro."""
+        text = str(error).lower()
+        return "generate_requests_per_model_per_day" in text or (
+            "resource_exhausted" in text and "per_day" in text
+        )
+
+    def _model_candidates(self) -> list[str]:
+        names: list[str] = []
+        for candidate in (self.model_name, *GEMINI_PRO_FALLBACKS):
+            name = (candidate or "").strip()
+            if name and name not in names:
+                names.append(name)
+        return names
 
     def _upload_audio_file(self, audio_file_path: str):
         """Upload an audio file once using the current Gemini client."""

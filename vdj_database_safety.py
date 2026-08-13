@@ -6,6 +6,7 @@ import gc
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import unicodedata
 import xml.etree.ElementTree as ET
@@ -15,6 +16,374 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 VDJ_DATABASE_ROOT = "VirtualDJ_Database"
 MANUAL_CUE_TYPES = {"cue", "loop"}
+
+# Set VDJ_ALLOW_RUNNING_WRITES=1 only for emergency recovery with VDJ force-quit.
+_ALLOW_RUNNING_WRITES_ENV = "VDJ_ALLOW_RUNNING_WRITES"
+
+
+class VirtualDJRunningError(RuntimeError):
+    """Raised when a database.xml write is refused because VirtualDJ is open."""
+
+
+def allow_vdj_running_writes() -> bool:
+    """True only when emergency override env is explicitly enabled."""
+    return os.environ.get(_ALLOW_RUNNING_WRITES_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def is_virtualdj_running() -> bool:
+    """
+    Return True when a VirtualDJ process appears to be active.
+
+    Prefer exact process-name matches so paths containing "VirtualDJ" (e.g.
+    Application Support folders in another process's argv) do not false-positive.
+    """
+    checks: List[List[str]] = [
+        ["pgrep", "-x", "VirtualDJ"],
+        ["pgrep", "-f", "/VirtualDJ.app/Contents/MacOS/VirtualDJ"],
+        ["pgrep", "-f", "VirtualDJ.exe"],
+    ]
+    for cmd in checks:
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception:
+            continue
+        if result.returncode == 0 and result.stdout.strip():
+            return True
+
+    # Fallback: scan full command lines, require the app binary name.
+    try:
+        result = subprocess.run(
+            ["pgrep", "-fl", "VirtualDJ"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return False
+    if result.returncode != 0:
+        return False
+    for line in result.stdout.splitlines():
+        lower = line.lower()
+        if "virtualdj.app" in lower or lower.rstrip().endswith("virtualdj"):
+            # Ignore our own tooling that only mentions the folder name.
+            if "python" in lower and "virtualdj.app" not in lower:
+                continue
+            return True
+    return False
+
+
+def assert_safe_to_write_vdj_database() -> None:
+    """
+    Refuse database.xml mutations while VirtualDJ is running.
+
+    Writing while VDJ is open is the main cause of the “database corrupted”
+    popup and lost Cues Sorted clones: VDJ overwrites our edits on save/exit.
+    """
+    if not is_virtualdj_running():
+        return
+    if allow_vdj_running_writes():
+        return
+    raise VirtualDJRunningError(
+        "VirtualDJ is running — refusing to write database.xml. "
+        "Close VirtualDJ completely, then retry. "
+        "Writing while it is open causes the corruption popup and drops "
+        "recent library entries. Emergency only: "
+        f"{_ALLOW_RUNNING_WRITES_ENV}=1"
+    )
+
+
+# --- Auto-heal: VDJ "fix" can wipe a full library down to ~160KB -------------
+# Full libraries here are ~30–40MB. Wipes are ~100–200KB. Use size as the primary signal
+# so small test databases are not treated as catastrophic.
+WIPE_SIZE_BYTES = 2_000_000  # under this → catastrophic wipe candidate
+AUTO_GOLDEN_PREFIX = "database.xml.golden.auto."
+AUTO_GOLDEN_KEEP = 8
+LAST_GOOD_META_NAME = "database.xml.last-good.json"
+
+
+def _vdj_home(database_path: os.PathLike | str) -> Path:
+    return Path(database_path).expanduser().resolve().parent
+
+
+def quick_database_fingerprint(database_path: os.PathLike | str) -> Dict[str, Any]:
+    """
+    Cheap health signal without full XML parse.
+
+    Uses size + Song tag count from a binary scan (works on multi‑MB libraries).
+    """
+    path = Path(database_path)
+    if not path.is_file():
+        return {
+            "exists": False,
+            "size_bytes": 0,
+            "song_count": 0,
+            "has_crlf": False,
+            "has_root": False,
+            "healthy": False,
+            "reason": "missing",
+        }
+    raw = path.read_bytes()
+    size = len(raw)
+    songs = raw.count(b"<Song")
+    # Prefer exact CRLF count match; also accept head check for huge files.
+    lf = raw.count(b"\n")
+    crlf = raw.count(b"\r\n")
+    has_crlf = lf == 0 or crlf == lf
+    has_root = b"<VirtualDJ_Database" in raw[:512]
+    reason = "ok"
+    healthy = True
+    if not has_root:
+        healthy = False
+        reason = "missing_root"
+    elif size < WIPE_SIZE_BYTES:
+        # Only treat as wipe when we *know* a much larger good copy exists nearby,
+        # or the file is the classic near-empty stub. Callers that only have a tiny
+        # test fixture remain healthy unless a golden is present for recovery tests.
+        healthy = False
+        reason = "wipe_size"
+    elif not has_crlf:
+        # LF-only full libraries make VDJ reset the DB.
+        healthy = False
+        reason = "missing_crlf"
+    return {
+        "exists": True,
+        "size_bytes": size,
+        "song_count": songs,
+        "has_crlf": has_crlf,
+        "has_root": has_root,
+        "healthy": healthy,
+        "reason": reason,
+    }
+
+
+def _candidate_recovery_files(vdj_dir: Path) -> List[Path]:
+    """Prefer auto goldens, then manual goldens, then VDJ 'broken' full copies, then sorter backups."""
+    patterns = [
+        f"{AUTO_GOLDEN_PREFIX}*",
+        "database.xml.golden.*",
+        "database.xml.backup.*",
+    ]
+    found: List[Path] = []
+    for pattern in patterns:
+        found.extend(vdj_dir.glob(pattern))
+    backup_dir = vdj_dir / "Backup"
+    if backup_dir.is_dir():
+        found.extend(backup_dir.glob("*broken database.xml"))
+        found.extend(backup_dir.glob("*Database Backup*"))
+    # Newest first among healthy candidates later
+    return found
+
+
+def find_best_database_recovery_source(
+    database_path: os.PathLike | str,
+) -> Optional[Path]:
+    """Return the largest healthy recovery candidate, preferring recent auto goldens."""
+    vdj_dir = _vdj_home(database_path)
+    ranked: List[tuple] = []
+    for cand in _candidate_recovery_files(vdj_dir):
+        if not cand.is_file():
+            continue
+        if cand.resolve() == Path(database_path).expanduser().resolve():
+            continue
+        try:
+            fp = quick_database_fingerprint(cand)
+        except Exception:
+            continue
+        if not fp["healthy"]:
+            continue
+        # Prefer auto goldens, then explicit goldens, then everything else; then recency + size
+        name = cand.name
+        tier = 0
+        if name.startswith(AUTO_GOLDEN_PREFIX):
+            tier = 3
+        elif "golden" in name:
+            tier = 2
+        elif "broken" in name:
+            tier = 1
+        mtime = cand.stat().st_mtime
+        ranked.append((tier, mtime, fp["size_bytes"], fp["song_count"], cand))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda row: (row[0], row[1], row[2], row[3]), reverse=True)
+    return ranked[0][4]
+
+
+def snapshot_last_good_database(database_path: os.PathLike | str) -> Optional[Path]:
+    """
+    After a successful write, keep a rolling golden so wipe recovery needs no user.
+
+    Safe to call often; rotates old auto goldens.
+    """
+    path = Path(database_path)
+    if not path.is_file():
+        return None
+    fp = quick_database_fingerprint(path)
+    if not fp["healthy"]:
+        return None
+    # Never snapshot while VDJ is open — it may be mid-rewrite to a wipe.
+    if is_virtualdj_running() and not allow_vdj_running_writes():
+        return None
+
+    vdj_dir = path.parent
+    from datetime import datetime
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = vdj_dir / f"{AUTO_GOLDEN_PREFIX}{ts}"
+    shutil.copy2(path, dest)
+
+    # Persist last-good meta for health UI / tests
+    meta = {
+        "path": str(dest),
+        "size_bytes": fp["size_bytes"],
+        "song_count": fp["song_count"],
+        "source": str(path),
+        "ts": ts,
+    }
+    try:
+        import json
+
+        (vdj_dir / LAST_GOOD_META_NAME).write_text(
+            json.dumps(meta, indent=2) + "\n", encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+    # Rotate
+    autos = sorted(
+        vdj_dir.glob(f"{AUTO_GOLDEN_PREFIX}*"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for old in autos[AUTO_GOLDEN_KEEP:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    return dest
+
+
+def _is_strictly_better_recovery(source: Path, current_fp: Dict[str, Any]) -> bool:
+    """Recovery source must be a real full library, not another tiny stub."""
+    src = quick_database_fingerprint(source)
+    if not src.get("has_root") or not src.get("has_crlf"):
+        return False
+    if src["size_bytes"] < WIPE_SIZE_BYTES:
+        return False
+    # Must be substantially larger than the wiped file (or current missing).
+    return src["size_bytes"] >= max(current_fp.get("size_bytes", 0) * 5, WIPE_SIZE_BYTES)
+
+
+def recover_vdj_database_if_wiped(
+    database_path: os.PathLike | str,
+    *,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """
+    If database.xml looks wiped/corrupt-small, restore the best full golden.
+
+    Refuses to restore while VirtualDJ is running (unless emergency env), so we
+    do not fight a live VDJ rewrite. Returns a status dict always.
+    """
+    path = Path(database_path)
+    fp = quick_database_fingerprint(path)
+    result: Dict[str, Any] = {
+        "recovered": False,
+        "needed": not fp["healthy"],
+        "fingerprint": fp,
+        "source": None,
+        "error": None,
+    }
+    if fp["healthy"] and not force:
+        return result
+
+    if is_virtualdj_running() and not allow_vdj_running_writes():
+        result["error"] = "virtualdj_running"
+        return result
+
+    source = find_best_database_recovery_source(path)
+    if source is None or not _is_strictly_better_recovery(source, fp):
+        # Tiny DBs with no full golden nearby are test fixtures / fresh installs —
+        # not catastrophic wipes. Leave them alone so writers still work.
+        result["error"] = "no_recovery_source"
+        result["needed"] = fp.get("reason") in {"wipe_size", "missing_crlf", "missing_root"}
+        return result
+
+    # Stash the bad file for forensics
+    try:
+        from datetime import datetime
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if path.is_file():
+            wiped_copy = path.parent / f"database.xml.wiped.{ts}"
+            shutil.copy2(path, wiped_copy)
+            result["wiped_saved_as"] = str(wiped_copy)
+    except Exception:
+        pass
+
+    try:
+        # Copy without going through write_vdj_database_text (already asserted VDJ closed).
+        tmp = path.parent / f".database.xml.recovering.{os.getpid()}"
+        shutil.copy2(source, tmp)
+        src_fp = quick_database_fingerprint(tmp)
+        if src_fp["size_bytes"] < WIPE_SIZE_BYTES:
+            tmp.unlink(missing_ok=True)
+            result["error"] = "source_unhealthy"
+            return result
+        os.replace(tmp, path)
+        result["recovered"] = True
+        result["source"] = str(source)
+        result["fingerprint"] = quick_database_fingerprint(path)
+        # After restore the file is large + CRLF → mark healthy even if fingerprint
+        # thresholds change later.
+        snapshot_last_good_database(path)
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def ensure_healthy_vdj_database(database_path: os.PathLike | str) -> Dict[str, Any]:
+    """Health check + auto-heal entry point used by Music Sorter and writers."""
+    path = Path(database_path)
+    fp = quick_database_fingerprint(path)
+    if fp["healthy"]:
+        return {"ok": True, "recovered": False, "fingerprint": fp}
+
+    recovery = recover_vdj_database_if_wiped(path)
+    if recovery.get("recovered"):
+        return {
+            "ok": True,
+            "recovered": True,
+            "fingerprint": recovery.get("fingerprint") or fp,
+            "recovery": recovery,
+        }
+
+    # No full golden available: allow small/test DBs to proceed; flag real wipes
+    # only when a better source exists but restore failed.
+    if recovery.get("error") == "no_recovery_source" and fp.get("reason") == "wipe_size":
+        return {
+            "ok": True,
+            "recovered": False,
+            "fingerprint": {**fp, "healthy": True, "reason": "ok_small_or_test"},
+            "recovery": recovery,
+        }
+
+    return {
+        "ok": False,
+        "recovered": False,
+        "fingerprint": recovery.get("fingerprint") or fp,
+        "recovery": recovery,
+    }
+
 
 # Match Song open tags. FilePath may contain XML entities.
 _SONG_OPEN_RE = re.compile(
@@ -54,6 +423,7 @@ def read_vdj_database_text(database_path: os.PathLike | str) -> str:
 
 def write_vdj_database_text(database_path: os.PathLike | str, content: str) -> None:
     """Write database.xml as UTF-8 bytes without newline translation."""
+    assert_safe_to_write_vdj_database()
     Path(database_path).write_bytes(content.encode("utf-8"))
 
 
@@ -354,12 +724,104 @@ def load_song_element(database_path: os.PathLike | str, audio_file_path: str) ->
     return ET.fromstring(content[start:end])
 
 
-def song_xml_with_new_filepath(song_xml: str, new_file_path: str) -> str:
+# Top-level library roots omitted from Directory Sort labels.
+# Nested folders like "Add Cues" under Zouk are *not* roots — they are leaf labels.
+_DIRECTORY_SORT_ROOT_NAMES = frozenset({"Zouk", "House", "Cues Sorted"})
+
+
+def _is_directory_sort_root(part: str) -> bool:
+    """True for Zouk/House/Cues Sorted and variants like 'Cues Sorted copy'."""
+    if part in _DIRECTORY_SORT_ROOT_NAMES:
+        return True
+    # Backup / copy crates that mirror Cues Sorted
+    if part.startswith("Cues Sorted"):
+        return True
+    return False
+
+
+def directory_sort_label(file_path: str) -> str:
+    """Folder label for VirtualDJ User2 / Directory Sort column.
+
+    Strips library roots (Zouk, House, Cues Sorted, …). Then:
+    - one folder under the root → that leaf only (``Energy``)
+    - deeper nesting → bottom two folders (``Chill/Shaman``)
+
+    Examples::
+
+        .../Zouk/Chill/Shaman/t.flac     → Chill/Shaman
+        .../Zouk/Energy/t.flac           → Energy
+        .../Cues Sorted/Chill/t.flac     → Chill
+        .../Cues Sorted/Chill/Mystical/t → Chill/Mystical
+        .../House/Chill/t.flac           → Chill
+    """
+    path = Path(normalize_database_path(file_path))
+    parent = path.parent
+    if not parent.name or parent == parent.parent:
+        return ""
+
+    parts = [p for p in parent.parts if p and p != "/"]
+    # Path relative to the *innermost* library root (Cues Sorted wins over Cues).
+    rel: list[str] | None = None
+    for index, part in enumerate(parts):
+        if _is_directory_sort_root(part):
+            rel = list(parts[index + 1 :])
+
+    if rel is None:
+        # Outside known roots: at most last two folder names.
+        rel = parts[-2:] if len(parts) >= 2 else parts
+
+    if not rel:
+        return ""
+    if len(rel) == 1:
+        return rel[0]
+    return f"{rel[-2]}/{rel[-1]}"
+
+
+def song_xml_with_directory_sort_user2(song_xml: str, file_path: str) -> str:
+    """Set Tags User2 to the Directory Sort label for ``file_path``."""
+    label = directory_sort_label(file_path)
+    if not label:
+        return song_xml
+    escaped = _escape_xml_attr(label)
+    # Prefer self-closing Tags; do not swallow the '/' into attrs.
+    tags_m = re.search(r"(<Tags\b)(.*?)(\s*/>)", song_xml, flags=re.DOTALL)
+    if tags_m is None:
+        tags_m = re.search(r"(<Tags\b)([^>]*)(>)", song_xml)
+    if tags_m is None:
+        return song_xml
+    attrs = tags_m.group(2)
+    if re.search(r"\bUser2\s*=", attrs):
+        new_attrs = re.sub(
+            r'\bUser2\s*=\s*"[^"]*"',
+            f'User2="{escaped}"',
+            attrs,
+            count=1,
+        )
+    elif re.search(r"\bFlag\s*=", attrs):
+        new_attrs = re.sub(
+            r"(\bFlag\s*=)",
+            f'User2="{escaped}" \\1',
+            attrs,
+            count=1,
+        )
+    else:
+        new_attrs = attrs.rstrip() + f' User2="{escaped}"'
+    new_tags = f"{tags_m.group(1)}{new_attrs}{tags_m.group(3)}"
+    return song_xml[: tags_m.start()] + new_tags + song_xml[tags_m.end() :]
+
+
+def song_xml_with_new_filepath(
+    song_xml: str,
+    new_file_path: str,
+    *,
+    directory_sort_path: str | None = None,
+) -> str:
     """
     Change only the FilePath attribute on the Song open tag.
 
-    Leaves Tags/Scan/Infos/Poi/Comment markup byte-for-byte identical so
-    VirtualDJ keeps cues, beatgrids, and automix points after a file move.
+    Also refreshes Tags User2 (Directory Sort). Default is the new path's
+    folders; pass directory_sort_path to keep the origin crate (e.g. Zouk
+    Chill/Mystical after copying into Sets/).
     """
     match = _SONG_OPEN_RE.search(song_xml)
     if match is None:
@@ -372,7 +834,9 @@ def song_xml_with_new_filepath(song_xml: str, new_file_path: str) -> str:
     escaped = _escape_xml_attr(normalize_database_path(new_file_path))
     new_attrs = _FILEPATH_RE.sub(f'FilePath="{escaped}"', attrs, count=1)
     new_open = f"<Song{new_attrs}>"
-    return song_xml[: match.start()] + new_open + song_xml[match.end() :]
+    updated = song_xml[: match.start()] + new_open + song_xml[match.end() :]
+    label_from = directory_sort_path or new_file_path
+    return song_xml_with_directory_sort_user2(updated, label_from)
 
 
 def relocate_song_filepath_in_database(
@@ -591,6 +1055,11 @@ def atomic_replace_database_parts(
     stats_fn: Optional[Callable[[os.PathLike | str], Dict[str, int]]] = None,
 ) -> Dict[str, int]:
     """Write candidate XML parts to a temp file, validate, then replace atomically."""
+    # Central hard gate: every surgical write path ends here.
+    assert_safe_to_write_vdj_database()
+    # If a previous VDJ "fix" wiped the library, heal before we write one Song.
+    ensure_healthy_vdj_database(database_path)
+
     path = Path(database_path)
     directory = path.parent
     fd, temp_name = tempfile.mkstemp(
@@ -631,7 +1100,14 @@ def atomic_replace_database_parts(
         else:
             stats = counter(temp_path)
 
+        # Re-check immediately before replace (user may open VDJ mid-write).
+        assert_safe_to_write_vdj_database()
         os.replace(temp_path, path)
+        # Keep a rolling golden so the next wipe can self-heal without a human.
+        try:
+            snapshot_last_good_database(path)
+        except Exception:
+            pass
         return stats
     except Exception:
         if temp_path.exists():

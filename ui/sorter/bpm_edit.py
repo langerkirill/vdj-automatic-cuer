@@ -19,6 +19,7 @@ from typing import Any, Optional
 from .autocue_path import ensure_autocue_on_path
 from .config import CUES_ROOT, LIBRARIES, VDJ_DATABASE
 from .relocate import is_virtualdj_running, summarize_cues, vdj_bpm_to_actual
+from .db_lock import vdj_db_write
 
 ensure_autocue_on_path()
 
@@ -220,7 +221,8 @@ def halve_track_bpm(
         backup = f"{db}.backup.{ts}.music-sorter-bpm"
         shutil.copy2(db, backup)
 
-    rewrite_song_xml_in_database(db, path_in_db, new_song, validate=True)
+    with vdj_db_write():
+        rewrite_song_xml_in_database(db, path_in_db, new_song, validate=True)
     after_cues = summarize_cues(audio, db)
 
     return {

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 MUSIC_ROOT = Path.home() / "Music" / "DJ" / "Music"
+DJ_ROOT = Path.home() / "Music" / "DJ"
 CUES_ROOT = MUSIC_ROOT / "Cues"
 READY_FOR_SORT = CUES_ROOT / "Ready For Sort"
 ADD_CUES = CUES_ROOT / "Add Cues"
@@ -15,6 +16,24 @@ LOW_QUALITY_SKIP = CUES_ROOT / "Low Quality Skip"
 VDJ_DATABASE = (
     Path.home() / "Library" / "Application Support" / "VirtualDJ" / "database.xml"
 )
+
+# Practice mixes + curated transition notes
+MIXES_ROOT = Path.home() / "Music" / "Mixes"
+DJ_NOTES_ROOT = DJ_ROOT / "Notes"
+TRANSITION_NOTES_DIRS = (
+    DJ_NOTES_ROOT / "Transitions",
+    DJ_NOTES_ROOT / "Zouk" / "Transitions",
+    DJ_NOTES_ROOT / "House" / "Transitions",
+)
+VDJ_HISTORY_DIR = (
+    Path.home() / "Library" / "Application Support" / "VirtualDJ" / "History"
+)
+VDJ_CACHE_DB = (
+    Path.home() / "Library" / "Application Support" / "VirtualDJ" / "Cache" / "cache.db"
+)
+DJ_TRANSITIONS_CSV = VDJ_HISTORY_DIR / "dj_transitions.csv"
+# Durable SQLite store for notes + history (survives UI restarts)
+TRANSITIONS_DB_PATH = DJ_NOTES_ROOT / "transitions.db"
 
 # Cue-pipeline stages used by the Add Cues review view.
 CUE_STAGES: dict[str, Path] = {
@@ -38,6 +57,15 @@ ADD_CUES_SKIP_DIR_NAMES = {
 LIBRARIES: dict[str, Path] = {
     "House": MUSIC_ROOT / "House",
     "Zouk": MUSIC_ROOT / "Zouk",
+}
+
+# Event crates with real audio files (Moon, Silesian, Kizouk, …).
+SETS_ROOT = MUSIC_ROOT / "Sets"
+
+# DJ-utility folders — never candidates for assembled event mixes.
+ASSEMBLE_SKIP_DIR_NAMES = {
+    "Transitions",
+    "30 Utility - Transitions",
 }
 
 # Directories that are tooling / junk — never shown as sort destinations.

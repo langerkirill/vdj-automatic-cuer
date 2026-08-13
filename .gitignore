@@ -41,3 +41,6 @@ cue_visual_audit/
 
 # Music Sorter UI local venv
 ui/.venv/
+
+# Playwright / local test output
+test-results/

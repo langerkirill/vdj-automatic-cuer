@@ -56,6 +56,31 @@ class GeminiAnalysisMixin:
 
         return analysis_data
 
+    @staticmethod
+    def _model_supports_thinking_level(model: str) -> bool:
+        name = (model or "").casefold()
+        return "gemini-3" in name
+
+    @staticmethod
+    def _is_unsupported_thinking_error(error: Exception) -> bool:
+        return "thinking level is not supported" in str(error).lower()
+
+    def _generate_json_config(
+        self,
+        schema: Type[BaseModel],
+        timeout_seconds: int,
+        *,
+        thinking: bool,
+    ) -> types.GenerateContentConfig:
+        kwargs: Dict[str, object] = {
+            "response_mime_type": "application/json",
+            "response_json_schema": schema.model_json_schema(),
+            "http_options": types.HttpOptions(timeout=timeout_seconds * 1000),
+        }
+        if thinking:
+            kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="high")
+        return types.GenerateContentConfig(**kwargs)
+
     def _generate_json_content(
         self,
         contents: List[object],
@@ -64,39 +89,52 @@ class GeminiAnalysisMixin:
         max_retries: int = DEFAULT_ANALYSIS_RETRIES,
     ) -> Dict:
         """Call Gemini with structured JSON output and retry temporary failures."""
-        config = types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_json_schema=schema.model_json_schema(),
-            thinking_config=types.ThinkingConfig(thinking_level="high"),
-            http_options=types.HttpOptions(timeout=timeout_seconds * 1000),
-        )
-
-        for analysis_retry in range(max_retries):
-            try:
-                response = self.client.models.generate_content(
-                    model=self.model_name,
-                    contents=contents,
-                    config=config,
-                )
-                if not response or not response.text:
-                    raise ValueError("Empty response from Gemini")
-                return self._parse_json_response(response.text)
-            except Exception as analysis_e:
-                if self._is_retryable_error(analysis_e) and (
-                    analysis_retry < max_retries - 1
-                ):
-                    wait_time = min((analysis_retry + 1) * 3, 30)
-                    print(
-                        f"⚠️  Analysis failed (attempt "
-                        f"{analysis_retry + 1}/{max_retries}): {analysis_e}"
+        last_error: Optional[Exception] = None
+        for model in self._model_candidates():
+            use_thinking = self._model_supports_thinking_level(model)
+            for analysis_retry in range(max_retries):
+                try:
+                    response = self.client.models.generate_content(
+                        model=model,
+                        contents=contents,
+                        config=self._generate_json_config(
+                            schema, timeout_seconds, thinking=use_thinking
+                        ),
                     )
-                    print(f"🔄 Retrying analysis in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                    continue
+                    if not response or not response.text:
+                        raise ValueError("Empty response from Gemini")
+                    if model != self.model_name:
+                        print(f"↪️  Switched AutoCue model to {model}")
+                    self.model_name = model
+                    return self._parse_json_response(response.text)
+                except Exception as analysis_e:
+                    last_error = analysis_e
+                    if self._is_unsupported_thinking_error(analysis_e) and use_thinking:
+                        print(f"⚠️  {model} does not support thinking_level; retrying without it")
+                        use_thinking = False
+                        continue
+                    if self._is_daily_quota_error(analysis_e):
+                        print(
+                            f"⚠️  Daily quota on {model}; trying another Pro…"
+                        )
+                        break
+                    if self._is_retryable_error(analysis_e) and (
+                        analysis_retry < max_retries - 1
+                    ):
+                        wait_time = min((analysis_retry + 1) * 3, 30)
+                        print(
+                            f"⚠️  Analysis failed (attempt "
+                            f"{analysis_retry + 1}/{max_retries}): {analysis_e}"
+                        )
+                        print(f"🔄 Retrying analysis in {wait_time} seconds...")
+                        time.sleep(wait_time)
+                        continue
 
-                print(f"⚠️  Gemini API error: {analysis_e}")
-                raise
+                    print(f"⚠️  Gemini API error: {analysis_e}")
+                    raise
 
+        if last_error is not None:
+            raise last_error
         raise RuntimeError("Failed to get analysis response after retries")
 
     async def _generate_json_content_async(
@@ -107,40 +145,59 @@ class GeminiAnalysisMixin:
         max_retries: int = DEFAULT_ANALYSIS_RETRIES,
     ) -> Dict:
         """Call Gemini without an executor thread so cancellation stays prompt."""
-        config = types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_json_schema=schema.model_json_schema(),
-            thinking_config=types.ThinkingConfig(thinking_level="high"),
-            http_options=types.HttpOptions(timeout=timeout_seconds * 1000),
-        )
-
-        for analysis_retry in range(max_retries):
-            try:
-                response = await self.client.aio.models.generate_content(
-                    model=self.model_name,
-                    contents=contents,
-                    config=config,
-                )
-                if not response or not response.text:
-                    raise ValueError("Empty response from Gemini")
-                return self._parse_json_response(response.text)
-            except asyncio.CancelledError:
-                raise
-            except Exception as analysis_error:
-                if self._is_retryable_error(analysis_error) and (
-                    analysis_retry < max_retries - 1
-                ):
-                    wait_time = min((analysis_retry + 1) * 3, 30)
-                    print(
-                        f"⚠️  Analysis failed (attempt "
-                        f"{analysis_retry + 1}/{max_retries}): {analysis_error}"
+        last_error: Optional[Exception] = None
+        for model in self._model_candidates():
+            use_thinking = self._model_supports_thinking_level(model)
+            for analysis_retry in range(max_retries):
+                try:
+                    response = await self.client.aio.models.generate_content(
+                        model=model,
+                        contents=contents,
+                        config=self._generate_json_config(
+                            schema, timeout_seconds, thinking=use_thinking
+                        ),
                     )
-                    print(f"🔄 Retrying analysis in {wait_time} seconds...")
-                    await asyncio.sleep(wait_time)
-                    continue
-                print(f"⚠️  Gemini API error: {analysis_error}")
-                raise
+                    if not response or not response.text:
+                        raise ValueError("Empty response from Gemini")
+                    if model != self.model_name:
+                        print(f"↪️  Switched AutoCue model to {model}")
+                    self.model_name = model
+                    return self._parse_json_response(response.text)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as analysis_error:
+                    last_error = analysis_error
+                    if (
+                        self._is_unsupported_thinking_error(analysis_error)
+                        and use_thinking
+                    ):
+                        print(
+                            f"⚠️  {model} does not support thinking_level; retrying without it"
+                        )
+                        use_thinking = False
+                        continue
+                    if self._is_daily_quota_error(analysis_error):
+                        print(
+                            f"⚠️  Daily quota on {model}; trying another Pro…"
+                        )
+                        break
+                    if self._is_retryable_error(analysis_error) and (
+                        analysis_retry < max_retries - 1
+                    ):
+                        wait_time = min((analysis_retry + 1) * 3, 30)
+                        print(
+                            f"⚠️  Analysis failed (attempt "
+                            f"{analysis_retry + 1}/{max_retries}): {analysis_error}"
+                        )
+                        print(f"🔄 Retrying analysis in {wait_time} seconds...")
+                        await asyncio.sleep(wait_time)
+                        continue
 
+                    print(f"⚠️  Gemini API error: {analysis_error}")
+                    raise
+
+        if last_error is not None:
+            raise last_error
         raise RuntimeError("Failed to get analysis response after retries")
 
     def _finalize_music_analysis(
@@ -255,9 +312,11 @@ BPM: {bpm or 'unknown'}
 
 {stem_prompt}
 
-Return 4-6 high-confidence structural cues and 0-3 high-confidence loops.
-Fewer results are correct when the audio does not support more. Never invent a
-vocal, drum-only, or melodic-only section to satisfy a quota.
+Return 4-6 high-confidence structural cues and 2-3 high-confidence loops.
+You must return at least 2 loops on any track longer than 45 seconds
+(intro/melodic phrase, plus a body/groove or drop). A third loop (breakdown
+or outro) is preferred. Never invent a vocal, drum-only, or melodic-only
+*label* to satisfy a quota — pick real repeating phrases that wrap.
 
 For each cue:
 - timestamp is the first beat of the bar where the new section begins
@@ -291,9 +350,10 @@ For each loop:
   still under ~14 seconds. Slow ambient tracks should use 8 (never a 25s loop)
 - role is loop
 - confidence is 0.0-1.0
-- return no loop when a clean seamless loop is not present; zero loops is
-  correct and preferred over a bad wrap (jazz, progressive, or ever-changing
-  arrangements often have none)
+- every loop must wrap continuously (same level and texture at the splice)
+- if a 16-beat wrap is messy, try 8 beats at the same start
+- returning 0 or 1 loop is a failure on a normal-length song; find two
+  different repeating regions (early + later) instead of giving up
 
 Strict assertions:
 - Drums means a kick/snare rhythm, not incidental percussion.

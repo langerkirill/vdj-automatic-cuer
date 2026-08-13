@@ -66,7 +66,7 @@ fi
 echo "🔑 Setting up Gemini API key..."
 echo ""
 echo "Get your API key from: https://aistudio.google.com/app/apikey"
-echo "Default model: gemini-3.1-pro-preview."
+echo "Default AutoCue model: gemini-2.5-pro."
 echo ""
 read -p "Enter your Gemini API key: " api_key
 
@@ -76,7 +76,7 @@ if [ -z "$api_key" ]; then
 fi
 
 echo "GEMINI_API_KEY=$api_key" > .env
-echo "GEMINI_MODEL=gemini-3.1-pro-preview" >> .env
+echo "AUTOCUE_GEMINI_MODEL=gemini-2.5-pro" >> .env
 echo "✅ .env file created"
 echo ""
 

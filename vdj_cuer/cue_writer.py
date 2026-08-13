@@ -450,6 +450,11 @@ class CueWriterMixin:
 
             print(f"\n🎶 Applying cues: {os.path.basename(audio_file_path)}")
 
+            # Refuse if VirtualDJ opened during the long Gemini analysis.
+            from vdj_database_safety import assert_safe_to_write_vdj_database
+
+            assert_safe_to_write_vdj_database()
+
             # Text-preserving rewrite: keep native Tags/Scan/automix markup and CRLF.
             database_text = read_vdj_database_text(self.vdj_database_path)
             span = _find_song_span(database_text, audio_file_path)

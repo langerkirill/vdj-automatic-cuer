@@ -134,6 +134,54 @@ class RelocateTests(unittest.TestCase):
             self.assertIn(str(zouk_dest.resolve()).encode(), raw)
             self.assertIn(str(house_dest.resolve()).encode(), raw)
 
+    def test_sort_multi_destinations_house_and_zouk_different_folders(self):
+        """Explicit destinations list can target different folders per library."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ready = root / "Ready"
+            house = root / "House"
+            zouk = root / "Zouk"
+            cues_sorted = root / "Cues Sorted"
+            ready.mkdir()
+            (house / "Deep").mkdir(parents=True)
+            (zouk / "Chill").mkdir(parents=True)
+            cues_sorted.mkdir()
+            src = ready / "multi.flac"
+            src.write_bytes(b"audio")
+            db = root / "database.xml"
+            db.write_bytes(sample_db(str(src.resolve())))
+
+            with patch(
+                "sorter.library.LIBRARIES",
+                {"House": house, "Zouk": zouk},
+            ), patch.object(
+                relocate_mod, "CUES_SORTED", cues_sorted
+            ), patch(
+                "sorter.relocate.is_virtualdj_running", return_value=False
+            ):
+                result = relocate_mod.sort_track(
+                    src,
+                    library_name="Zouk",
+                    relative_folder="",
+                    destinations=[
+                        {"library": "Zouk", "relative_folder": "Chill"},
+                        {"library": "House", "relative_folder": "Deep"},
+                    ],
+                    database_path=db,
+                    ready_root=ready,
+                    create_backup=True,
+                )
+
+            zouk_dest = zouk / "Chill" / "multi.flac"
+            house_dest = house / "Deep" / "multi.flac"
+            self.assertTrue(zouk_dest.is_file())
+            self.assertTrue(house_dest.is_file())
+            self.assertFalse(src.exists())
+            # Cues Sorted uses primary (Zouk) relative folder.
+            self.assertTrue((cues_sorted / "Chill" / "multi.flac").is_file())
+            libs = {(d["library"], d.get("relative_folder")) for d in result.library_dests}
+            self.assertEqual(libs, {("Zouk", "Chill"), ("House", "Deep")})
+
     def test_uncued_track_cannot_sort(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -162,6 +210,44 @@ class RelocateTests(unittest.TestCase):
                     )
             self.assertTrue(src.exists())
 
+    def test_summarize_cues_for_paths_reads_database_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = root / "a.flac"
+            b = root / "b.flac"
+            a.write_bytes(b"x")
+            b.write_bytes(b"y")
+            db = root / "database.xml"
+            db.write_text(
+                "<VirtualDJ_Database>\r\n"
+                f'<Song FilePath="{a.resolve()}">\r\n'
+                '  <Poi Name="Intro" Pos="0.1" Num="1" Type="cue" />\r\n'
+                "</Song>\r\n"
+                f'<Song FilePath="{b.resolve()}">\r\n'
+                '  <Poi Pos="0.1" Type="beatgrid" />\r\n'
+                "</Song>\r\n"
+                "</VirtualDJ_Database>\r\n",
+                encoding="utf-8",
+            )
+            reads = {"n": 0}
+            real_read = relocate_mod.read_vdj_database_text
+
+            def counting_read(path):
+                reads["n"] += 1
+                return real_read(path)
+
+            with patch.object(relocate_mod, "read_vdj_database_text", side_effect=counting_read):
+                out = relocate_mod.summarize_cues_for_paths(
+                    [str(a), str(b), str(root / "missing.flac")],
+                    database_path=db,
+                )
+            self.assertEqual(reads["n"], 1)
+            self.assertTrue(out[str(a)].is_cued)
+            self.assertEqual(out[str(a)].cue_count, 1)
+            self.assertTrue(out[str(b)].in_database)
+            self.assertFalse(out[str(b)].is_cued)
+            self.assertFalse(out[str(root / "missing.flac")].in_database)
+
     def test_summarize_is_cued(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -187,6 +273,69 @@ class RelocateTests(unittest.TestCase):
         self.assertAlmostEqual(relocate_mod.vdj_bpm_to_actual(128.0), 128.0)
         self.assertIsNone(relocate_mod.vdj_bpm_to_actual(None))
 
+    def test_sort_secondary_failure_leaves_source_on_ready(self):
+        """If a secondary destination copy fails, Ready source must remain."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ready = root / "Ready"
+            house = root / "House"
+            zouk = root / "Zouk" / "Chill"
+            cues_sorted = root / "Cues Sorted"
+            ready.mkdir()
+            house.mkdir()
+            zouk.mkdir(parents=True)
+            cues_sorted.mkdir()
+            src = ready / "partial.flac"
+            src.write_bytes(b"audio")
+            db = root / "database.xml"
+            db.write_bytes(sample_db(str(src.resolve())))
+
+            real_copy = relocate_mod._copy_file_and_stems
+
+            def flaky_copy(source, dest):
+                # Fail when copying the House secondary (not primary Zouk).
+                if "House" in str(dest):
+                    raise OSError("simulated secondary copy failure")
+                return real_copy(source, dest)
+
+            with patch(
+                "sorter.library.LIBRARIES",
+                {"House": house, "Zouk": root / "Zouk"},
+            ), patch.object(
+                relocate_mod, "CUES_SORTED", cues_sorted
+            ), patch(
+                "sorter.relocate.is_virtualdj_running", return_value=False
+            ), patch.object(
+                relocate_mod, "_copy_file_and_stems", side_effect=flaky_copy
+            ):
+                with self.assertRaises(RuntimeError):
+                    relocate_mod.sort_track(
+                        src,
+                        library_name="Both",
+                        relative_folder="Chill",
+                        database_path=db,
+                        ready_root=ready,
+                        create_backup=False,
+                    )
+
+            self.assertTrue(src.is_file(), "source must stay on Ready after failed multi-dest")
+            self.assertFalse((zouk / "partial.flac").exists())
+            self.assertFalse((house / "Chill" / "partial.flac").exists())
+
+    def test_trash_failure_does_not_hard_unlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "keep.flac"
+            path.write_bytes(b"audio")
+            with patch("sorter.relocate.subprocess.run") as run:
+                run.return_value = type(
+                    "R",
+                    (),
+                    {"returncode": 1, "stderr": "Finder busy", "stdout": ""},
+                )()
+                with self.assertRaises(RuntimeError):
+                    relocate_mod._trash_or_unlink(path, to_trash=True)
+            self.assertTrue(path.is_file())
+
     def test_remove_from_ready_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             ready = Path(tmp) / "Ready"
@@ -200,6 +349,7 @@ class RelocateTests(unittest.TestCase):
                 src,
                 ready_root=ready,
                 to_trash=False,
+                remove_from_database=False,
             )
             self.assertFalse(src.exists())
             self.assertFalse(stems.exists())
@@ -210,7 +360,10 @@ class RelocateTests(unittest.TestCase):
                 other = Path(tmp) / "elsewhere.flac"
                 other.write_bytes(b"x")
                 relocate_mod.remove_from_ready_for_sort(
-                    other, ready_root=ready, to_trash=False
+                    other,
+                    ready_root=ready,
+                    to_trash=False,
+                    remove_from_database=False,
                 )
 
     def test_assess_cue_readiness(self):
@@ -234,9 +387,22 @@ class RelocateTests(unittest.TestCase):
         )
         self.assertEqual(relocate_mod.assess_cue_readiness(partial)["status"], "partial")
 
-        ready = relocate_mod.CueSummary(
+        one_loop = relocate_mod.CueSummary(
             cue_count=3,
             loop_count=1,
+            has_beatgrid=True,
+            title="t",
+            author="a",
+            in_database=True,
+        )
+        one = relocate_mod.assess_cue_readiness(one_loop)
+        self.assertFalse(one["ready"])
+        self.assertEqual(one["status"], "partial")
+        self.assertIn("2 loops", one["label"].lower())
+
+        ready = relocate_mod.CueSummary(
+            cue_count=3,
+            loop_count=2,
             has_beatgrid=True,
             title="t",
             author="a",

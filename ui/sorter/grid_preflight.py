@@ -60,6 +60,7 @@ def _base_from_cues(cues: CueSummary, path_str: str) -> dict[str, Any]:
             "can_autocue": False,
             "needs_align": False,
             "manual_required": True,
+            "manual_confirmable": False,
             "issues": [
                 "Track is missing from VirtualDJ database.xml — open it in VDJ "
                 "so it can analyze BPM/beatgrid first."
@@ -132,6 +133,8 @@ def _base_from_cues(cues: CueSummary, path_str: str) -> dict[str, Any]:
         "can_autocue": can_autocue,
         "needs_align": needs_align,
         "manual_required": manual_required,
+        # True only when deep onset fails but structural grid/BPM exist (see assess_grid).
+        "manual_confirmable": False,
         "issues": issues,
         "warnings": warnings,
         "bpm": bpm,
@@ -169,6 +172,7 @@ def assess_grid_for_autocue(
                 "can_autocue": False,
                 "needs_align": False,
                 "manual_required": True,
+                "manual_confirmable": False,
                 "issues": ["Audio file not found on disk"],
                 "warnings": [],
                 "bpm": None,
@@ -227,14 +231,18 @@ def assess_grid_for_autocue(
             "but review the '1' in VirtualDJ if cues look early/late."
         )
     elif conf < 1.05 and float(alignment.get("best_beat_score") or 0) < 0.02:
+        # Structural grid exists (BPM + anchor); deep onset just cannot verify.
+        # User may confirm the VDJ grid manually and proceed with AutoCue.
         base["needs_align"] = True
         base["can_autocue"] = False
         base["manual_required"] = True
+        base["manual_confirmable"] = True
         base["status"] = "blocked"
         base["label"] = "Cannot verify grid"
         base["issues"].append(
             "Onset energy is too weak to verify the beatgrid (sparse kick / "
-            "ambient intro). Set the grid manually in VirtualDJ, then AutoCue."
+            "ambient intro). Set the grid manually in VirtualDJ, then confirm "
+            "it here or AutoCue with 'Grid is correct'."
         )
     else:
         if base["status"] == "ok":
@@ -255,8 +263,17 @@ def _deep_verify_alignment(audio_path: str, bpm: float) -> dict[str, Any]:
 
         ui_root = Path(__file__).resolve().parents[1]  # ui/
         repo_root = Path(__file__).resolve().parents[2]  # vdj-automatic-cuer/
-        load_dotenv(ui_root / ".env")
-        load_dotenv(repo_root / ".env")
+        load_dotenv(ui_root / ".env", override=False)
+        load_dotenv(repo_root / ".env", override=False)
+        load_dotenv(
+            Path.home() / "Desktop" / "vdj-automatic-cuer" / ".env", override=False
+        )
+        try:
+            from vdj_cuer.common import load_gemini_api_key  # type: ignore
+
+            load_gemini_api_key()
+        except Exception:
+            pass
 
         from vdj_cuer import AutomaticMusicCuer  # type: ignore
 

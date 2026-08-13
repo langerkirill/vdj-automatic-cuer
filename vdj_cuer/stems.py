@@ -1,6 +1,7 @@
 """StemMixin for AutomaticMusicCuer."""
 
 from .common import *
+from .precision_gate import MIN_LOOP_CONFIDENCE
 from .loop_seam_gemini import (
     LOOP_SEAM_GEMINI_MAX_CHECKS,
     LOOP_SEAM_GEMINI_TIMEOUT_SECONDS,
@@ -665,11 +666,21 @@ class StemMixin:
                         f"({len(stable_loops)} total after merge)"
                     )
 
-            analysis_data["loop_segments"] = stable_loops[:3]
-            if not analysis_data["loop_segments"]:
+            analysis_data["loop_segments"] = stable_loops[:TARGET_MAX_LOOPS]
+            analysis_data = self._ensure_minimum_loops(
+                analysis_data,
+                profiles=profiles,
+                beat_duration=beat_duration,
+                song_length=self._loop_discovery_song_length(
+                    analysis_data, profiles
+                ),
+                audio_file_path=audio_file_path,
+            )
+            kept = len(analysis_data.get("loop_segments") or [])
+            if kept < TARGET_MIN_LOOPS:
                 print(
-                    "  ℹ️  No seamless loops kept "
-                    "(zero loops is fine for this track)"
+                    f"  ⚠️  Only {kept} loop(s) after fill "
+                    f"(target {TARGET_MIN_LOOPS}–{TARGET_MAX_LOOPS})"
                 )
         else:
             analysis_data["loop_segments"] = []
@@ -680,7 +691,7 @@ class StemMixin:
         primary: List[Dict],
         secondary: List[Dict],
         beat_duration: float,
-        max_loops: int = 3,
+        max_loops: int = TARGET_MAX_LOOPS,
     ) -> List[Dict]:
         """Combine model + stem-scan loops, de-duping nearby starts."""
         min_spacing = beat_duration * 12.0
@@ -704,6 +715,68 @@ class StemMixin:
                 break
             consider(item)
         return merged[:max_loops]
+
+    def _ensure_minimum_loops(
+        self,
+        analysis_data: Dict,
+        *,
+        profiles: Dict,
+        beat_duration: float,
+        song_length: float,
+        audio_file_path: Optional[str] = None,
+    ) -> Dict:
+        """If Gemini kept fewer than 2 loops, fill from a wider stem scan."""
+        loops = list(analysis_data.get("loop_segments") or [])
+        if len(loops) >= TARGET_MIN_LOOPS:
+            return analysis_data
+        if not profiles or beat_duration <= 0:
+            return analysis_data
+
+        print(
+            f"  🔁 Only {len(loops)} loop(s) kept — scanning for "
+            f"{TARGET_MIN_LOOPS}–{TARGET_MAX_LOOPS}…"
+        )
+        transition_times = [
+            float(cue.get("timestamp"))
+            for cue in analysis_data.get("measure_changes", [])
+            if cue.get("timestamp") is not None
+        ]
+        discovered = self._discover_stem_validated_loops(
+            profiles,
+            beat_duration=beat_duration,
+            song_length=song_length,
+            transition_times=transition_times,
+            max_loops=TARGET_MAX_LOOPS,
+            audio_file_path=audio_file_path,
+            gemini_check_budget=max(LOOP_SEAM_GEMINI_MAX_CHECKS * 2, 16),
+            require_gemini_seam=True,
+        )
+        merged = self._merge_loop_candidates(
+            loops, discovered, beat_duration=beat_duration, max_loops=TARGET_MAX_LOOPS
+        )
+        if len(merged) < TARGET_MIN_LOOPS:
+            stem_only = self._discover_stem_validated_loops(
+                profiles,
+                beat_duration=beat_duration,
+                song_length=song_length,
+                transition_times=transition_times,
+                max_loops=TARGET_MAX_LOOPS,
+                audio_file_path=None,
+                require_gemini_seam=False,
+            )
+            merged = self._merge_loop_candidates(
+                merged,
+                stem_only,
+                beat_duration=beat_duration,
+                max_loops=TARGET_MAX_LOOPS,
+            )
+        if len(merged) > len(loops):
+            print(
+                f"  🔁 Loop fill now {len(merged)} "
+                f"(was {len(loops)}; target {TARGET_MIN_LOOPS}–{TARGET_MAX_LOOPS})"
+            )
+        analysis_data["loop_segments"] = merged
+        return analysis_data
 
     @staticmethod
     def _loop_discovery_song_length(
@@ -832,8 +905,10 @@ class StemMixin:
         beat_duration: float,
         song_length: float,
         transition_times: Optional[List[float]] = None,
-        max_loops: int = 3,
+        max_loops: int = TARGET_MAX_LOOPS,
         audio_file_path: Optional[str] = None,
+        gemini_check_budget: Optional[int] = None,
+        require_gemini_seam: bool = True,
     ) -> List[Dict]:
         """Scan bar grid for loops that pass stability + seam gates.
 
@@ -842,8 +917,8 @@ class StemMixin:
         something) while still finding later drum/vocal loops. Skips mid-bar
         starts and any region that would cross a known cue boundary.
 
-        After stem gates, candidates get Gemini end→start (3s+3s) wrap listens
-        with up to 3 placement retries when a wrap fails. Zero loops is fine.
+        After stem gates, candidates get Gemini end→start wrap listens.
+        Keep scanning until we have TARGET_MIN_LOOPS when possible.
         """
         if beat_duration <= 0 or song_length <= 0 or not profiles:
             return []
@@ -918,7 +993,7 @@ class StemMixin:
                     continue
 
                 confidence = _stem_gate_confidence(evidence)
-                if confidence < 0.75:
+                if confidence < MIN_LOOP_CONFIDENCE:
                     start += step_duration
                     continue
 
@@ -974,13 +1049,18 @@ class StemMixin:
         selected: List[Dict] = []
         min_spacing = beat_duration * 12.0
         # Cap how many ranked candidates enter the wrap-retry path (API cost).
+        check_budget = (
+            LOOP_SEAM_GEMINI_MAX_CHECKS
+            if gemini_check_budget is None
+            else int(gemini_check_budget)
+        )
         candidates_tried = 0
         for candidate in candidates:
             start = float(candidate["start"])
             if any(abs(start - float(item["start"])) < min_spacing for item in selected):
                 continue
             if audio_file_path:
-                if candidates_tried >= LOOP_SEAM_GEMINI_MAX_CHECKS:
+                if candidates_tried >= check_budget:
                     break
                 candidates_tried += 1
                 # Up to 3 wrap attempts (original + beat nudges) per candidate.
@@ -992,7 +1072,7 @@ class StemMixin:
                     model_elements=list(candidate.get("elements") or []),
                     loop_name=str(candidate.get("loop_name") or "loop"),
                     audio_file_path=audio_file_path,
-                    require_gemini_seam=True,
+                    require_gemini_seam=require_gemini_seam,
                 )
                 if accepted is None:
                     continue
