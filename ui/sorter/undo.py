@@ -15,6 +15,7 @@ from .action_log import append_action, read_actions
 from .config import ADD_CUES, CUES_ROOT, LIBRARIES, READY_FOR_SORT, VDJ_DATABASE
 from .relocate import (
     _move_audio_and_retarget_db,
+    remove_song_entry_from_database,
     summarize_cues,
 )
 
@@ -156,30 +157,51 @@ def _undo_sort(
         )
 
     removed_copies: list[str] = []
+    removed_song_entries: list[str] = []
     cues_sorted_path = details.get("cues_sorted_path")
     library_dests = details.get("library_dests") or []
+
+    def _purge_secondary_path(path: Path) -> None:
+        """Remove audio/stems and any cloned VirtualDJ Song for a secondary path."""
+        resolved = path.expanduser().resolve()
+        if dry_run:
+            removed_copies.append(str(resolved))
+            removed_song_entries.append(str(resolved))
+            return
+        if _remove_copy(resolved):
+            removed_copies.append(str(resolved))
+        try:
+            db_info = remove_song_entry_from_database(
+                resolved,
+                database_path=VDJ_DATABASE,
+                create_backup=False,
+                dry_run=False,
+            )
+            if db_info.get("removed_from_db"):
+                removed_song_entries.append(str(resolved))
+        except Exception:
+            # File may already be gone; Song cleanup is best-effort after unlink.
+            pass
 
     # Secondary library copies (e.g. House when Both) — not the primary dest.
     for entry in library_dests:
         p = Path(entry.get("path") or "")
-        if not p or not p.is_file():
+        if not p:
             continue
-        if p.resolve() == dest:
+        try:
+            resolved = p.expanduser().resolve()
+        except OSError:
             continue
-        if dry_run:
-            removed_copies.append(str(p))
-        else:
-            if _remove_copy(p.resolve()):
-                removed_copies.append(str(p.resolve()))
+        if resolved == dest:
+            continue
+        # Purge audio if present and always attempt Song cleanup (orphan clones).
+        _purge_secondary_path(resolved)
 
-    if cues_sorted_path and details.get("cues_sorted_copied"):
+    if cues_sorted_path and (
+        details.get("cues_sorted_copied") or details.get("cues_sorted_db_cloned")
+    ):
         cs = Path(cues_sorted_path)
-        if cs.is_file():
-            if dry_run:
-                removed_copies.append(str(cs))
-            else:
-                if _remove_copy(cs.resolve()):
-                    removed_copies.append(str(cs.resolve()))
+        _purge_secondary_path(cs)
 
     cues = summarize_cues(dest)
     move_result = _move_audio_and_retarget_db(
@@ -200,6 +222,7 @@ def _undo_sort(
         "database_updated": move_result.database_updated,
         "database_backup": move_result.database_backup,
         "removed_copies": removed_copies,
+        "removed_song_entries": removed_song_entries,
         "action": "sort",
     }
 

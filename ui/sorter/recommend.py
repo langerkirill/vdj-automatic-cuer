@@ -1,4 +1,8 @@
-"""Gemini folder recommendations from audio + the user's House/Zouk tree."""
+"""Gemini folder recommendations from audio + the user's House/Zouk tree.
+
+Always suggests a Zouk folder. House is only suggested when musical BPM is
+above HOUSE_BPM_MIN (default 100) — slow/zouk-tempo tracks skip House.
+"""
 
 from __future__ import annotations
 
@@ -19,11 +23,11 @@ from pydantic import BaseModel, Field
 from .autocue_path import ensure_autocue_on_path
 from .config import LIBRARIES
 from .library import list_library_tree
+from .relocate import summarize_cues
 
 ensure_autocue_on_path()
 
 # Prefer a current Flash model with audio + JSON support.
-# gemini-2.5-flash is blocked for many new API keys ("no longer available to new users").
 DEFAULT_SORTER_MODEL = os.getenv("MUSIC_SORTER_GEMINI_MODEL") or os.getenv(
     "GEMINI_MODEL", "gemini-3.5-flash"
 )
@@ -38,29 +42,70 @@ MODEL_FALLBACKS = [
     "gemini-3.1-pro-preview",
 ]
 
+# House crates are for higher-tempo material; at/under this BPM skip House.
+HOUSE_BPM_MIN = float(os.getenv("MUSIC_SORTER_HOUSE_BPM_MIN", "100"))
 
-class FolderRecommendationSchema(BaseModel):
-    library: str = Field(description="House or Zouk")
+
+class LibraryFolderPickSchema(BaseModel):
+    """One library destination pick."""
+
     relative_path: str = Field(
         description="Folder path under the library, e.g. Chill/Mystical or Party"
     )
     confidence: float = Field(ge=0.0, le=1.0, description="0-1 confidence")
     reasoning: str = Field(description="Short why this folder fits")
-    vibe_tags: list[str] = Field(default_factory=list, description="Mood/energy tags")
     alternatives: list[str] = Field(
         default_factory=list,
-        description="Up to 3 other valid relative_path options from the tree",
+        description="Up to 3 other valid relative_path options from the same library",
+    )
+
+
+class DualFolderRecommendationSchema(BaseModel):
+    """House + Zouk picks (House may be omitted by the prompt when BPM is low)."""
+
+    zouk: LibraryFolderPickSchema = Field(description="Best Zouk library folder")
+    house: Optional[LibraryFolderPickSchema] = Field(
+        default=None,
+        description="Best House library folder (omit when track is too slow for House)",
+    )
+    vibe_tags: list[str] = Field(
+        default_factory=list, description="Shared mood/energy tags"
+    )
+
+
+class ZoukOnlyRecommendationSchema(BaseModel):
+    zouk: LibraryFolderPickSchema = Field(description="Best Zouk library folder")
+    vibe_tags: list[str] = Field(
+        default_factory=list, description="Shared mood/energy tags"
     )
 
 
 @dataclass
+class LibraryPick:
+    relative_path: str
+    confidence: float
+    reasoning: str
+    alternatives: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class RecommendationResult:
+    """Dual-library recommendation with backward-compatible primary fields."""
+
     library: str
     relative_path: str
     confidence: float
     reasoning: str
     vibe_tags: list[str] = field(default_factory=list)
     alternatives: list[str] = field(default_factory=list)
+    house: Optional[dict[str, Any]] = None
+    zouk: Optional[dict[str, Any]] = None
+    bpm: Optional[float] = None
+    house_eligible: bool = False
+    house_skip_reason: Optional[str] = None
     model: str = ""
     cached: bool = False
     error: Optional[str] = None
@@ -110,18 +155,20 @@ def build_folder_catalog(max_paths: int = 400) -> dict[str, list[str]]:
     return catalog
 
 
-def _guess_mime(path: Path) -> str:
-    ext = path.suffix.lower()
-    return {
-        ".mp3": "audio/mpeg",
-        ".flac": "audio/flac",
-        ".m4a": "audio/mp4",
-        ".wav": "audio/wav",
-        ".aiff": "audio/aiff",
-        ".aif": "audio/aiff",
-        ".ogg": "audio/ogg",
-        ".opus": "audio/ogg",
-    }.get(ext, "application/octet-stream")
+def house_eligible_for_bpm(bpm: Optional[float], *, min_bpm: float = HOUSE_BPM_MIN) -> bool:
+    """True when we should ask for / return a House folder recommendation."""
+    if bpm is None:
+        return False
+    return float(bpm) > float(min_bpm)
+
+
+def _pick_from_schema(pick: LibraryFolderPickSchema) -> LibraryPick:
+    return LibraryPick(
+        relative_path=pick.relative_path.strip().strip("/"),
+        confidence=float(pick.confidence),
+        reasoning=(pick.reasoning or "").strip(),
+        alternatives=[a.strip().strip("/") for a in (pick.alternatives or [])][:3],
+    )
 
 
 def _parse_json_response(text: str) -> dict[str, Any]:
@@ -137,8 +184,31 @@ def _parse_json_response(text: str) -> dict[str, Any]:
     return json.loads(cleaned)
 
 
+def _primary_from_picks(
+    *,
+    house: Optional[LibraryPick],
+    zouk: Optional[LibraryPick],
+    preferred_library: Optional[str],
+) -> tuple[str, LibraryPick]:
+    """Choose primary library/path for legacy single-field consumers."""
+    pref = (preferred_library or "").strip().lower()
+    if pref in {"house", "zouk"} and pref == "house" and house is not None:
+        return "House", house
+    if pref in {"zouk", "zook"} and zouk is not None:
+        return "Zouk", zouk
+    if house is not None and zouk is not None:
+        if house.confidence >= zouk.confidence:
+            return "House", house
+        return "Zouk", zouk
+    if zouk is not None:
+        return "Zouk", zouk
+    if house is not None:
+        return "House", house
+    return "Zouk", LibraryPick(relative_path="", confidence=0.0, reasoning="")
+
+
 class FolderRecommender:
-    """Uploads a track to Gemini and ranks destination folders."""
+    """Uploads a track to Gemini and ranks destination folders (Zouk + optional House)."""
 
     def __init__(
         self,
@@ -172,6 +242,13 @@ class FolderRecommender:
             self._catalog_mtime = stamp
         return self._catalog_cache
 
+    def _track_bpm(self, path: Path) -> Optional[float]:
+        try:
+            cues = summarize_cues(path)
+            return cues.bpm
+        except Exception:
+            return None
+
     def recommend(
         self,
         audio_path: str | Path,
@@ -183,7 +260,20 @@ class FolderRecommender:
         if not path.is_file():
             raise FileNotFoundError(f"Audio not found: {path}")
 
-        cache_key = str(path)
+        bpm = self._track_bpm(path)
+        want_house = house_eligible_for_bpm(bpm)
+        house_skip_reason: Optional[str] = None
+        if not want_house:
+            if bpm is None:
+                house_skip_reason = "No BPM in VirtualDJ — House recommendation skipped"
+            else:
+                house_skip_reason = (
+                    f"BPM {bpm:.1f} ≤ {HOUSE_BPM_MIN:g} — House recommendation skipped "
+                    f"(only above {HOUSE_BPM_MIN:g} BPM)"
+                )
+
+        # Cache key includes eligibility so a BPM edit can re-fetch House later.
+        cache_key = f"{path}|house={want_house}|v2"
         if not force:
             with self._lock:
                 cached = self._cache.get(cache_key)
@@ -191,38 +281,78 @@ class FolderRecommender:
                 return RecommendationResult(**{**cached.to_dict(), "cached": True})
 
         catalog = self._get_catalog()
-        catalog_text = json.dumps(catalog, indent=2)
-        library_hint = (
-            f"The user is currently browsing the **{preferred_library}** library; "
-            "prefer that library unless the song clearly belongs elsewhere.\n"
-            if preferred_library
-            else ""
-        )
+        if want_house:
+            catalog_for_prompt = catalog
+        else:
+            catalog_for_prompt = {"Zouk": catalog.get("Zouk") or []}
+        catalog_text = json.dumps(catalog_for_prompt, indent=2)
 
-        prompt = f"""You are helping a DJ sort a cued track into their music library.
+        pref = (preferred_library or "").strip()
+        if pref.lower() in {"both", ""}:
+            library_hint = ""
+        else:
+            library_hint = (
+                f"The user is currently browsing the **{pref}** library UI; "
+                "still fill every library field the schema requires, but lean "
+                "confidence toward that library when both fit.\n"
+            )
 
-The DJ has two libraries with nested emotion/vibe folders (and some artist crates).
-You must recommend ONE existing folder path from the catalog below, or a sensible
-new nested path only if nothing fits (e.g. "Chill/NewVibe") — prefer existing folders.
+        if want_house:
+            prompt = f"""You are helping a DJ sort a cued track into House and Zouk libraries.
+
+Recommend the best folder in EACH library from the catalog (or a sensible new nested
+path only if nothing fits — prefer existing folders).
+
+Musical BPM from VirtualDJ: {bpm:.1f} (House is allowed for this tempo).
 
 {library_hint}
 FOLDER CATALOG (library → relative_path list):
 {catalog_text}
 
-Listen to the full audio. Infer energy, mood, genre lean (house vs zouk/world/electronic
-dance), darkness/lightness, groove, and how a DJ would file it by *feeling*.
+Listen to the full audio. Infer energy, mood, groove, darkness/lightness, and how a DJ
+would file it by *feeling* for:
+1) Zouk (often nested: Chill/*, Energy/*, …)
+2) House (often flatter emotion folders: Party, Dark, Journey, …)
 
 Rules:
-- relative_path must use forward slashes, no leading slash
-- For nested vibe crates like Zouk Chill/* and Zouk Energy/*, go as deep as the mood
-  supports (e.g. Chill/Mystical, Energy/Bouncy) rather than stopping at Chill/Energy
-- House is mostly flat emotion folders (Party, Dark, Journey, …)
-- confidence is 0-1
-- alternatives must be real relative_path values from the same library when possible
-- Keep reasoning to 1-3 short sentences
+- Always provide both `zouk` and `house` picks
+- relative_path uses forward slashes, no leading slash
+- For Zouk Chill/* and Energy/*, go as deep as the mood supports
+- confidence is 0-1 per library
+- alternatives: up to 3 real relative_path values from the SAME library
+- vibe_tags: shared mood tags for the track
+- Keep each reasoning to 1-2 short sentences
 
 Track filename: {path.name}
 """
+            schema = DualFolderRecommendationSchema
+        else:
+            prompt = f"""You are helping a DJ sort a cued track into their Zouk library.
+
+Recommend ONE best Zouk folder from the catalog (or a sensible new nested path only if
+nothing fits — prefer existing folders).
+
+Musical BPM from VirtualDJ: {bpm if bpm is not None else "unknown"}.
+Do NOT recommend House — this track is at or under {HOUSE_BPM_MIN:g} BPM (or BPM unknown).
+
+{library_hint}
+FOLDER CATALOG (Zouk only):
+{catalog_text}
+
+Listen to the full audio. Infer energy, mood, groove, and the best Zouk vibe crate
+(e.g. Chill/Mystical, Energy/Bouncy, Lounge, …).
+
+Rules:
+- relative_path uses forward slashes, no leading slash
+- Go as deep as the mood supports under Chill/Energy when nested crates fit
+- confidence is 0-1
+- alternatives: up to 3 real relative_path values from Zouk
+- vibe_tags: mood tags for the track
+- Keep reasoning to 1-2 short sentences
+
+Track filename: {path.name}
+"""
+            schema = ZoukOnlyRecommendationSchema
 
         uploaded = None
         upload_path = path
@@ -256,10 +386,9 @@ Track filename: {path.name}
                 if getattr(uploaded, "name", None):
                     uploaded = self.client.files.get(name=uploaded.name)
 
-            # Same contents shape as AutoCue: [prompt, uploaded_file]
             config = types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_json_schema=FolderRecommendationSchema.model_json_schema(),
+                response_json_schema=schema.model_json_schema(),
                 http_options=types.HttpOptions(timeout=180_000),
             )
 
@@ -279,12 +408,11 @@ Track filename: {path.name}
                         config=config,
                     )
                     used_model = model_name
-                    self.model_name = model_name  # stick with a working model
+                    self.model_name = model_name
                     break
                 except Exception as model_exc:
                     last_error = model_exc
                     err_text = str(model_exc).lower()
-                    # Only fall through for missing/blocked model IDs.
                     if any(
                         token in err_text
                         for token in (
@@ -305,24 +433,34 @@ Track filename: {path.name}
                 raise RuntimeError("Empty response from Gemini")
 
             data = _parse_json_response(response.text)
-            parsed = FolderRecommendationSchema.model_validate(data)
+            parsed = schema.model_validate(data)
 
-            # Normalize library name casing.
-            library = parsed.library.strip()
-            if library.lower() == "house":
-                library = "House"
-            elif library.lower() in {"zouk", "zook"}:
-                library = "Zouk"
+            zouk_pick = _pick_from_schema(parsed.zouk)
+            house_pick: Optional[LibraryPick] = None
+            if want_house and isinstance(parsed, DualFolderRecommendationSchema):
+                if parsed.house is not None:
+                    house_pick = _pick_from_schema(parsed.house)
+
+            vibe_tags = list(getattr(parsed, "vibe_tags", None) or [])
+
+            primary_lib, primary = _primary_from_picks(
+                house=house_pick,
+                zouk=zouk_pick,
+                preferred_library=preferred_library,
+            )
 
             result = RecommendationResult(
-                library=library,
-                relative_path=parsed.relative_path.strip().strip("/"),
-                confidence=float(parsed.confidence),
-                reasoning=parsed.reasoning.strip(),
-                vibe_tags=list(parsed.vibe_tags or []),
-                alternatives=[a.strip().strip("/") for a in (parsed.alternatives or [])][
-                    :3
-                ],
+                library=primary_lib,
+                relative_path=primary.relative_path,
+                confidence=primary.confidence,
+                reasoning=primary.reasoning,
+                vibe_tags=vibe_tags,
+                alternatives=list(primary.alternatives),
+                house=house_pick.to_dict() if house_pick else None,
+                zouk=zouk_pick.to_dict(),
+                bpm=bpm,
+                house_eligible=want_house,
+                house_skip_reason=house_skip_reason,
                 model=used_model,
                 cached=False,
             )
@@ -331,10 +469,13 @@ Track filename: {path.name}
             return result
         except Exception as exc:
             result = RecommendationResult(
-                library=preferred_library or "House",
+                library="Zouk",
                 relative_path="",
                 confidence=0.0,
                 reasoning="",
+                bpm=bpm,
+                house_eligible=want_house,
+                house_skip_reason=house_skip_reason,
                 model=self.model_name,
                 error=str(exc),
             )

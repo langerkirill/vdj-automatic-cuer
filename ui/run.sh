@@ -28,17 +28,27 @@ if ! "$PY" -c "import fastapi, uvicorn" 2>/dev/null; then
   "$PIP" install -r requirements.txt
 fi
 
-# Load Gemini key from repo .env (or local ui/.env).
-if [[ -f .env ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
-elif [[ -f "$REPO_ROOT/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$REPO_ROOT/.env"
-  set +a
+# Load Gemini key from repo .env, ui/.env, or Desktop checkout (legacy path).
+_load_env() {
+  local f="$1"
+  if [[ -f "$f" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$f"
+    set +a
+    return 0
+  fi
+  return 1
+}
+_load_env .env \
+  || _load_env "$REPO_ROOT/.env" \
+  || _load_env "$HOME/Desktop/vdj-automatic-cuer/.env" \
+  || _load_env "$HOME/Desktop/vdj-automatic-cuer/ui/.env" \
+  || true
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "WARNING: GEMINI_API_KEY is not set. AutoCue will fail until you add it to" >&2
+  echo "  $REPO_ROOT/.env  or  $HOME/Desktop/vdj-automatic-cuer/.env" >&2
 fi
 
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"

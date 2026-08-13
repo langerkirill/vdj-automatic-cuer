@@ -17,6 +17,7 @@ from datetime import datetime
 import argparse
 from typing import Dict, List, Literal, Optional, Tuple, Type
 from dotenv import load_dotenv
+from pathlib import Path
 import html
 from pydantic import BaseModel, Field
 from google import genai
@@ -30,7 +31,64 @@ from vdj_database_safety import (
 )
 
 
-DEFAULT_GEMINI_MODEL = "gemini-3.1-pro-preview"
+def load_gemini_api_key() -> str:
+    """
+    Resolve GEMINI_API_KEY from env or known .env locations.
+
+    load_dotenv() alone only searches the process CWD, which breaks when the
+    Music Sorter UI is launched from home/src without a local .env while the
+    key lives under Desktop/vdj-automatic-cuer/.env.
+    """
+    if os.getenv("GEMINI_API_KEY"):
+        return os.environ["GEMINI_API_KEY"]
+
+    # vdj_cuer/common.py → repo root is parents[1]
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates = [
+        repo_root / ".env",
+        repo_root / "ui" / ".env",
+        Path.home() / "Desktop" / "vdj-automatic-cuer" / ".env",
+        Path.home() / "Desktop" / "vdj-automatic-cuer" / "ui" / ".env",
+        Path.home() / "src" / "vdj-automatic-cuer" / ".env",
+        Path.cwd() / ".env",
+    ]
+    for path in candidates:
+        if path.is_file():
+            load_dotenv(path, override=False)
+
+    # Final pass: default dotenv behavior (CWD / parents) without clobbering.
+    load_dotenv(override=False)
+
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        searched = ", ".join(str(p) for p in candidates)
+        raise ValueError(
+            "GEMINI_API_KEY not found in environment or .env file. "
+            f"Looked for: {searched}"
+        )
+    return key
+
+
+DEFAULT_GEMINI_MODEL = "gemini-2.5-pro"
+# Separate daily quotas from preview 3.1 Pro. Skip exhausted / retired Pro ids.
+GEMINI_PRO_FALLBACKS = (
+    "gemini-2.5-pro",
+    "gemini-pro-latest",
+)
+
+
+def resolve_gemini_model(explicit: str | None = None) -> str:
+    """Pick AutoCue's Pro model: call arg, AUTOCUE_GEMINI_MODEL, GEMINI_MODEL, default."""
+    for candidate in (
+        explicit,
+        os.getenv("AUTOCUE_GEMINI_MODEL"),
+        os.getenv("GEMINI_MODEL"),
+        DEFAULT_GEMINI_MODEL,
+    ):
+        name = (candidate or "").strip()
+        if name:
+            return name
+    return DEFAULT_GEMINI_MODEL
 DEFAULT_UPLOAD_RETRIES = 5
 DEFAULT_ANALYSIS_RETRIES = 3
 # What to rewrite in database.xml: both, cues only (keep loops), or loops only (keep cues).
@@ -41,6 +99,8 @@ WRITE_SCOPES = (WRITE_SCOPE_ALL, WRITE_SCOPE_CUES, WRITE_SCOPE_LOOPS)
 VDJ_STEM_NAMES = ("vocal", "hihat", "bass", "instruments", "kick")
 LOOP_BEAT_CHOICES = (32, 16, 8, 4)
 MIN_USEFUL_LOOP_BEATS = 4
+TARGET_MIN_LOOPS = 2
+TARGET_MAX_LOOPS = 3
 # Wall-clock cap so 32-beat loops on slow tracks (e.g. Valley Of The Winds @ 75
 # BPM ≈ 25.6s) are shortened to a DJ-usable length.
 MAX_LOOP_DURATION_SECONDS = 14.0

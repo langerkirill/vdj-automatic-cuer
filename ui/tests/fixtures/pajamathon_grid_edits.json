@@ -1,0 +1,534 @@
+[
+  {
+    "source": "same_path_backup",
+    "name": "01 - Kweller - 202(Explicit).flac",
+    "before_bpm": 119.986322,
+    "after_bpm": 59.993161,
+    "before_anchor": 13.99483,
+    "after_anchor": 13.99483,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "same_path_backup",
+    "name": "03 - Pensees - Kiss Me (Original Mix).flac",
+    "before_bpm": 120.0,
+    "after_bpm": 60.0,
+    "before_anchor": 33.002789,
+    "after_anchor": 33.002789,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "same_path_backup",
+    "name": "03 - Cautious Clay - Cold War(Explicit).flac",
+    "before_bpm": 153.998178,
+    "after_bpm": 76.999089,
+    "before_anchor": 3.151383,
+    "after_anchor": 3.151383,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "same_path_backup",
+    "name": "05 - Summer Walker - Come Thru(Explicit).flac",
+    "before_bpm": 151.999169,
+    "after_bpm": 75.999585,
+    "before_anchor": 25.265396,
+    "after_anchor": 25.265396,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "zouk_original",
+    "name": "02 - So Below - Sleep.flac",
+    "before_bpm": 88.00054,
+    "after_bpm": 88.00054,
+    "before_anchor": 45.394489,
+    "after_anchor": 45.738279,
+    "delta_beats": 0.504228
+  },
+  {
+    "source": "zouk_original",
+    "name": "01 - Mylson - Teu Feiti\u00e7o.flac",
+    "before_bpm": 89.999955,
+    "after_bpm": 89.999955,
+    "before_anchor": 24.026009,
+    "after_anchor": 2.673074,
+    "delta_beats": -32.029386
+  },
+  {
+    "source": "zouk_original",
+    "name": "05 - alayna - Between Dusk And Dawn.flac",
+    "before_bpm": 143.999885,
+    "after_bpm": 71.999942,
+    "before_anchor": -0.365714,
+    "after_anchor": 0.0,
+    "delta_beats": 0.439
+  },
+  {
+    "source": "zouk_original",
+    "name": "01 - KastomariN - Light.flac",
+    "before_bpm": 122.000069,
+    "after_bpm": 122.000069,
+    "before_anchor": 15.723764,
+    "after_anchor": 16.183084,
+    "delta_beats": 0.933951
+  },
+  {
+    "source": "zouk_original",
+    "name": "03 - Ary - Como Te Sentes Tu-.flac",
+    "before_bpm": 85.001126,
+    "after_bpm": 85.001126,
+    "before_anchor": 12.044286,
+    "after_anchor": 0.717574,
+    "delta_beats": -16.046388
+  },
+  {
+    "source": "zouk_original",
+    "name": "Michele Morrone - Beautiful (Paulo Mak Zremix).mp3",
+    "before_bpm": 157.998267,
+    "after_bpm": 78.999134,
+    "before_anchor": 0.809955,
+    "after_anchor": 0.809955,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "zouk_original",
+    "name": "11 - Govinda - Calm.flac",
+    "before_bpm": 160.004693,
+    "after_bpm": 80.002347,
+    "before_anchor": 54.685509,
+    "after_anchor": 54.685509,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "zouk_original",
+    "name": "04 Kaysha - I Feel It Coming (Kizomba Remix).flac",
+    "before_bpm": 91.999565,
+    "after_bpm": 91.999565,
+    "before_anchor": 39.79068,
+    "after_anchor": 41.740238,
+    "delta_beats": 2.989308
+  },
+  {
+    "source": "zouk_original",
+    "name": "01 - Cammie - 1 em 100.flac",
+    "before_bpm": 126.000126,
+    "after_bpm": 63.000063,
+    "before_anchor": 15.742086,
+    "after_anchor": 15.742086,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "zouk_original",
+    "name": "01 Sozinho.flac",
+    "before_bpm": 83.999966,
+    "after_bpm": 83.999966,
+    "before_anchor": 23.057823,
+    "after_anchor": 22.848572,
+    "delta_beats": -0.292951
+  },
+  {
+    "source": "zouk_original",
+    "name": "06 - KastomariN - Rain.flac",
+    "before_bpm": 100.0,
+    "after_bpm": 100.0,
+    "before_anchor": 57.585693,
+    "after_anchor": 57.609749,
+    "delta_beats": 0.040093
+  },
+  {
+    "source": "zouk_original",
+    "name": "01 - BlauDiss - Rejuvenate.flac",
+    "before_bpm": 130.002102,
+    "after_bpm": 130.002102,
+    "before_anchor": 0.057052,
+    "after_anchor": 0.014943,
+    "delta_beats": -0.091238
+  },
+  {
+    "source": "zouk_original",
+    "name": "01 - noni - I Don't Know You.flac",
+    "before_bpm": 70.00007,
+    "after_bpm": 70.00007,
+    "before_anchor": 6.990842,
+    "after_anchor": 0.137098,
+    "delta_beats": -7.996043
+  },
+  {
+    "source": "zouk_original",
+    "name": "01 - Sorrow - Never Too Far.flac",
+    "before_bpm": 134.99649,
+    "after_bpm": 134.99649,
+    "before_anchor": 14.316485,
+    "after_anchor": 14.259048,
+    "delta_beats": -0.12923
+  },
+  {
+    "source": "zouk_original",
+    "name": "01 - Timothy and the Apocalypse - Love In Stereo.flac",
+    "before_bpm": 120.0,
+    "after_bpm": 120.0,
+    "before_anchor": 0.038639,
+    "after_anchor": 0.001315,
+    "delta_beats": -0.074648
+  },
+  {
+    "source": "zouk_original",
+    "name": "01 - KastomariN - Black Sky.flac",
+    "before_bpm": 96.00169,
+    "after_bpm": 96.00169,
+    "before_anchor": 0.023084,
+    "after_anchor": 20.036917,
+    "delta_beats": 32.022696
+  },
+  {
+    "source": "zouk_original",
+    "name": "Dj Kakah - As Long As You Love Me feat. Sleeping At Last (Kizomba Remix).mp3",
+    "before_bpm": 83.999966,
+    "after_bpm": 83.999966,
+    "before_anchor": 72.877098,
+    "after_anchor": 71.854126,
+    "delta_beats": -1.43216
+  },
+  {
+    "source": "same_path_phase",
+    "name": "06 - Pensees - Labyrinth (Original Mix).flac",
+    "before_bpm": 70.00007,
+    "after_bpm": 70.00007,
+    "before_anchor": 39.430748,
+    "after_anchor": 54.849258,
+    "delta_beats": 17.98828
+  },
+  {
+    "source": "same_path_phase",
+    "name": "01 Can't Be Friends (Saxo-Kizomba).m4a",
+    "before_bpm": 80.999206,
+    "after_bpm": 80.999206,
+    "before_anchor": 6.665306,
+    "after_anchor": 5.923583,
+    "delta_beats": -1.001316
+  },
+  {
+    "source": "same_path_phase",
+    "name": "01 - Kweller - 202(Explicit).flac",
+    "before_bpm": 119.986322,
+    "after_bpm": 59.993161,
+    "before_anchor": 13.99483,
+    "after_anchor": 35.999043,
+    "delta_beats": 22.001705
+  },
+  {
+    "source": "same_path_phase",
+    "name": "02 - Mika Mendes - M\u00e1gico.flac",
+    "before_bpm": 90.999815,
+    "after_bpm": 90.999815,
+    "before_anchor": 31.6122,
+    "after_anchor": 31.922461,
+    "delta_beats": 0.470562
+  },
+  {
+    "source": "same_path_phase",
+    "name": "01 - YASMINE - Apaixona.flac",
+    "before_bpm": 89.999955,
+    "after_bpm": 89.999955,
+    "before_anchor": 11.337732,
+    "after_anchor": 10.664124,
+    "delta_beats": -1.010411
+  },
+  {
+    "source": "same_path_phase",
+    "name": "03 - Pensees - Kiss Me (Original Mix).flac",
+    "before_bpm": 120.0,
+    "after_bpm": 60.0,
+    "before_anchor": 33.002789,
+    "after_anchor": 33.002789,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "same_path_phase",
+    "name": "03 - Ary - Como Te Sentes Tu-.flac",
+    "before_bpm": 85.001126,
+    "after_bpm": 85.001126,
+    "before_anchor": 0.717574,
+    "after_anchor": -0.022959,
+    "delta_beats": -1.049102
+  },
+  {
+    "source": "same_path_phase",
+    "name": "03 - Cautious Clay - Cold War(Explicit).flac",
+    "before_bpm": 153.998178,
+    "after_bpm": 76.999089,
+    "before_anchor": 3.151383,
+    "after_anchor": 0.022959,
+    "delta_beats": -4.014763
+  },
+  {
+    "source": "same_path_phase",
+    "name": "10 - Metro Boomin - Creepin'(Explicit).flac",
+    "before_bpm": 97.999984,
+    "after_bpm": 97.999984,
+    "before_anchor": 16.559183,
+    "after_anchor": 29.411985,
+    "delta_beats": 20.992906
+  },
+  {
+    "source": "same_path_phase",
+    "name": "12 - 2much - Apaga a Luz.flac",
+    "before_bpm": 86.999391,
+    "after_bpm": 86.999391,
+    "before_anchor": 22.969683,
+    "after_anchor": 44.342403,
+    "delta_beats": 30.990227
+  },
+  {
+    "source": "same_path_phase",
+    "name": "05 - Summer Walker - Come Thru(Explicit).flac",
+    "before_bpm": 151.999169,
+    "after_bpm": 75.999585,
+    "before_anchor": 25.265396,
+    "after_anchor": 25.265396,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "same_path_phase",
+    "name": "08 - Dj Kakah & Paulo Mac - Close To Me.mp3",
+    "before_bpm": 87.997571,
+    "after_bpm": 87.997571,
+    "before_anchor": 0.713311,
+    "after_anchor": 0.01148,
+    "delta_beats": -1.029324
+  },
+  {
+    "source": "same_path_phase",
+    "name": "Dj Kakah - As Long As You Love Me feat. Sleeping At Last (Kizomba Remix).mp3",
+    "before_bpm": 83.999966,
+    "after_bpm": 83.999966,
+    "before_anchor": 71.854126,
+    "after_anchor": 72.559486,
+    "delta_beats": 0.987504
+  },
+  {
+    "source": "same_path_phase",
+    "name": "14 - Dj Kakah - Chantaje (Kizomba Remix).mp3",
+    "before_bpm": 88.000023,
+    "after_bpm": 88.000023,
+    "before_anchor": 0.369184,
+    "after_anchor": 0.013746,
+    "delta_beats": -0.521309
+  },
+  {
+    "source": "zouk_original",
+    "name": "01 - Arael - ocean eyes.flac",
+    "before_bpm": 144.998284,
+    "after_bpm": 72.499142,
+    "before_anchor": 52.96669,
+    "after_anchor": 52.96669,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "zouk_original",
+    "name": "01 - Entangled Mind - A Comfy Place.flac",
+    "before_bpm": 140.00014,
+    "after_bpm": 70.00007,
+    "before_anchor": 0.003447,
+    "after_anchor": 0.003447,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "zouk_original",
+    "name": "01 - Khalid - Talk REMIX.flac",
+    "before_bpm": 135.99922,
+    "after_bpm": 67.99961,
+    "before_anchor": 14.195896,
+    "after_anchor": 14.195896,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "zouk_original",
+    "name": "01 - Sade - The Moon and the Sky.flac",
+    "before_bpm": 148.003069,
+    "after_bpm": 74.001534,
+    "before_anchor": 1.013492,
+    "after_anchor": 1.013492,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "zouk_original",
+    "name": "05 - MOTHICA - No One.flac",
+    "before_bpm": 129.999003,
+    "after_bpm": 64.999502,
+    "before_anchor": 15.062336,
+    "after_anchor": 15.062336,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "zouk_original",
+    "name": "06 - Luna Shadows - god.drugs.u.flac",
+    "before_bpm": 124.001273,
+    "after_bpm": 62.000637,
+    "before_anchor": 15.485805,
+    "after_anchor": 15.485805,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "zouk_original",
+    "name": "08 - Soty - Sun Touch (Original Mix).flac",
+    "before_bpm": 142.002424,
+    "after_bpm": 71.001212,
+    "before_anchor": 54.088097,
+    "after_anchor": 54.088097,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "zouk_original",
+    "name": "08 - Dj Kakah - I Remember feat. AlunaGeorge.mp3",
+    "before_bpm": 150.0,
+    "after_bpm": 75.0,
+    "before_anchor": 0.228,
+    "after_anchor": 0.228,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "zouk_original",
+    "name": "Heartless - Dj Kakah Zouk Remix.mp3",
+    "before_bpm": 160.0,
+    "after_bpm": 80.0,
+    "before_anchor": 1.543265,
+    "after_anchor": 1.543265,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "zouk_original",
+    "name": "Selena Gomez - Crowded Room (Zouk).mp3",
+    "before_bpm": 160.004693,
+    "after_bpm": 80.002347,
+    "before_anchor": 6.025238,
+    "after_anchor": 6.025238,
+    "delta_beats": 0.0
+  },
+  {
+    "source": "zouk_original",
+    "name": "01 - D'african - I Fucking Lust You.flac",
+    "before_bpm": 85.001126,
+    "after_bpm": 42.500563,
+    "before_anchor": 0.790567,
+    "after_anchor": 0.069783,
+    "delta_beats": -0.511,
+    "note": "after BPM is below 55 \u2014 recorded but not a musical half/keep spec"
+  },
+  {
+    "source": "zouk_original",
+    "name": "iNFinitY - HER.mp3",
+    "before_bpm": 68.003078,
+    "after_bpm": 68.003078,
+    "before_anchor": -1.54415,
+    "after_anchor": 0.248601,
+    "delta_beats": 2.032
+  },
+  {
+    "source": "same_path_phase",
+    "name": "01 Don't Judge Me (Saxo-Kizomba).m4a",
+    "before_bpm": 88.00054,
+    "after_bpm": 88.00054,
+    "before_anchor": 32.425262,
+    "after_anchor": 32.760235,
+    "delta_beats": 0.491297
+  },
+  {
+    "source": "same_path_phase",
+    "name": "01 Dusk Till Dawn - Kizomba Remix.m4a",
+    "before_bpm": 85.001126,
+    "after_bpm": 85.001126,
+    "before_anchor": 12.223083,
+    "after_anchor": 11.512967,
+    "delta_beats": -1.006011
+  },
+  {
+    "source": "same_path_phase",
+    "name": "01 Havana - Kizomba.m4a",
+    "before_bpm": 91.999565,
+    "after_bpm": 91.999565,
+    "before_anchor": 28.912811,
+    "after_anchor": 31.516975,
+    "delta_beats": 3.993033
+  },
+  {
+    "source": "same_path_phase",
+    "name": "04 - GoGo Morrow - Don't Stop.flac",
+    "before_bpm": 80.621538,
+    "after_bpm": 80.621538,
+    "before_anchor": 1.000975,
+    "after_anchor": 18.741476,
+    "delta_beats": 23.837775
+  },
+  {
+    "source": "zouk_original",
+    "name": "02 - Dj Kakah - Back To Me feat. Marian Hill & Lauren Jauregui.mp3",
+    "before_bpm": 82.0,
+    "after_bpm": 82.0,
+    "before_anchor": 6.566,
+    "after_anchor": 6.203,
+    "delta_beats": -0.495
+  },
+  {
+    "source": "zouk_original",
+    "name": "12 All Upon You.m4a",
+    "before_bpm": 90.0,
+    "after_bpm": 90.0,
+    "before_anchor": 0.766,
+    "after_anchor": 0.08,
+    "delta_beats": -1.028
+  },
+  {
+    "source": "zouk_original",
+    "name": "Ash & Naila - Give A Little (Pmak ZRemix).mp3",
+    "before_bpm": 84.0,
+    "after_bpm": 84.0,
+    "before_anchor": 0.769,
+    "after_anchor": 0.046,
+    "delta_beats": -1.012
+  },
+  {
+    "source": "zouk_original",
+    "name": "Dj-KaKah-Starboy-feat.-The-Weeknd-_-Daft-Punk-_Kizomba-Version_-_152kbit_Opus_.flac",
+    "before_bpm": 88.00054,
+    "after_bpm": 88.00054,
+    "before_anchor": 17.063,
+    "after_anchor": 16.414,
+    "delta_beats": -0.951
+  },
+  {
+    "source": "zouk_original",
+    "name": "KeeMo feat. Cosmo Klein - Beautiful Lie (Pmak Zremix).mp3",
+    "before_bpm": 90.0,
+    "after_bpm": 90.0,
+    "before_anchor": -0.619,
+    "after_anchor": 0.002,
+    "delta_beats": 0.931
+  },
+  {
+    "source": "same_path_phase",
+    "name": "01 - Nina Cobham - Sola (Remix).flac",
+    "before_bpm": 63.009061,
+    "after_bpm": 63.009061,
+    "before_anchor": 37.188118,
+    "after_anchor": 15.359881,
+    "delta_beats": -22.923
+  },
+  {
+    "source": "same_path_phase",
+    "name": "10 Souje.m4a",
+    "before_bpm": 84.0,
+    "after_bpm": 84.0,
+    "before_anchor": 11.655623,
+    "after_anchor": 11.651797,
+    "delta_beats": -0.005
+  },
+  {
+    "source": "same_path_phase",
+    "name": "01 Sozinho.flac",
+    "before_bpm": 84.0,
+    "after_bpm": 84.0,
+    "before_anchor": 22.848572,
+    "after_anchor": 22.846775,
+    "delta_beats": -0.003
+  }
+]

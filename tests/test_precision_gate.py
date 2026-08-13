@@ -31,7 +31,7 @@ class PrecisionGateTests(unittest.TestCase):
                 cue(30.0),
             ],
             "loop_segments": [
-                loop(40.0, confidence=0.74),
+                loop(40.0, confidence=0.50),
                 loop(50.0, elements=[]),
                 loop(60.0),
             ],

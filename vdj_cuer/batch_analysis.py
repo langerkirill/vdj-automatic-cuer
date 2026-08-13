@@ -43,16 +43,16 @@ class BatchAnalysisMixin:
             - Breakdown sections (where elements drop out)
             - Drops/build-ups (energy changes)
 
-            For EACH file, find 0-3 loop sections for DJing (8, 16, or 32 beats).
+            For EACH file, find 2-3 loop sections for DJing (8, 16, or 32 beats).
+            At least 2 loops are required on any track longer than 45 seconds
+            (early repeating phrase + later groove/drop). A third is preferred.
             Prefer 16-beat loops; use 8 for tight repeating phrases, especially
             instrument-only intros in the first bars (melodic intro loops).
             Prefer loop starts on beat 1, but other beats are OK if the wrap is
-            cleaner. Return fewer loops when the audio does not contain a clean
-            candidate — zero loops is correct for many tracks.
+            cleaner. If a 16-beat wrap is messy, try 8 beats.
             A loop must wrap cleanly: level and texture at the end must match the
-            start. Evolving jazz, progressive harmony, and non-repeating vocal
-            phrases are not loops — return zero rather than a bad wrap.
-            Never invent a loop type to satisfy a quota. Candidate types are:
+            start. Do not invent a vocal/drum-only label — pick real phrases.
+            Candidate types are:
             1. DRUM LOOP: A section with ONLY drums/percussion, no melody, no vocals -
                perfect for DJ transitions
             2. VOCAL LOOP: A section with prominent vocals (with or without other

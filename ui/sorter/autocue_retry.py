@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import threading
 import traceback
 import uuid
@@ -16,8 +17,9 @@ from dotenv import load_dotenv
 
 from .autocue_path import ensure_autocue_on_path
 from .config import CUES_ROOT, LIBRARIES, VDJ_DATABASE
+from .db_lock import get_db_write_lock
 from .grid_preflight import assess_grid_for_autocue
-from .relocate import is_virtualdj_running, summarize_cues
+from .relocate import is_virtualdj_running, summarize_cues, summarize_cues_for_paths
 
 
 # Matches vdj_cuer.common WRITE_SCOPE_* values.
@@ -99,25 +101,41 @@ class BatchJob:
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
-        # Attach live child job snapshots.
         with _lock:
-            payload["items"] = [
-                _jobs[jid].to_dict() for jid in self.item_job_ids if jid in _jobs
-            ]
+            live = [_jobs[jid] for jid in self.item_job_ids if jid in _jobs]
+        active = [job.to_dict() for job in live if job.status in {"queued", "running"}]
+        payload["items"] = active
+        payload["active_count"] = len(active)
         return payload
 
 
 _jobs: dict[str, RetryJob] = {}
 _batches: dict[str, BatchJob] = {}
-_lock = threading.Lock()
-# Serialize only the heavy AutoCue process (Gemini + database.xml write).
-# Multiple jobs may be started; extras wait here with status "queued".
-_active_lock = threading.Lock()
-# Max concurrent AutoCue processes. >1 speeds Gemini, but database.xml writes
-# inside process_audio_file are not multi-writer-safe — keep at 1 unless write
-# path is split. Analysis wait is still non-blocking for job creation/UI.
-_MAX_CONCURRENT = 1
+# Re-entrant: list_batches / to_dict may snapshot while a caller already holds it.
+# A plain Lock here deadlocked GET /api/retry-cues once a batch existed (to_dict
+# re-entered _lock while list_batches held it), which then froze _update_job and
+# blocked database writes after Gemini returned.
+_lock = threading.RLock()
+# Shared with cue edit / sort / notes so concurrent RMW never clobber database.xml.
+_db_write_lock = get_db_write_lock()
+# How many AutoCue analyses may run in parallel (upload + Gemini).
+# Default 5; override with MUSIC_SORTER_AUTOCUE_CONCURRENCY. Hard cap 8.
+# database.xml applies still go through _db_write_lock one at a time.
+def _parse_max_concurrent() -> int:
+    raw = (os.environ.get("MUSIC_SORTER_AUTOCUE_CONCURRENCY") or "5").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 5
+    return max(1, min(n, 8))
+
+
+_MAX_CONCURRENT = _parse_max_concurrent()
 _active_sem = threading.Semaphore(_MAX_CONCURRENT)
+
+
+def max_concurrent_jobs() -> int:
+    return _MAX_CONCURRENT
 
 
 def _now() -> str:
@@ -144,7 +162,8 @@ def list_jobs(limit: int = 20) -> list[dict[str, Any]]:
 def list_batches(limit: int = 10) -> list[dict[str, Any]]:
     with _lock:
         batches = sorted(_batches.values(), key=lambda b: b.created_at, reverse=True)
-        return [b.to_dict() for b in batches[:limit]]
+        selected = batches[:limit]
+    return [batch.to_dict() for batch in selected]
 
 
 def _assert_allowed_path(path: Path) -> Path:
@@ -189,10 +208,11 @@ def start_retry_cues(
     deep_grid_check: bool = True,
     batch_id: Optional[str] = None,
     write_scope: str = WRITE_SCOPE_ALL,
+    cues_before: Optional[Any] = None,
 ) -> RetryJob:
     scope = normalize_write_scope(write_scope)
     audio = _assert_allowed_path(Path(source_path))
-    before = summarize_cues(audio)
+    before = cues_before if cues_before is not None else summarize_cues(audio)
 
     if _has_active_job_for_path(str(audio)):
         raise RuntimeError(
@@ -272,7 +292,8 @@ def start_batch_retry_cues(
     write_scope: str = WRITE_SCOPE_ALL,
 ) -> BatchJob:
     """
-    Queue AutoCue for many tracks. Jobs run one-at-a-time via _active_lock.
+    Queue AutoCue for many tracks. Up to MUSIC_SORTER_AUTOCUE_CONCURRENCY
+    analyses run in parallel; database writes are serialized.
 
     deep_grid_check defaults False for batch (too slow per file); structural
     preflight still blocks tracks without BPM/grid.
@@ -326,12 +347,17 @@ def _run_batch(
     write_scope: str = WRITE_SCOPE_ALL,
 ) -> None:
     scope = normalize_write_scope(write_scope)
+    start_errors = 0
     _update_batch(
         batch_id,
         status="running",
         started_at=_now(),
-        message=f"Running batch ({len(paths)} tracks, {write_scope_label(scope)})…",
+        message=(
+            f"Running batch ({len(paths)} tracks, {write_scope_label(scope)}, "
+            f"up to {_MAX_CONCURRENT} concurrent)…"
+        ),
     )
+    summaries = summarize_cues_for_paths(paths)
     for path in paths:
         try:
             job = start_retry_cues(
@@ -342,12 +368,13 @@ def _run_batch(
                 deep_grid_check=deep_grid_check,
                 batch_id=batch_id,
                 write_scope=scope,
+                cues_before=summaries.get(path),
             )
         except Exception as exc:
+            start_errors += 1
             with _lock:
                 batch = _batches.get(batch_id)
                 if batch:
-                    batch.failed += 1
                     batch.skip_reasons.append({"path": path, "reason": str(exc)})
             continue
 
@@ -356,7 +383,6 @@ def _run_batch(
             if batch:
                 batch.item_job_ids.append(job.id)
                 if job.status == "skipped":
-                    batch.skipped += 1
                     batch.skip_reasons.append(
                         {
                             "path": job.path,
@@ -367,24 +393,46 @@ def _run_batch(
                 else:
                     batch.queued += 1
 
-        # Wait for this job to finish before starting the next (serialize).
-        if job.status == "queued" or job.status == "running":
-            while True:
-                live = get_job(job.id)
-                if live is None or live.status in {"ok", "error", "skipped"}:
-                    with _lock:
-                        batch = _batches.get(batch_id)
-                        if batch and live:
-                            if live.status == "ok":
-                                batch.done += 1
-                            elif live.status == "error":
-                                batch.failed += 1
-                            batch.message = (
-                                f"{batch.done} ok · {batch.failed} failed · "
-                                f"{batch.skipped} skipped / {batch.total}"
-                            )
-                    break
-                threading.Event().wait(1.5)
+        # Do not wait here — start jobs; _active_sem limits parallel analysis.
+
+    # Wait until every non-skipped child finishes (up to N run in parallel).
+    while True:
+        with _lock:
+            batch = _batches.get(batch_id)
+            if not batch:
+                return
+            ids = list(batch.item_job_ids)
+        done = 0
+        failed = 0
+        skipped = 0
+        still_active = 0
+        for jid in ids:
+            live = get_job(jid)
+            if live is None:
+                continue
+            if live.status == "ok":
+                done += 1
+            elif live.status == "error":
+                failed += 1
+            elif live.status == "skipped":
+                skipped += 1
+            elif live.status in {"queued", "running"}:
+                still_active += 1
+        failed_total = failed + start_errors
+        with _lock:
+            batch = _batches.get(batch_id)
+            if batch:
+                batch.done = done
+                batch.failed = failed_total
+                batch.skipped = skipped
+                batch.message = (
+                    f"{done} ok · {failed_total} failed · {skipped} skipped / "
+                    f"{batch.total}"
+                    + (f" · {still_active} running" if still_active else "")
+                )
+        if still_active == 0:
+            break
+        threading.Event().wait(1.5)
 
     with _lock:
         batch = _batches.get(batch_id)
@@ -457,8 +505,22 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
 
         try:
             autocue_root = ensure_autocue_on_path()
-            load_dotenv(autocue_root / ".env")
-            load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+            # Prefer shared helper that also checks Desktop/.env when src has none.
+            try:
+                from vdj_cuer.common import load_gemini_api_key  # type: ignore
+
+                load_gemini_api_key()
+            except Exception:
+                # Fall back to explicit paths if import path is incomplete.
+                ui_root = Path(__file__).resolve().parents[1]
+                repo_root = Path(__file__).resolve().parents[2]
+                for env_path in (
+                    autocue_root / ".env",
+                    ui_root / ".env",
+                    repo_root / ".env",
+                    Path.home() / "Desktop" / "vdj-automatic-cuer" / ".env",
+                ):
+                    load_dotenv(env_path, override=False)
 
             from vdj_cuer import (  # type: ignore
                 AutomaticMusicCuer,
@@ -482,28 +544,23 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
             cuer.post_cue_audit_enabled = False
             cuer.write_scope = scope_map.get(scope, AC_ALL)
 
-            if not dry_run:
-                try:
-                    backup = cuer.backup_database()
-                    _update_job(
-                        job_id,
-                        message=(
-                            f"Backup created · analyzing {Path(audio_path).name} "
-                            f"({write_scope_label(scope)})…"
-                        ),
-                        log_tail=f"backup: {backup}\nwrite_scope: {scope}\n",
-                    )
-                except Exception as backup_exc:
-                    _update_job(
-                        job_id,
-                        message=f"Backup warning: {backup_exc} · continuing…",
-                    )
-
             # Prefer surgical analyze → apply path so write_scope (cues/loops/all)
             # is honored. process_audio_file always strips + rewrites both kinds.
             stems_path = Path(f"{audio_path}.vdjstems")
             has_stems = stems_path.is_file()
+            _update_job(
+                job_id,
+                message=(
+                    f"Analyzing {Path(audio_path).name} "
+                    f"({write_scope_label(scope)}; up to {_MAX_CONCURRENT} concurrent)…"
+                ),
+                log_tail=f"write_scope: {scope}\nconcurrency: {_MAX_CONCURRENT}\n",
+            )
             with redirect_stdout(log_buf), redirect_stderr(log_buf):
+                # Gemini upload/analysis can run for multiple tracks in parallel.
+                print(
+                    f"🎚️  AutoCue concurrency · max={_MAX_CONCURRENT} · scope={scope}"
+                )
                 analysis = cuer.analyze_audio_with_gemini(audio_path)
                 ok = False
                 warn_msg = ""
@@ -540,12 +597,27 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
                                 "(Gemini/stem gates rejected all candidates)."
                             )
                             print(f"⚠️  {warn_msg}")
-                    # Surgical writer honors write_scope (keeps the other kind).
-                    ok = bool(
-                        cuer._apply_cues_to_database(
-                            audio_path, analysis, dry_run=dry_run
-                        )
+                    # Serialize DB backup + write so concurrent jobs never
+                    # clobber database.xml mid-rewrite.
+                    _update_job(
+                        job_id,
+                        message=(
+                            f"Writing cues to VirtualDJ · "
+                            f"{Path(audio_path).name}…"
+                        ),
                     )
+                    with _db_write_lock:
+                        if not dry_run:
+                            try:
+                                backup = cuer.backup_database()
+                                print(f"backup: {backup}")
+                            except Exception as backup_exc:
+                                print(f"⚠️  Backup warning: {backup_exc}")
+                        ok = bool(
+                            cuer._apply_cues_to_database(
+                                audio_path, analysis, dry_run=dry_run
+                            )
+                        )
 
             log_text = log_buf.getvalue()
             tail = log_text[-4000:] if log_text else ""

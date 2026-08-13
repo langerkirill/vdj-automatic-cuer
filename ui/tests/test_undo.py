@@ -85,6 +85,89 @@ class UndoTests(unittest.TestCase):
             mock_append.assert_called_once()
             self.assertEqual(mock_append.call_args.kwargs.get("details", {}).get("original_id"), record["id"])
 
+    def test_undo_sort_both_removes_secondary_song_clones(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ready = root / "Ready for Sort"
+            house = root / "House"
+            zouk = root / "Zouk" / "Chill"
+            cues_sorted = root / "Cues Sorted"
+            ready.mkdir()
+            house.mkdir()
+            zouk.mkdir(parents=True)
+            cues_sorted.mkdir()
+            src = ready / "both.flac"
+            src.write_bytes(b"audio")
+            db = root / "database.xml"
+            db.write_bytes(sample_db(str(src.resolve())))
+            log_file = root / "actions.jsonl"
+
+            with patch(
+                "sorter.library.LIBRARIES",
+                {"House": house, "Zouk": root / "Zouk"},
+            ), patch.object(
+                relocate_mod, "CUES_SORTED", cues_sorted
+            ), patch.object(
+                relocate_mod, "READY_FOR_SORT", ready
+            ), patch.object(
+                relocate_mod, "VDJ_DATABASE", db
+            ), patch(
+                "sorter.relocate.is_virtualdj_running", return_value=False
+            ):
+                result = relocate_mod.sort_track(
+                    src,
+                    library_name="Both",
+                    relative_folder="Chill",
+                    database_path=db,
+                    ready_root=ready,
+                    create_backup=False,
+                )
+
+            zouk_dest = Path(result.dest_path)
+            house_dest = house / "Chill" / "both.flac"
+            archive = cues_sorted / "Chill" / "both.flac"
+            self.assertTrue(zouk_dest.is_file())
+            self.assertTrue(house_dest.is_file())
+            self.assertTrue(archive.is_file())
+            raw_after_sort = db.read_bytes()
+            self.assertIn(str(house_dest.resolve()).encode(), raw_after_sort)
+            self.assertIn(str(archive.resolve()).encode(), raw_after_sort)
+
+            record = log_mod.append_action(
+                "sort",
+                source_path=str(src),
+                dest_path=str(zouk_dest),
+                name=src.name,
+                details=result.to_dict(),
+                log_file=log_file,
+            )
+
+            with patch.object(undo_mod, "read_actions", return_value=[record]), patch.object(
+                undo_mod, "append_action"
+            ), patch.object(undo_mod, "VDJ_DATABASE", db), patch.object(
+                undo_mod, "READY_FOR_SORT", ready
+            ), patch.object(undo_mod, "CUES_ROOT", root), patch.object(
+                undo_mod, "LIBRARIES", {"House": house, "Zouk": root / "Zouk"}
+            ), patch(
+                "sorter.relocate.is_virtualdj_running", return_value=False
+            ), patch.object(relocate_mod, "VDJ_DATABASE", db):
+                out = undo_mod.undo_action(record["id"], create_backup=False)
+
+            self.assertTrue(out["ok"])
+            self.assertTrue(src.is_file())
+            self.assertFalse(zouk_dest.exists())
+            self.assertFalse(house_dest.exists())
+            self.assertFalse(archive.exists())
+            raw = db.read_bytes()
+            self.assertIn(str(src.resolve()).encode(), raw)
+            self.assertNotIn(str(house_dest.resolve()).encode(), raw)
+            self.assertNotIn(str(archive.resolve()).encode(), raw)
+            removed_songs = out["result"].get("removed_song_entries") or []
+            self.assertTrue(
+                any(str(house_dest.resolve()) in p for p in removed_songs)
+                or b"House" not in raw
+            )
+
     def test_already_undone_raises(self):
         original = {
             "id": "abc123",
