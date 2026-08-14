@@ -23,24 +23,13 @@ from pydantic import BaseModel, Field
 from .autocue_path import ensure_autocue_on_path
 from .config import LIBRARIES
 from .library import list_library_tree
+from .llm import models_to_try, resolve_sorter_model, should_try_next_model
 from .relocate import summarize_cues
 
 ensure_autocue_on_path()
 
-# Prefer a current Flash model with audio + JSON support.
-DEFAULT_SORTER_MODEL = os.getenv("MUSIC_SORTER_GEMINI_MODEL") or os.getenv(
-    "GEMINI_MODEL", "gemini-3.5-flash"
-)
-
-# Tried in order when the primary model is missing/blocked for the API key.
-MODEL_FALLBACKS = [
-    DEFAULT_SORTER_MODEL,
-    "gemini-3.5-flash",
-    "gemini-3.6-flash",
-    "gemini-3-flash-preview",
-    "gemini-flash-latest",
-    "gemini-3.1-pro-preview",
-]
+DEFAULT_SORTER_MODEL = resolve_sorter_model()
+MODEL_FALLBACKS = models_to_try(DEFAULT_SORTER_MODEL)
 
 # House crates are for higher-tempo material; at/under this BPM skip House.
 HOUSE_BPM_MIN = float(os.getenv("MUSIC_SORTER_HOUSE_BPM_MIN", "100"))
@@ -392,15 +381,10 @@ Track filename: {path.name}
                 http_options=types.HttpOptions(timeout=180_000),
             )
 
-            models_to_try: list[str] = []
-            for name in [self.model_name, *MODEL_FALLBACKS]:
-                if name and name not in models_to_try:
-                    models_to_try.append(name)
-
             response = None
             last_error: Optional[Exception] = None
             used_model = self.model_name
-            for model_name in models_to_try:
+            for model_name in models_to_try(self.model_name):
                 try:
                     response = self.client.models.generate_content(
                         model=model_name,
@@ -412,17 +396,7 @@ Track filename: {path.name}
                     break
                 except Exception as model_exc:
                     last_error = model_exc
-                    err_text = str(model_exc).lower()
-                    if any(
-                        token in err_text
-                        for token in (
-                            "not_found",
-                            "not found",
-                            "no longer available",
-                            "is not found",
-                            "invalid model",
-                        )
-                    ):
+                    if should_try_next_model(model_exc):
                         continue
                     raise
 

@@ -12,8 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from .llm import DEFAULT_MODEL, ask_json, load_api_key
 from pydantic import BaseModel, Field
 
 from .config import DJ_NOTES_ROOT
@@ -24,15 +23,8 @@ from .musical_key import (
 )
 
 CACHE_PATH = DJ_NOTES_ROOT / "genre_guesses.json"
-DEFAULT_MODEL = os.getenv("MUSIC_SORTER_GEMINI_MODEL") or os.getenv(
-    "GEMINI_MODEL", "gemini-3.5-flash"
-)
-MODEL_FALLBACKS = [
-    DEFAULT_MODEL,
-    "gemini-3.5-flash",
-    "gemini-flash-latest",
-    "gemini-3-flash-preview",
-]
+# Gemini Flash via sorter.llm (ignores leftover grok-* env).
+MODEL_FALLBACKS = [DEFAULT_MODEL]
 VALID_FAMILIES = {
     "rnb_soul_zouk",
     "hiphop",
@@ -59,14 +51,7 @@ class GenreGuessSchema(BaseModel):
 
 
 def _load_api_key() -> str:
-    ui_root = Path(__file__).resolve().parents[1]
-    repo_root = Path(__file__).resolve().parents[2]
-    load_dotenv(ui_root / ".env")
-    load_dotenv(repo_root / ".env")
-    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
-    if not key:
-        raise RuntimeError("GEMINI_API_KEY is not set")
-    return key
+    return load_api_key()
 
 
 def _fold_label(raw: str) -> str:
@@ -147,8 +132,6 @@ def _ask_gemini(
     genre: str,
     vibe: str,
 ) -> dict[str, Any]:
-    api_key = _load_api_key()
-    client = genai.Client(api_key=api_key)
     prompt = f"""You are helping a DJ classify one track for mix continuity.
 
 Guess the genre so we do not mix contemporary R&B / soul / urban kiz with
@@ -175,23 +158,7 @@ Return:
         if not model:
             continue
         try:
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.2,
-                    response_mime_type="application/json",
-                    response_schema=GenreGuessSchema,
-                ),
-            )
-            raw = getattr(response, "parsed", None)
-            if raw is None:
-                text = getattr(response, "text", None) or ""
-                data = json.loads(text)
-            elif hasattr(raw, "model_dump"):
-                data = raw.model_dump()
-            else:
-                data = dict(raw)
+            data = ask_json(prompt, GenreGuessSchema, model=model, temperature=0.2)
             genre_label = str(data.get("genre") or "").strip()
             if not genre_label:
                 raise RuntimeError("empty genre guess")

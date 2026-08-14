@@ -61,6 +61,34 @@ class PrecisionGateTests(unittest.TestCase):
         self.assertEqual(result["measure_changes"][0]["cue_name"], "Best Guess")
         self.assertEqual(result["precision_gate"]["rejected"]["duplicate_cues"], 1)
 
+    def test_hard_fails_cues_not_on_the_one(self):
+        """Sozinho-class: a cue on beat 2 of the Phase grid is dropped."""
+        phase = 22.846775
+        bpm = 84.0
+        beat = 60.0 / bpm
+        on_two = phase + beat
+        on_one = phase
+        analysis = {
+            "measure_changes": [
+                cue(on_two, name="Off"),
+                cue(on_one, name="On"),
+            ],
+            "loop_segments": [loop(on_two), loop(on_one + 16 * beat)],
+        }
+        # After snap, on_two becomes nearest 1 (phase or phase+bar).
+        # A time *exactly* one beat after Phase snaps to Phase or Phase+bar.
+        result = apply_precision_gate(analysis, bpm=bpm, beatgrid_offset=phase)
+        for marker in result["measure_changes"]:
+            pos = float(marker["timestamp"])
+            off = ((pos - phase) / beat) % 4.0
+            dist = min(off, 4.0 - off)
+            self.assertLessEqual(dist, 0.08)
+        for marker in result["loop_segments"]:
+            pos = float(marker["start"])
+            off = ((pos - phase) / beat) % 4.0
+            dist = min(off, 4.0 - off)
+            self.assertLessEqual(dist, 0.08)
+
     def test_rejects_non_finite_times_and_unsupported_loop_lengths(self):
         analysis = {
             "measure_changes": [cue(float("nan")), cue(-1.0)],

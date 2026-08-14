@@ -37,6 +37,9 @@ const state = {
   waveformAbort: null,
   waveZoom: 1, // 1 = full track, higher = zoomed in
   waveOffset: 0, // visible window start (seconds)
+  waveViewBeforeAlign: null, // { zoom, offset } restored if align is cancelled
+  waveViewPinned: false, // user/align window — don't page to the playhead
+  waveCueChromeHits: null, // { left, right, overview } click targets while zoomed
   showBeatOnes: true, // bar “1” markers on waveform (toggleable)
   // Beatgrid drag-align mode (optional panel)
   gridAlignMode: false,
@@ -45,8 +48,15 @@ const state = {
   gridAlignDragging: false,
   gridAlignDragOriginTime: 0,
   gridAlignDragOriginAnchor: 0,
-  // Loop drag on waveform: { point, originPos, previewPos, pointerId, moved }
+  gridAlignPlan: null, // last auto-align proposal {action, reason, halve, ...}
+  // Marker drag on waveform: { kind, point, originPos, previewPos, pointerId, moved }
   loopDrag: null,
+  placeCueMode: false,
+  placeCuePreview: null, // seconds while hovering in place mode
+  placeCueInFlight: false,
+  placeLoopMode: false,
+  placeLoopPreview: null,
+  placeLoopInFlight: false,
   targetBpm: 75,
   playbackRate: 1,
   zoukSpeedOn: false,
@@ -68,6 +78,8 @@ const state = {
   gridManualConfirmed: {},
   trackGen: 0, // bumped on each selection to ignore stale async results
   tracksLoadGen: 0, // bumped on each list load / mode switch to drop stale /api/tracks responses
+  quietSession: false, // ?quiet=1 / ?mute=1 / webdriver — never start audible playback
+  allowAutoplay: false, // only continue playback after the user hits Play
   waveformDebounce: null,
   lastDrawMs: 0,
   playheadRaf: null,
@@ -161,6 +173,111 @@ function isAssembleMode() {
 
 function isPracticeMode() {
   return state.mode === "practice";
+}
+
+function wantsQuietSession() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.has("quiet") || params.has("mute")) {
+      const flag = params.get("quiet") || params.get("mute");
+      if (!flag || flag === "1" || flag === "true" || flag === "yes") return true;
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (navigator.webdriver) return true;
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
+function shouldAutoplayOnSelect() {
+  if (state.quietSession) return false;
+  if (isPracticeMode()) return false;
+  return Boolean(state.allowAutoplay);
+}
+
+function playAudio(audio) {
+  if (!audio) return Promise.resolve();
+  if (state.quietSession) {
+    try {
+      audio.pause();
+    } catch {
+      /* ignore */
+    }
+    audio.muted = true;
+    setStatus("Sound off — click Sound off in the top bar to hear playback");
+    return Promise.resolve();
+  }
+  if (!audio.src) return Promise.resolve();
+  const p = audio.play();
+  const markStarted = () => {
+    state.allowAutoplay = true;
+  };
+  if (p && typeof p.then === "function") {
+    return p.then(markStarted);
+  }
+  markStarted();
+  return Promise.resolve();
+}
+
+function syncQuietSessionUi() {
+  const chip = $("quietSessionChip");
+  if (chip) chip.hidden = !state.quietSession;
+  document.body.classList.toggle("quiet-session", Boolean(state.quietSession));
+}
+
+function installQuietPlayGuard(audio) {
+  if (!audio || audio.dataset.quietGuard === "1") return;
+  audio.dataset.quietGuard = "1";
+  const nativePlay = audio.play.bind(audio);
+  audio.play = function quietGuardedPlay() {
+    if (state.quietSession) {
+      try {
+        audio.pause();
+      } catch {
+        /* ignore */
+      }
+      audio.muted = true;
+      return Promise.resolve();
+    }
+    return nativePlay();
+  };
+}
+
+function applyQuietSession() {
+  state.quietSession = wantsQuietSession();
+  const audio = $("audio");
+  if (audio) {
+    installQuietPlayGuard(audio);
+    audio.muted = Boolean(state.quietSession);
+    if (state.quietSession) {
+      try {
+        audio.pause();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  if (state.quietSession) state.allowAutoplay = false;
+  syncQuietSessionUi();
+}
+
+function disableQuietSession() {
+  state.quietSession = false;
+  const audio = $("audio");
+  if (audio) audio.muted = false;
+  syncQuietSessionUi();
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("quiet");
+    url.searchParams.delete("mute");
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    /* ignore */
+  }
 }
 
 function formatClock(sec) {
@@ -620,7 +737,7 @@ function seekPracticeTransition(atSec, { preRoll = 20, play = true, index = null
       /* ignore until metadata ready */
     }
     if (play) {
-      const p = audio.play();
+      const p = playAudio(audio);
       if (p && typeof p.catch === "function") {
         p.catch((err) => {
           setStatus(
@@ -712,7 +829,7 @@ function handlePracticeWaveClick(e) {
     } catch {
       /* ignore */
     }
-    const p = audio.play();
+    const p = playAudio(audio);
     if (p && typeof p.catch === "function") {
       p.catch((err) => {
         setStatus(
@@ -965,6 +1082,7 @@ function syncLoopPlayBtn() {
 function jumpToCue(pos, point = null) {
   const audio = $("audio");
   if (!audio || !audio.src) return;
+  state.waveViewPinned = false;
   const t = Math.max(0, Number(pos) || 0);
   const seek = () => {
     try {
@@ -972,7 +1090,7 @@ function jumpToCue(pos, point = null) {
     } catch {
       /* ignore seek race before metadata */
     }
-    audio.play().catch(() => {});
+    playAudio(audio).catch(() => {});
     if (point) {
       state.activeCueKey = cueKey(point);
       if (point.kind === "loop") {
@@ -1820,7 +1938,7 @@ async function retryCuesForCurrentTrack(writeScope = "all") {
   syncAutocueUi();
 
   const gridNote = preflight?.needs_align
-    ? " The beatgrid may be misaligned; AutoCue will try to correct the downbeat."
+    ? " The beatgrid may be misaligned. Align grid first — AutoCue will not move the '1'."
     : "";
   const ok = await showConfirmDialog({
     title: first ? `Add ${scopeWord}?` : `Retry ${scopeWord}?`,
@@ -2287,7 +2405,7 @@ function renderGridPreflightCard(track) {
   const action = g.manual_required
     ? "Fix the beatgrid in VirtualDJ before AutoCue — or use Align grid on the wave."
     : g.needs_align
-      ? "Downbeat looks off. Use Align grid, then Apply to VDJ."
+      ? "Onset analysis disagrees with the current 1. If it already sounds right, leave it. If not, drag Align grid and Apply — do not trust Auto-align on syncopated tracks."
       : "Grid looks ready for AutoCue.";
   const showHalve =
     Boolean(g.suggest_halve_bpm) ||
@@ -2326,6 +2444,10 @@ function renderGridPreflightCard(track) {
             }" id="alignGridFromCardBtn"
                title="Drag the downbeat ones on the wave, then Apply to VirtualDJ">
                Align grid
+             </button>
+             <button type="button" class="btn ghost" id="autoAlignGridFromCardBtn"
+               title="Preview a stem-based 1. Often wrong on syncopated tracks. Does not write until you Apply.">
+               Auto-align (preview)
              </button>`
           : ""
       }
@@ -2368,6 +2490,7 @@ function renderGridPreflightCard(track) {
 
   $("confirmGridBtn")?.addEventListener("click", () => confirmGridManually(track));
   $("alignGridFromCardBtn")?.addEventListener("click", () => openGridAlignMode());
+  $("autoAlignGridFromCardBtn")?.addEventListener("click", () => attemptAutoGridAlign());
   $("halveBpmBtn")?.addEventListener("click", () => writeBpmFactor({ double: false }));
   $("doubleBpmBtn")?.addEventListener("click", () => writeBpmFactor({ double: true }));
   $("halfBpmPlaybackFromGridBtn")?.addEventListener("click", () => {
@@ -2701,6 +2824,23 @@ async function undoAction(actionId, name) {
 function resetWaveZoom() {
   state.waveZoom = 1;
   state.waveOffset = 0;
+  state.waveViewPinned = false;
+}
+
+function snapshotWaveView() {
+  state.waveViewBeforeAlign = {
+    zoom: state.waveZoom,
+    offset: state.waveOffset,
+  };
+}
+
+function restoreWaveView() {
+  const prev = state.waveViewBeforeAlign;
+  state.waveViewBeforeAlign = null;
+  if (!prev) return false;
+  state.waveZoom = clampWaveZoom(prev.zoom);
+  state.waveOffset = Number(prev.offset) || 0;
+  return true;
 }
 
 function formatBitrate(kbps) {
@@ -2765,7 +2905,7 @@ function buildPlayerMetaHtml(track) {
 
   // Keep identity chrome light — at most a few chips (readiness, cues/bpm, bitrate).
   const statusChip = isReviewMode()
-    ? readinessBadge(track)
+    ? `${readinessBadge(track)}${retryHistoryBadge(track)}`
     : track.is_cued
       ? `<span class="badge ok">${cues.cue_count || 0} cues${
           cues.loop_count ? ` · ${cues.loop_count} loops` : ""
@@ -2916,7 +3056,22 @@ function keepPlayheadInView(
 function applyPlayheadFollow(duration, timeSec) {
   const audio = $("audio");
   const playing = Boolean(audio && !audio.paused && !audio.ended);
-  const allowFollow = !state.gridAlignDragging && !state.loopDrag;
+  const view = visibleWaveWindow(duration, state.waveZoom, state.waveOffset);
+  if (
+    state.waveViewPinned &&
+    Number.isFinite(timeSec) &&
+    view.span > 0 &&
+    timeSec >= view.start &&
+    timeSec <= view.end
+  ) {
+    // Needle is back on-screen — resume paging.
+    state.waveViewPinned = false;
+  }
+  const allowFollow =
+    !state.gridAlignDragging &&
+    !state.loopDrag &&
+    !state.gridAlignMode &&
+    !state.waveViewPinned;
   const next = keepPlayheadInView(duration, timeSec, {
     zoom: state.waveZoom,
     offset: state.waveOffset,
@@ -2937,6 +3092,165 @@ function wavePlotMetrics(cssW) {
 function timeToWaveX(timeSec, padX, plotW, view) {
   if (!view.span) return padX;
   return padX + ((timeSec - view.start) / view.span) * plotW;
+}
+
+function classifyWaveMarkers(points, view, slack = 0.05) {
+  const inView = [];
+  const offLeft = [];
+  const offRight = [];
+  for (const p of points || []) {
+    const pos = Number(p.pos) || 0;
+    if (pos < view.start - slack) offLeft.push(p);
+    else if (pos > view.end + slack) offRight.push(p);
+    else inView.push(p);
+  }
+  return { inView, offLeft, offRight };
+}
+
+function formatOffscreenCueLabel(points, side) {
+  let cues = 0;
+  let loops = 0;
+  for (const p of points || []) {
+    if (pointKind(p) === "loop") loops += 1;
+    else cues += 1;
+  }
+  const parts = [];
+  if (cues) parts.push(`${cues} cue${cues === 1 ? "" : "s"}`);
+  if (loops) parts.push(`${loops} loop${loops === 1 ? "" : "s"}`);
+  if (!parts.length) return "";
+  const body = parts.join(" · ");
+  return side === "left" ? `← ${body}` : `${body} →`;
+}
+
+function panWaveToTime(timeSec, { frac = 0.22 } = {}) {
+  const track = currentTrack();
+  const audio = $("audio");
+  const duration = waveformDuration(track, audio) || trackDuration(track, audio);
+  const t = Number(timeSec);
+  if (!duration || !Number.isFinite(t)) return;
+  const view = waveViewWindow(duration);
+  const next = visibleWaveWindow(duration, view.zoom, t - view.span * frac);
+  state.waveZoom = next.zoom;
+  state.waveOffset = next.start;
+  state.waveViewPinned = true;
+  drawWaveform();
+}
+
+function hitTestRect(rect, x, y) {
+  if (!rect) return false;
+  return x >= rect.x0 && x <= rect.x1 && y >= rect.y0 && y <= rect.y1;
+}
+
+function hitTestWaveCueChrome(clientX, clientY) {
+  const hits = state.waveCueChromeHits;
+  const wrap = $("waveformWrap");
+  if (!hits || !wrap) return null;
+  const box = wrap.getBoundingClientRect();
+  const x = clientX - box.left;
+  const y = clientY - box.top;
+  if (hitTestRect(hits.left, x, y)) return { kind: "left", time: hits.left.time };
+  if (hitTestRect(hits.right, x, y)) return { kind: "right", time: hits.right.time };
+  // Loop/cue handles win over the full-width overview strip.
+  if (
+    hitTestRect(hits.overview, x, y) &&
+    (hitTestCueAtClientX(clientX) || hitTestLoopAtClientX(clientX))
+  ) {
+    return null;
+  }
+  if (hitTestRect(hits.overview, x, y)) {
+    const duration = waveformDuration(currentTrack(), $("audio"));
+    const plotW = Number(hits.overview.plotW) || 0;
+    if (!duration || plotW <= 0) return { kind: "overview", time: null };
+    const ratio = Math.min(
+      1,
+      Math.max(0, (x - hits.overview.padX) / plotW)
+    );
+    return { kind: "overview", time: ratio * duration };
+  }
+  return null;
+}
+
+function drawWaveCueOverview(ctx, points, view, duration, padX, plotW, h) {
+  if (!state.waveCueChromeHits) state.waveCueChromeHits = {};
+  if (!duration || state.waveZoom <= 1.01) {
+    state.waveCueChromeHits.overview = null;
+    return;
+  }
+  const ovH = 7;
+  const ovY = h - ovH - 2;
+  ctx.save();
+  ctx.fillStyle = "rgba(42, 51, 68, 0.95)";
+  ctx.fillRect(padX, ovY, plotW, ovH);
+  for (const p of points || []) {
+    const t = Number(p.pos) || 0;
+    const x = padX + (t / duration) * plotW;
+    ctx.fillStyle = CUE_COLORS[p.color_name] || CUE_COLORS.unknown;
+    ctx.fillRect(x - 1, ovY, 2, ovH);
+  }
+  const winX = padX + (view.start / duration) * plotW;
+  const winW = Math.max(2, (view.span / duration) * plotW);
+  ctx.fillStyle = accentRgba(0.22);
+  ctx.fillRect(winX, ovY, winW, ovH);
+  ctx.strokeStyle = accentRgba(0.95);
+  ctx.lineWidth = 1;
+  ctx.strokeRect(winX + 0.5, ovY + 0.5, Math.max(1, winW - 1), ovH - 1);
+  ctx.restore();
+  state.waveCueChromeHits.overview = {
+    x0: padX,
+    y0: ovY,
+    x1: padX + plotW,
+    y1: ovY + ovH,
+    padX,
+    plotW,
+  };
+}
+
+function drawOffscreenCueHints(ctx, classified, padX, plotW, h) {
+  if (!state.waveCueChromeHits) state.waveCueChromeHits = {};
+  state.waveCueChromeHits.left = null;
+  state.waveCueChromeHits.right = null;
+  if (state.waveZoom <= 1.01 || !classified) return;
+
+  const drawChip = (label, side, targetTime) => {
+    if (!label) return;
+    ctx.save();
+    ctx.font = "11px SF Pro Text, system-ui, sans-serif";
+    const tw = Math.ceil(ctx.measureText(label).width);
+    const boxW = tw + 12;
+    const boxH = 18;
+    const x = side === "left" ? padX + 4 : padX + plotW - boxW - 4;
+    const y = 20;
+    ctx.fillStyle = "rgba(10, 14, 22, 0.88)";
+    ctx.strokeStyle = "rgba(255, 214, 102, 0.85)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    const r = 4;
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + boxW, y, x + boxW, y + boxH, r);
+    ctx.arcTo(x + boxW, y + boxH, x, y + boxH, r);
+    ctx.arcTo(x, y + boxH, x, y, r);
+    ctx.arcTo(x, y, x + boxW, y, r);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#ffd666";
+    ctx.fillText(label, x + 6, y + 13);
+    ctx.restore();
+    const hit = { x0: x, y0: y, x1: x + boxW, y1: y + boxH, time: targetTime };
+    if (side === "left") state.waveCueChromeHits.left = hit;
+    else state.waveCueChromeHits.right = hit;
+  };
+
+  const leftPts = classified.offLeft || [];
+  const rightPts = classified.offRight || [];
+  const leftTime = leftPts.length
+    ? Math.max(...leftPts.map((p) => Number(p.pos) || 0))
+    : null;
+  const rightTime = rightPts.length
+    ? Math.min(...rightPts.map((p) => Number(p.pos) || 0))
+    : null;
+  drawChip(formatOffscreenCueLabel(leftPts, "left"), "left", leftTime);
+  drawChip(formatOffscreenCueLabel(rightPts, "right"), "right", rightTime);
 }
 
 /** Canvas + overlay needle. Moving playhead is never dropped. */
@@ -3004,10 +3318,10 @@ function gridAnchorSeconds(track) {
   const fromGrid = Number(g.grid_anchor);
   if (Number.isFinite(fromGrid)) return fromGrid;
   const cues = track?.cues || {};
-  const bg = Number(cues.beatgrid_pos);
-  if (Number.isFinite(bg)) return bg;
   const phase = Number(cues.scan_phase);
   if (Number.isFinite(phase)) return phase;
+  const bg = Number(cues.beatgrid_pos);
+  if (Number.isFinite(bg)) return bg;
   return 0;
 }
 
@@ -3259,12 +3573,16 @@ function syncGridAlignUi() {
       const a = Number(state.gridAlignAnchor);
       const orig = Number(state.gridAlignOriginal);
       const delta = Number.isFinite(a) && Number.isFinite(orig) ? a - orig : 0;
+      const plan = state.gridAlignPlan;
+      const autoNote = plan?.reason
+        ? ` · auto: ${plan.reason}`
+        : " · drag wave to shift";
       label.textContent = Number.isFinite(a)
         ? `1 @ ${a.toFixed(3)}s${
             Math.abs(delta) >= 0.0005
               ? ` (${delta >= 0 ? "+" : ""}${delta.toFixed(3)}s)`
-              : " · drag wave to shift"
-          }`
+              : ""
+          }${autoNote}`
         : "No anchor — drag to set 1";
     } else {
       label.textContent = "1 @ —";
@@ -3289,9 +3607,10 @@ function zoomWaveForGridAlign(track) {
   const zoom = clampWaveZoom(duration / wantSpan);
   state.waveZoom = Math.max(zoom, 2);
   const span = duration / state.waveZoom;
-  const center =
-    audio && Number.isFinite(audio.currentTime) ? audio.currentTime : gridAnchorSeconds(track);
+  // Align the 1, not wherever the playhead happened to sit (that hid every cue).
+  const center = gridAnchorSeconds(track);
   state.waveOffset = Math.max(0, Math.min(duration - span, center - span / 2));
+  state.waveViewPinned = true;
 }
 
 function openGridAlignMode() {
@@ -3304,6 +3623,8 @@ function openGridAlignMode() {
     setStatus("Track needs a VDJ BPM before aligning the grid.", "error");
     return;
   }
+  if (state.placeCueMode) cancelPlaceCueMode();
+  if (state.placeLoopMode) cancelPlaceLoopMode();
   const anchor = gridAnchorSeconds(track);
   state.gridAlignMode = true;
   state.gridAlignOriginal = anchor;
@@ -3313,6 +3634,7 @@ function openGridAlignMode() {
   state.showBeatOnes = true;
   syncBeatOnesBtn();
   // Zoom in so ones are clearly visible (full-track view can hide them)
+  snapshotWaveView();
   zoomWaveForGridAlign(track);
   syncGridAlignUi();
   drawWaveform();
@@ -3328,14 +3650,28 @@ function openGridAlignMode() {
   );
 }
 
-function cancelGridAlignMode() {
+function exitGridAlignMode({ restoreView = false, status } = {}) {
   state.gridAlignMode = false;
+  state.gridAlignPlan = null;
   state.gridAlignAnchor = null;
   state.gridAlignOriginal = null;
   state.gridAlignDragging = false;
+  if (restoreView) {
+    restoreWaveView();
+    state.waveViewPinned = true;
+  } else {
+    state.waveViewBeforeAlign = null;
+  }
   syncGridAlignUi();
   drawWaveform();
-  setStatus("Grid align cancelled — no changes written.");
+  if (status != null) setStatus(status);
+}
+
+function cancelGridAlignMode() {
+  exitGridAlignMode({
+    restoreView: true,
+    status: "Grid align cancelled — no changes written.",
+  });
 }
 
 function nudgeGridAlign(deltaSeconds) {
@@ -3364,7 +3700,9 @@ async function applyGridAlign() {
     return;
   }
   const orig = Number(state.gridAlignOriginal);
-  if (Number.isFinite(orig) && Math.abs(anchor - orig) < 1e-4) {
+  const plan = state.gridAlignPlan;
+  const wantHalve = Boolean(plan?.halve);
+  if (Number.isFinite(orig) && Math.abs(anchor - orig) < 1e-4 && !wantHalve) {
     setStatus("Grid unchanged — nothing to write.");
     return;
   }
@@ -3386,6 +3724,18 @@ async function applyGridAlign() {
   }
 
   try {
+    if (wantHalve) {
+      setStatus("Writing ½ BPM, then the new 1…");
+      await api("/api/halve-bpm", {
+        method: "POST",
+        body: JSON.stringify({
+          path: track.path,
+          allow_vdj_running: Boolean(allowRunning),
+          double_instead: false,
+        }),
+      });
+      if (state.halfBpm) setHalfBpm(false);
+    }
     setStatus(`Writing beatgrid 1 @ ${anchor.toFixed(3)}s…`);
     const data = await api("/api/set-beatgrid", {
       method: "POST",
@@ -3427,15 +3777,12 @@ async function applyGridAlign() {
       };
     }
 
-    state.gridAlignMode = false;
-    state.gridAlignOriginal = null;
-    state.gridAlignAnchor = null;
-    state.gridAlignDragging = false;
-    syncGridAlignUi();
+    exitGridAlignMode({ restoreView: false });
     renderCues();
     drawWaveform();
     setStatus(
-      `Beatgrid updated · 1 @ ${anchor.toFixed(3)}s` +
+      (wantHalve ? "½ BPM + " : "") +
+        `beatgrid 1 @ ${anchor.toFixed(3)}s` +
         (r.changes?.scan_phase_updated ? " · Scan Phase" : "") +
         (r.changes?.beatgrid_poi_updated || r.changes?.beatgrid_poi_created
           ? " · beatgrid POI"
@@ -3446,6 +3793,60 @@ async function applyGridAlign() {
     loadDeepGridPreflight(currentTrack(), state.trackGen).catch(() => {});
   } catch (err) {
     setStatus(err.message, "error");
+  }
+}
+
+async function attemptAutoGridAlign() {
+  const track = currentTrack();
+  if (!track) {
+    setStatus("Select a track first.", "error");
+    return;
+  }
+  if (state.placeCueMode) cancelPlaceCueMode();
+  if (state.placeLoopMode) cancelPlaceLoopMode();
+  const btn = $("autoAlignGridBtn");
+  if (btn) btn.disabled = true;
+  try {
+    setStatus("Attempting automatic beatgrid align (stems + onsets)…", "running");
+    const data = await api("/api/grid-align/attempt", {
+      method: "POST",
+      body: JSON.stringify({ path: track.path, apply: false }),
+    });
+    const result = data.result || {};
+    const plan = result.plan || {};
+    const action = String(plan.action || "skip");
+    if (action === "skip") {
+      state.gridAlignPlan = null;
+      setStatus(plan.reason || "Grid already looks aligned — no change.", "success");
+      return;
+    }
+    const proposed = Number(plan.anchor_after);
+    if (!Number.isFinite(proposed)) {
+      setStatus("Auto-align did not return a usable 1.", "error");
+      return;
+    }
+    state.gridAlignPlan = plan;
+    if (!state.gridAlignMode) openGridAlignMode();
+    state.gridAlignAnchor = proposed;
+    state.showBeatOnes = true;
+    syncBeatOnesBtn();
+    zoomWaveForGridAlign(track);
+    syncGridAlignUi();
+    drawWaveform();
+    const halfNote = plan.halve
+      ? ` · will also write ½ BPM (${Number(plan.bpm_before).toFixed(0)}→${Number(plan.bpm_after).toFixed(0)})`
+      : "";
+    setStatus(
+      `Auto-align preview · 1 @ ${proposed.toFixed(3)}s` +
+        (plan.shift_beats ? ` · +${plan.shift_beats} beat` : "") +
+        halfNote +
+        ". Listen, then Apply to VDJ.",
+      "running"
+    );
+  } catch (err) {
+    setStatus(err.message, "error");
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -3596,6 +3997,7 @@ function drawWaveform() {
     let start = Number(p.pos) || 0;
     if (
       drag &&
+      (drag.kind || "loop") === "loop" &&
       drag.previewPos != null &&
       Math.abs(Number(drag.originPos) - start) < 0.02 &&
       (drag.point?.name === p.name || drag.point?.slot === p.slot)
@@ -3613,6 +4015,7 @@ function drawWaveform() {
     const width = Math.max(2, x1 - x0);
     const draggingThis =
       drag &&
+      (drag.kind || "loop") === "loop" &&
       Math.abs(Number(drag.originPos) - (Number(p.pos) || 0)) < 0.02;
     ctx.save();
     ctx.fillStyle = cueRgba(p.color_name, draggingThis ? 0.38 : 0.22);
@@ -3635,9 +4038,9 @@ function drawWaveform() {
     const kind = pointKind(p);
     let t = Number(p.pos) || 0;
     if (
-      kind === "loop" &&
       drag &&
       drag.previewPos != null &&
+      (drag.kind || "loop") === kind &&
       Math.abs(Number(drag.originPos) - t) < 0.02
     ) {
       t = Number(drag.previewPos);
@@ -3655,7 +4058,12 @@ function drawWaveform() {
     const color = CUE_COLORS[p.color_name] || CUE_COLORS.unknown;
     ctx.save();
     ctx.strokeStyle = color;
-    ctx.lineWidth = kind === "loop" ? 1.5 : 2;
+    const draggingCue =
+      kind === "cue" &&
+      drag &&
+      drag.kind === "cue" &&
+      Math.abs(Number(drag.originPos) - (Number(p.pos) || 0)) < 0.02;
+    ctx.lineWidth = kind === "loop" ? 1.5 : draggingCue ? 3 : 2;
     if (kind === "loop") ctx.setLineDash([5, 4]);
     // Leave headroom for cue labels at top and loop labels at bottom.
     ctx.beginPath();
@@ -3689,31 +4097,82 @@ function drawWaveform() {
 
   drawWaveformLabels(ctx, labelCandidates, w, h, padX);
 
+  // Ghost marker while placing a cue
+  const ghost = Number(state.placeCuePreview);
+  if (
+    state.placeCueMode &&
+    Number.isFinite(ghost) &&
+    ghost >= view.start - 0.05 &&
+    ghost <= view.end + 0.05
+  ) {
+    const gx = timeToWaveX(ghost, padX, plotW, view);
+    ctx.save();
+    ctx.strokeStyle = "rgba(52, 211, 153, 0.9)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(gx, 10);
+    ctx.lineTo(gx, h - 10);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "rgba(10, 14, 22, 0.78)";
+    ctx.fillRect(gx + 4, 8, 86, 14);
+    ctx.fillStyle = "#6ee7b7";
+    ctx.font = "10px SF Pro Text, system-ui, sans-serif";
+    ctx.fillText(`Cue @ ${fmtTime(ghost)}`, gx + 6, 18);
+    ctx.restore();
+  }
+
+  const loopGhost = Number(state.placeLoopPreview);
+  if (
+    state.placeLoopMode &&
+    Number.isFinite(loopGhost) &&
+    loopGhost >= view.start - 0.05 &&
+    loopGhost <= view.end + 0.05
+  ) {
+    const bpm = onesBpm(track) || trackBpm(track);
+    const len = bpm && bpm > 0 ? (60 / bpm) * 8 : 0;
+    const gx = timeToWaveX(loopGhost, padX, plotW, view);
+    ctx.save();
+    if (len > 0) {
+      const x1 = timeToWaveX(loopGhost + len, padX, plotW, view);
+      ctx.fillStyle = "rgba(168, 85, 247, 0.22)";
+      ctx.fillRect(gx, 4, Math.max(2, x1 - gx), h - 8);
+    }
+    ctx.strokeStyle = "rgba(168, 85, 247, 0.95)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(gx, 10);
+    ctx.lineTo(gx, h - 10);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "rgba(10, 14, 22, 0.78)";
+    ctx.fillRect(gx + 4, 8, 92, 14);
+    ctx.fillStyle = "#d8b4fe";
+    ctx.font = "10px SF Pro Text, system-ui, sans-serif";
+    ctx.fillText(`Loop 8b @ ${fmtTime(loopGhost)}`, gx + 6, 18);
+    ctx.restore();
+  }
+
   // Playhead — follow while moving so it never vanishes at a zoom width
   positionWavePlayhead(ctx, audio, view, padX, plotW, h);
 
-  // Zoom / window chrome
+  // Zoom / window chrome — cues outside this slice stay as chips + overview ticks
   if (state.waveZoom > 1.01) {
     ctx.fillStyle = "rgba(10, 14, 22, 0.72)";
-    ctx.fillRect(padX, h - 22, 168, 16);
+    ctx.fillRect(padX, h - 34, 168, 16);
     ctx.fillStyle = "rgba(232, 237, 247, 0.9)";
     ctx.font = "11px SF Pro Text, system-ui, sans-serif";
     ctx.fillText(
       `${state.waveZoom.toFixed(1)}×  ${fmtTime(view.start)}–${fmtTime(view.end)}`,
       padX + 6,
-      h - 10
+      h - 22
     );
-
-    // Mini overview strip at top
-    const ovY = 2;
-    const ovH = 4;
-    ctx.fillStyle = "rgba(42, 51, 68, 0.9)";
-    ctx.fillRect(padX, ovY, plotW, ovH);
-    const winX = padX + (view.start / duration) * plotW;
-    const winW = Math.max(2, (view.span / duration) * plotW);
-    ctx.fillStyle = accentRgba(0.55);
-    ctx.fillRect(winX, ovY, winW, ovH);
   }
+  const classified = classifyWaveMarkers(points, view);
+  drawWaveCueOverview(ctx, points, view, duration, padX, plotW, h);
+  drawOffscreenCueHints(ctx, classified, padX, plotW, h);
 }
 
 /**
@@ -3825,12 +4284,22 @@ function snapshotWaveSeekTime(clientX) {
 }
 
 function seekFromWaveformEvent(e) {
+  const chrome = hitTestWaveCueChrome(e.clientX, e.clientY);
+  if (chrome) {
+    state.waveSeekTime = null;
+    if (chrome.time != null && Number.isFinite(Number(chrome.time))) {
+      panWaveToTime(chrome.time, {
+        frac: chrome.kind === "overview" ? 0.5 : 0.22,
+      });
+    }
+    return;
+  }
   // In align mode, drag moves the grid — don't seek.
   if (state.gridAlignMode) {
     state.waveSeekTime = null;
     return;
   }
-  // After a loop drag, suppress seek (click fires after pointerup).
+  // After a loop/cue drag, suppress seek (click fires after pointerup).
   if (state.loopDrag?.moved || state._suppressWaveSeek) {
     state._suppressWaveSeek = false;
     state.waveSeekTime = null;
@@ -3847,6 +4316,28 @@ function seekFromWaveformEvent(e) {
   const t = Number.isFinite(snapped)
     ? snapped
     : clientXToTime(e.clientX, wrap.getBoundingClientRect(), duration);
+  if (state.placeLoopMode) {
+    if (e.detail > 1 || state.placeLoopInFlight) return;
+    const pos = snapCueDragTime(t, { free: Boolean(e.shiftKey) });
+    const existing = existingLoopNear(pos);
+    if (existing) {
+      jumpToCue(Number(existing.pos) || pos, existing);
+      return;
+    }
+    placeLoopAtTime(pos, { free: Boolean(e.shiftKey), alreadySnapped: true });
+    return;
+  }
+  if (state.placeCueMode || e.altKey) {
+    if (e.detail > 1 || state.placeCueInFlight) return;
+    const pos = snapCueDragTime(t, { free: Boolean(e.shiftKey) });
+    const existing = existingCueNear(pos);
+    if (existing) {
+      jumpToCue(Number(existing.pos) || pos, existing);
+      return;
+    }
+    placeCueAtTime(pos, { free: Boolean(e.shiftKey), alreadySnapped: true });
+    return;
+  }
   jumpToCue(t);
 }
 
@@ -3860,6 +4351,86 @@ function snapLoopDragTime(t, { free = false } = {}) {
   const anchor = gridAnchorSeconds(track);
   const steps = Math.round((t - anchor) / beatSec);
   return Math.max(0, anchor + steps * beatSec);
+}
+
+/** Snap time to the nearest bar 1 (downbeat). Shift / free skips snap. */
+function snapCueDragTime(t, { free = false } = {}) {
+  if (free) return Math.max(0, t);
+  const track = currentTrack();
+  const barSec = barPeriodSeconds(track);
+  if (!barSec || barSec <= 0) {
+    return snapLoopDragTime(t, { free: false });
+  }
+  const anchor = gridAnchorSeconds(track);
+  const steps = Math.round((t - anchor) / barSec);
+  return Math.max(0, anchor + steps * barSec);
+}
+
+function snapMarkerDragTime(t, { kind = "loop", free = false } = {}) {
+  return kind === "cue"
+    ? snapCueDragTime(t, { free })
+    : snapLoopDragTime(t, { free });
+}
+
+/** Unfiltered cue sitting on this time (any tab). */
+function existingCueNear(pos, tol = 0.03) {
+  const points = currentTrack()?.cues?.points || [];
+  const target = Number(pos);
+  if (!Number.isFinite(target)) return null;
+  return (
+    points.find(
+      (p) =>
+        pointKind(p) === "cue" &&
+        Math.abs((Number(p.pos) || 0) - target) <= tol
+    ) || null
+  );
+}
+
+function existingLoopNear(pos, tol = 0.03) {
+  const points = currentTrack()?.cues?.points || [];
+  const target = Number(pos);
+  if (!Number.isFinite(target)) return null;
+  return (
+    points.find(
+      (p) =>
+        pointKind(p) === "loop" &&
+        Math.abs((Number(p.pos) || 0) - target) <= tol
+    ) || null
+  );
+}
+
+/**
+ * Hit-test cue start lines under the cursor (~10px).
+ * Returns { point, hit: 'start' } or null.
+ */
+function hitTestCueAtClientX(clientX) {
+  const wrap = $("waveformWrap");
+  const track = currentTrack();
+  const audio = $("audio");
+  if (!wrap || !track) return null;
+  const duration = waveformDuration(track, audio);
+  if (!duration) return null;
+  const rect = wrap.getBoundingClientRect();
+  const { padX, plotW } = wavePlotMetrics(rect.width);
+  const view = waveViewWindow(duration);
+  const x = clientX - rect.left;
+
+  const cues = filteredCuePoints(track.cues?.points || []).filter(
+    (p) => pointKind(p) === "cue"
+  );
+  let best = null;
+  let bestDist = 10;
+  for (const p of cues) {
+    const start = Number(p.pos) || 0;
+    const sx = timeToWaveX(start, padX, plotW, view);
+    const d = Math.abs(x - sx);
+    if (d < bestDist) {
+      bestDist = d;
+      best = p;
+    }
+  }
+  if (best) return { point: best, hit: "start", kind: "cue" };
+  return null;
 }
 
 /**
@@ -3880,7 +4451,9 @@ function hitTestLoopAtClientX(clientX) {
   const bpm = trackBpm(track);
   const x = clientX - rect.left;
 
-  const loops = (track.cues?.points || []).filter((p) => pointKind(p) === "loop");
+  const loops = filteredCuePoints(track.cues?.points || []).filter(
+    (p) => pointKind(p) === "loop"
+  );
   // Prefer start handle within ~10px
   let bestStart = null;
   let bestStartDist = 12;
@@ -3893,7 +4466,7 @@ function hitTestLoopAtClientX(clientX) {
       bestStart = p;
     }
   }
-  if (bestStart) return { point: bestStart, hit: "start" };
+  if (bestStart) return { point: bestStart, hit: "start", kind: "loop" };
 
   // Else body of loop region
   for (const p of loops) {
@@ -3901,7 +4474,7 @@ function hitTestLoopAtClientX(clientX) {
     const len = loopDurationSeconds(p, bpm);
     if (len <= 0) continue;
     if (t >= start - 0.02 && t <= start + len + 0.02) {
-      return { point: p, hit: "body" };
+      return { point: p, hit: "body", kind: "loop" };
     }
   }
   return null;
@@ -3912,8 +4485,10 @@ function onLoopDragPointerDown(e) {
   if (e.button != null && e.button !== 0) return false;
   // Don't steal events from buttons/selects
   if (e.target?.closest?.("button, select, a, input, label")) return false;
+  // Alt+click places a cue — don't start a drag.
+  if (e.altKey) return false;
 
-  const hit = hitTestLoopAtClientX(e.clientX);
+  const hit = hitTestCueAtClientX(e.clientX) || hitTestLoopAtClientX(e.clientX);
   if (!hit) return false;
 
   const wrap = $("waveformWrap");
@@ -3924,8 +4499,10 @@ function onLoopDragPointerDown(e) {
   const rect = wrap.getBoundingClientRect();
   const t = clientXToTime(e.clientX, rect, duration);
   const originPos = Number(hit.point.pos) || 0;
+  const kind = hit.kind || pointKind(hit.point);
 
   state.loopDrag = {
+    kind,
     point: { ...hit.point },
     originPos,
     previewPos: originPos,
@@ -3934,7 +4511,7 @@ function onLoopDragPointerDown(e) {
     moved: false,
     free: Boolean(e.shiftKey),
   };
-  wrap.classList.add("loop-dragging");
+  wrap.classList.add(kind === "cue" ? "cue-dragging" : "loop-dragging");
   try {
     wrap.setPointerCapture?.(e.pointerId);
   } catch {
@@ -3955,7 +4532,10 @@ function onLoopDragPointerMove(e) {
   const rect = wrap.getBoundingClientRect();
   const t = clientXToTime(e.clientX, rect, duration || 1);
   let next = t - (Number(drag.grabOffset) || 0);
-  next = snapLoopDragTime(next, { free: drag.free || e.shiftKey });
+  next = snapMarkerDragTime(next, {
+    kind: drag.kind || "loop",
+    free: drag.free || e.shiftKey,
+  });
   if (duration > 0) next = Math.min(next, Math.max(0, duration - 0.05));
   if (Math.abs(next - drag.originPos) > 0.01) drag.moved = true;
   drag.previewPos = next;
@@ -3967,7 +4547,7 @@ async function onLoopDragPointerUp(e) {
   const drag = state.loopDrag;
   if (!drag) return;
   const wrap = $("waveformWrap");
-  wrap?.classList.remove("loop-dragging");
+  wrap?.classList.remove("loop-dragging", "cue-dragging");
   try {
     wrap?.releasePointerCapture?.(e.pointerId);
   } catch {
@@ -3976,6 +4556,7 @@ async function onLoopDragPointerUp(e) {
 
   const origin = Number(drag.originPos) || 0;
   const next = Number(drag.previewPos);
+  const kind = drag.kind || "loop";
   state.loopDrag = null;
 
   if (!drag.moved || !Number.isFinite(next) || Math.abs(next - origin) < 0.015) {
@@ -3984,7 +4565,11 @@ async function onLoopDragPointerUp(e) {
   }
 
   state._suppressWaveSeek = true;
-  await commitLoopMove(drag.point, origin, next);
+  if (kind === "cue") {
+    await commitCueMove(drag.point, origin, next);
+  } else {
+    await commitLoopMove(drag.point, origin, next);
+  }
 }
 
 async function commitLoopMove(point, originPos, newPos) {
@@ -4077,6 +4662,384 @@ async function commitLoopMove(point, originPos, newPos) {
   }
 }
 
+async function commitCueMove(point, originPos, newPos) {
+  const track = currentTrack();
+  if (!track || !point) return;
+  const path = track.path;
+  const gen = state.trackGen;
+
+  let allowRunning = false;
+  if (await isVdjRunningFresh()) {
+    allowRunning = await showConfirmDialog({
+      title: "VirtualDJ is still open",
+      track: trackDisplayTitle(track),
+      message:
+        "Moving a cue may be overwritten when VirtualDJ quits. Close it first when possible.",
+      confirmLabel: "Move anyway",
+      tone: "warning",
+    });
+    if (!allowRunning) {
+      setStatus("Close VirtualDJ, then move the cue.", "error");
+      if (stillOnTrack(path, gen)) drawWaveform();
+      return;
+    }
+  }
+
+  try {
+    setStatus(
+      `Moving cue “${point.name || "Cue"}” ${fmtTime(originPos)} → ${fmtTime(newPos)}…`
+    );
+    const data = await api("/api/move-poi", {
+      method: "POST",
+      body: JSON.stringify({
+        path,
+        kind: "cue",
+        pos: originPos,
+        new_pos: newPos,
+        num: point.num != null ? String(point.num) : null,
+        name: point.name || null,
+        allow_vdj_running: Boolean(allowRunning),
+      }),
+    });
+    const r = data.result || {};
+    if (r.cues) {
+      applyCueSummaryToTrack(path, r.cues);
+    } else {
+      const idx = state.tracks.findIndex((t) => t.path === path);
+      const snap = idx >= 0 ? state.tracks[idx] : null;
+      if (snap?.cues?.points) {
+        const points = snap.cues.points.map((p) => {
+          if (
+            pointKind(p) === "cue" &&
+            Math.abs(Number(p.pos) - originPos) < 0.02
+          ) {
+            return { ...p, pos: newPos };
+          }
+          return p;
+        });
+        applyCueSummaryToTrack(path, { ...snap.cues, points });
+      }
+    }
+
+    if (!stillOnTrack(path, gen)) {
+      setStatus(`Cue moved on ${track.name} (switched tracks)`, "success");
+      return;
+    }
+
+    const updated =
+      (currentTrack()?.cues?.points || []).find(
+        (p) =>
+          pointKind(p) === "cue" && Math.abs(Number(p.pos) - newPos) < 0.02
+      ) || { ...point, pos: newPos };
+
+    state.activeCueKey = cueKey(updated);
+    renderCues();
+    drawWaveform();
+    setStatus(
+      `Cue “${updated.name || "Cue"}” → ${fmtTime(newPos)} (on the 1)`,
+      "success"
+    );
+    jumpToCue(newPos, updated);
+  } catch (err) {
+    setStatus(err.message, "error");
+    if (stillOnTrack(path, gen)) drawWaveform();
+  }
+}
+
+function syncPlaceCueUi() {
+  const btn = $("placeCueBtn");
+  if (btn) {
+    btn.classList.toggle("active", state.placeCueMode);
+    btn.setAttribute("aria-pressed", state.placeCueMode ? "true" : "false");
+    btn.textContent = state.placeCueMode ? "Placing…" : "Place cue";
+  }
+  const bar = $("placeCueBar");
+  if (bar) {
+    if (state.placeCueMode) {
+      bar.hidden = false;
+      bar.removeAttribute("hidden");
+    } else {
+      bar.hidden = true;
+      bar.setAttribute("hidden", "");
+    }
+  }
+  const wrap = $("waveformWrap");
+  if (wrap) wrap.classList.toggle("place-cue-mode", state.placeCueMode);
+  if (!state.placeCueMode) {
+    state.placeCuePreview = null;
+    wrap?.classList.remove("place-cue-mode");
+  }
+}
+
+function togglePlaceCueMode() {
+  if (state.placeCueMode) {
+    cancelPlaceCueMode();
+    return;
+  }
+  if (state.placeLoopMode) cancelPlaceLoopMode();
+  if (state.gridAlignMode) exitGridAlignMode({ restoreView: false });
+  const track = currentTrack();
+  if (!track) {
+    setStatus("Select a track first.", "error");
+    return;
+  }
+  state.placeCueMode = true;
+  state.placeCuePreview = null;
+  syncPlaceCueUi();
+  drawWaveform();
+  setStatus("Click the wave to place a cue on the 1. Shift = free. Esc cancels.");
+}
+
+function cancelPlaceCueMode() {
+  if (!state.placeCueMode) return;
+  state.placeCueMode = false;
+  state.placeCuePreview = null;
+  syncPlaceCueUi();
+  drawWaveform();
+}
+
+function updatePlaceCuePreview(clientX, free = false) {
+  if (!state.placeCueMode) return;
+  const wrap = $("waveformWrap");
+  const track = currentTrack();
+  const audio = $("audio");
+  if (!wrap || !track) return;
+  const duration = waveformDuration(track, audio);
+  if (!duration) return;
+  const rect = wrap.getBoundingClientRect();
+  const t = clientXToTime(clientX, rect, duration);
+  state.placeCuePreview = snapCueDragTime(t, { free: Boolean(free) });
+  drawWaveform();
+}
+
+async function placeCueAtTime(rawTime, { free = false, alreadySnapped = false } = {}) {
+  const track = currentTrack();
+  if (!track || state.placeCueInFlight) return;
+  const path = track.path;
+  const gen = state.trackGen;
+  const audio = $("audio");
+  const duration = waveformDuration(track, audio) || trackDuration(track, audio);
+  let pos = alreadySnapped
+    ? Math.max(0, Number(rawTime) || 0)
+    : snapCueDragTime(Number(rawTime) || 0, { free });
+  if (duration > 0) pos = Math.min(pos, Math.max(0, duration - 0.05));
+  const existing = existingCueNear(pos);
+  if (existing) {
+    jumpToCue(Number(existing.pos) || pos, existing);
+    return;
+  }
+
+  let allowRunning = false;
+  if (await isVdjRunningFresh()) {
+    allowRunning = await showConfirmDialog({
+      title: "VirtualDJ is still open",
+      track: trackDisplayTitle(track),
+      message:
+        "Adding a cue may be overwritten when VirtualDJ quits. Close it first when possible.",
+      confirmLabel: "Place anyway",
+      tone: "warning",
+    });
+    if (!allowRunning) {
+      setStatus("Close VirtualDJ, then place the cue.", "error");
+      return;
+    }
+  }
+
+  state.placeCueInFlight = true;
+  try {
+    setStatus(`Placing cue at ${fmtTime(pos)}…`);
+    const data = await api("/api/add-cue", {
+      method: "POST",
+      body: JSON.stringify({
+        path,
+        pos,
+        color: "green",
+        allow_vdj_running: Boolean(allowRunning),
+      }),
+    });
+    const r = data.result || {};
+    if (r.cues) {
+      applyCueSummaryToTrack(path, r.cues);
+    }
+
+    if (!stillOnTrack(path, gen)) {
+      setStatus(`Cue placed on ${track.name} (switched tracks)`, "success");
+      return;
+    }
+
+    const placed =
+      (currentTrack()?.cues?.points || []).find(
+        (p) =>
+          pointKind(p) === "cue" && Math.abs(Number(p.pos) - pos) < 0.03
+      ) || { name: r.change?.name, pos, kind: "cue", num: r.change?.num };
+
+    state.activeCueKey = cueKey(placed);
+    renderCues();
+    drawWaveform();
+    setStatus(
+      `Placed “${placed.name || "Cue"}” at ${fmtTime(pos)}` +
+        (free ? " (free)" : " (on the 1)"),
+      "success"
+    );
+    jumpToCue(pos, placed);
+  } catch (err) {
+    setStatus(err.message, "error");
+  } finally {
+    state.placeCueInFlight = false;
+  }
+}
+
+function syncPlaceLoopUi() {
+  const btn = $("placeLoopBtn");
+  if (btn) {
+    btn.classList.toggle("active", state.placeLoopMode);
+    btn.setAttribute("aria-pressed", state.placeLoopMode ? "true" : "false");
+    btn.textContent = state.placeLoopMode ? "Placing loop…" : "Place loop";
+  }
+  const bar = $("placeLoopBar");
+  if (bar) {
+    if (state.placeLoopMode) {
+      bar.hidden = false;
+      bar.removeAttribute("hidden");
+    } else {
+      bar.hidden = true;
+      bar.setAttribute("hidden", "");
+    }
+  }
+  const wrap = $("waveformWrap");
+  if (wrap) wrap.classList.toggle("place-loop-mode", state.placeLoopMode);
+  if (!state.placeLoopMode) {
+    state.placeLoopPreview = null;
+    wrap?.classList.remove("place-loop-mode");
+  }
+}
+
+function togglePlaceLoopMode() {
+  if (state.placeLoopMode) {
+    cancelPlaceLoopMode();
+    return;
+  }
+  if (state.placeCueMode) cancelPlaceCueMode();
+  if (state.gridAlignMode) exitGridAlignMode({ restoreView: false });
+  const track = currentTrack();
+  if (!track) {
+    setStatus("Select a track first.", "error");
+    return;
+  }
+  state.placeLoopMode = true;
+  state.placeLoopPreview = null;
+  syncPlaceLoopUi();
+  drawWaveform();
+  setStatus("Click the wave to place an 8-beat loop on the 1. Shift = free. Esc cancels.");
+}
+
+function cancelPlaceLoopMode() {
+  if (!state.placeLoopMode) return;
+  state.placeLoopMode = false;
+  state.placeLoopPreview = null;
+  syncPlaceLoopUi();
+  drawWaveform();
+}
+
+function updatePlaceLoopPreview(clientX, free = false) {
+  if (!state.placeLoopMode) return;
+  const wrap = $("waveformWrap");
+  const track = currentTrack();
+  const audio = $("audio");
+  if (!wrap || !track) return;
+  const duration = waveformDuration(track, audio);
+  if (!duration) return;
+  const rect = wrap.getBoundingClientRect();
+  const t = clientXToTime(clientX, rect, duration);
+  state.placeLoopPreview = snapCueDragTime(t, { free: Boolean(free) });
+  drawWaveform();
+}
+
+async function placeLoopAtTime(rawTime, { free = false, alreadySnapped = false } = {}) {
+  const track = currentTrack();
+  if (!track || state.placeLoopInFlight) return;
+  const path = track.path;
+  const gen = state.trackGen;
+  const audio = $("audio");
+  const duration = waveformDuration(track, audio) || trackDuration(track, audio);
+  let pos = alreadySnapped
+    ? Math.max(0, Number(rawTime) || 0)
+    : snapCueDragTime(Number(rawTime) || 0, { free });
+  if (duration > 0) pos = Math.min(pos, Math.max(0, duration - 0.05));
+  const existing = existingLoopNear(pos);
+  if (existing) {
+    jumpToCue(Number(existing.pos) || pos, existing);
+    return;
+  }
+
+  let allowRunning = false;
+  if (await isVdjRunningFresh()) {
+    allowRunning = await showConfirmDialog({
+      title: "VirtualDJ is still open",
+      track: trackDisplayTitle(track),
+      message:
+        "Adding a loop may be overwritten when VirtualDJ quits. Close it first when possible.",
+      confirmLabel: "Place anyway",
+      tone: "warning",
+    });
+    if (!allowRunning) {
+      setStatus("Close VirtualDJ, then place the loop.", "error");
+      return;
+    }
+  }
+
+  state.placeLoopInFlight = true;
+  try {
+    setStatus(`Placing 8-beat loop at ${fmtTime(pos)}…`);
+    const data = await api("/api/add-loop", {
+      method: "POST",
+      body: JSON.stringify({
+        path,
+        pos,
+        color: "green",
+        beats: 8,
+        allow_vdj_running: Boolean(allowRunning),
+      }),
+    });
+    const r = data.result || {};
+    if (r.cues) {
+      applyCueSummaryToTrack(path, r.cues);
+    }
+
+    if (!stillOnTrack(path, gen)) {
+      setStatus(`Loop placed on ${track.name} (switched tracks)`, "success");
+      return;
+    }
+
+    const placed =
+      (currentTrack()?.cues?.points || []).find(
+        (p) =>
+          pointKind(p) === "loop" && Math.abs(Number(p.pos) - pos) < 0.03
+      ) || {
+        name: r.change?.name,
+        pos,
+        kind: "loop",
+        size: r.change?.beats,
+        slot: r.change?.slot,
+      };
+
+    state.activeLoopKey = cueKey(placed);
+    state.activeCueKey = cueKey(placed);
+    renderCues();
+    drawWaveform();
+    setStatus(
+      `Placed loop “${placed.name || "Loop"}” at ${fmtTime(pos)} · 8b` +
+        (free ? " (free)" : " (on the 1)"),
+      "success"
+    );
+    jumpToCue(pos, placed);
+  } catch (err) {
+    setStatus(err.message, "error");
+  } finally {
+    state.placeLoopInFlight = false;
+  }
+}
+
 function onWaveformWheel(e) {
   const wrap = $("waveformWrap");
   const track = currentTrack();
@@ -4101,6 +5064,7 @@ function onWaveformWheel(e) {
     const view = waveViewWindow(duration);
     const pan = (e.deltaY > 0 ? 1 : -1) * view.span * 0.12;
     state.waveOffset = Math.max(0, Math.min(duration - view.span, view.start + pan));
+    state.waveViewPinned = true;
     drawWaveform();
     return;
   }
@@ -4115,10 +5079,8 @@ function onWaveformWheel(e) {
   let start = mouseTime - mouseRatio * span;
   start = Math.max(0, Math.min(start, Math.max(0, duration - span)));
   state.waveOffset = start;
-  // If the song is moving, keep the needle in this new scope width.
-  if (audio && !audio.paused && Number.isFinite(audio.currentTime)) {
-    applyPlayheadFollow(duration, audio.currentTime);
-  }
+  // Keep the cursor-centered slice; follow resumes once the needle is in view.
+  state.waveViewPinned = true;
   drawWaveform();
 }
 
@@ -4661,7 +5623,7 @@ function auditionLoopPoint(point) {
   jumpToCue(start, point);
   const audio = $("audio");
   if (audio) {
-    audio.play().catch(() => {});
+    playAudio(audio).catch(() => {});
     startLoopWatch();
   }
   setStatus(
@@ -5356,6 +6318,14 @@ function filteredTrackIndexes() {
         }
       }
       if (!isReviewMode() || state.readinessFilter === "all") return true;
+      if (
+        state.readinessFilter === "retried_cues" ||
+        state.readinessFilter === "retried_loops" ||
+        state.readinessFilter === "retried_both"
+      ) {
+        const want = state.readinessFilter.replace("retried_", "");
+        return trackRetryKind(track) === want;
+      }
       const status = trackReadinessStatus(track);
       if (!status) return false;
       if (state.readinessFilter === "ready") return status === "ready";
@@ -5366,6 +6336,72 @@ function filteredTrackIndexes() {
       return true;
     });
   return isReviewMode() ? sortAddCuesIndexes(indexes) : indexes;
+}
+
+function trackRetryKind(track) {
+  const hist = track?.retry_history || {};
+  let cues = Boolean(hist.tried_cues);
+  let loops = Boolean(hist.tried_loops);
+  if (hist.kind === "both" || hist.tried_both) {
+    cues = true;
+    loops = true;
+  } else if (hist.kind === "cues") {
+    cues = true;
+  } else if (hist.kind === "loops") {
+    loops = true;
+  }
+  const job = retryJobForPath(track?.path);
+  const scope = String(job?.writeScope || job?.write_scope || "").toLowerCase();
+  const finished = ["ok", "error", "skipped"].includes(String(job?.status || ""));
+  if (job && finished && scope) {
+    if (scope === "cues" || scope === "all" || scope === "both") cues = true;
+    if (scope === "loops" || scope === "all" || scope === "both") loops = true;
+  }
+  if (cues && loops) return "both";
+  if (cues) return "cues";
+  if (loops) return "loops";
+  return null;
+}
+
+function retryHistoryBadge(track) {
+  const kind = trackRetryKind(track);
+  if (kind === "both") {
+    return `<span class="badge retry-hist" title="AutoCue already ran cues and loops">Tried both</span>`;
+  }
+  if (kind === "cues") {
+    return `<span class="badge retry-hist" title="AutoCue already ran cues only">Retried cues</span>`;
+  }
+  if (kind === "loops") {
+    return `<span class="badge retry-hist" title="AutoCue already ran loops only">Retried loops</span>`;
+  }
+  return "";
+}
+
+function updateRetriedFilterUi() {
+  const counts = state.tracks.reduce(
+    (acc, track) => {
+      const kind = trackRetryKind(track);
+      if (kind === "cues") acc.cues += 1;
+      else if (kind === "loops") acc.loops += 1;
+      else if (kind === "both") acc.both += 1;
+      return acc;
+    },
+    { cues: 0, loops: 0, both: 0 }
+  );
+  const cuesBtn = $("filterRetriedCues");
+  const loopsBtn = $("filterRetriedLoops");
+  const bothBtn = $("filterRetriedBoth");
+  if (cuesBtn) {
+    cuesBtn.textContent = counts.cues ? `Retried cues · ${counts.cues}` : "Retried cues";
+  }
+  if (loopsBtn) {
+    loopsBtn.textContent = counts.loops
+      ? `Retried loops · ${counts.loops}`
+      : "Retried loops";
+  }
+  if (bothBtn) {
+    bothBtn.textContent = counts.both ? `Tried both · ${counts.both}` : "Tried both";
+  }
 }
 
 function readinessBadge(track) {
@@ -5411,6 +6447,7 @@ function renderRecsRail() {
 }
 
 function renderTrackList() {
+  updateRetriedFilterUi();
   const root = $("trackList");
   if (isPracticeMode()) {
     renderPracticeMixList();
@@ -5426,11 +6463,18 @@ function renderTrackList() {
   }
   const indexes = filteredTrackIndexes();
   if (!state.tracks.length) {
+    if (root.classList.contains("list-loading") || state.tracksLoadTimer) {
+      root.innerHTML = `<div class="empty">Loading tracks…</div>`;
+      return;
+    }
     if (isReviewMode()) {
       root.innerHTML = emptyStateHtml({
         icon: "1",
         title: "Add Cues is empty",
-        copy: "Drop audio into the Add Cues folder, or jump to Sort if Ready already has tracks.",
+        copy:
+          state.crateFilter === "pajamathon"
+            ? "No Pajamathon event-crate tracks loaded. Refresh — this tab lists Sets/Pajamathon, not only Add Cues."
+            : "Drop audio into the Add Cues folder, or jump to Sort if Ready already has tracks.",
         ctaLabel: "Open Sort",
         ctaMode: "sort",
       });
@@ -5504,10 +6548,38 @@ function renderQueueTrackRow(i) {
   const placements = t.placements || {};
   const libCued = (placements.library || []).some((p) => p.is_cued);
   const archCued = (placements.cues_sorted || []).some((p) => p.is_cued);
+  const setCued = (placements.sets || []).some((p) => p.is_cued);
   const libHits = placements.library || [];
   const archHits = placements.cues_sorted || [];
+  const setHits = placements.sets || [];
+  const zoukLibHits = libHits.filter((p) => p.root_name === "Zouk");
+  const houseLibHits = libHits.filter((p) => p.root_name === "House");
+  const zoukLibCued = zoukLibHits.some((p) => p.is_cued);
+  const houseLibCued = houseLibHits.some((p) => p.is_cued);
   const placementBadges = [
-    placements.in_library
+    zoukLibHits.length
+      ? `<span class="badge ${zoukLibCued ? "ok" : "warn"}" title="${escapeHtml(
+          zoukLibHits
+            .map(
+              (p) =>
+                `${p.root_name}/${p.relative_path}` +
+                (p.is_cued ? ` (${p.cue_count} cues)` : " (no cues)")
+            )
+            .join(", ")
+        )}">${zoukLibCued ? "Zouk cued" : "In Zouk"}</span>`
+      : "",
+    houseLibHits.length
+      ? `<span class="badge ${houseLibCued ? "ok" : "warn"}" title="${escapeHtml(
+          houseLibHits
+            .map(
+              (p) =>
+                `${p.root_name}/${p.relative_path}` +
+                (p.is_cued ? ` (${p.cue_count} cues)` : " (no cues)")
+            )
+            .join(", ")
+        )}">${houseLibCued ? "House cued" : "In House"}</span>`
+      : "",
+    placements.in_library && !zoukLibHits.length && !houseLibHits.length
       ? `<span class="badge ${libCued ? "ok" : "warn"}" title="${escapeHtml(
           libHits
             .map(
@@ -5529,6 +6601,17 @@ function renderQueueTrackRow(i) {
             .join(", ")
         )}">${archCued ? "Archive cued" : "In archive"}</span>`
       : "",
+    placements.in_sets
+      ? `<span class="badge ${setCued ? "ok" : "warn"}" title="${escapeHtml(
+          setHits
+            .map(
+              (p) =>
+                `Sets/${p.relative_path}` +
+                (p.is_cued ? ` (${p.cue_count} cues)` : " (no cues)")
+            )
+            .join(", ")
+        )}">${setCued ? "Pajamathon cued" : "In Pajamathon"}</span>`
+      : "",
   ].join("");
   return `
         <button class="track ${i === state.index ? "active" : ""} ${cued ? "" : "uncued-row"} ${
@@ -5544,6 +6627,7 @@ function renderQueueTrackRow(i) {
           <div class="track-meta">
             ${badge}
             ${cueingBadge}
+            ${isReviewMode() ? retryHistoryBadge(t) : ""}
             ${grid}
             ${brBadge}
             ${placementBadges}
@@ -5835,11 +6919,12 @@ function renderPlayer() {
     scheduleWaveformLoad(track, gen);
     applyPlaybackRate(isPracticeMode() ? 1 : state.playbackRate);
     // Defer play slightly so aborted switches don't start audio.
-    // Practice: load only — user hits play (long mixes shouldn't auto-start).
+    // Opening / selecting a track stays silent until the user hits Play
+    // (or a previous Play in this tab unlocked autoplay). Quiet sessions never play.
     setTimeout(() => {
       if (gen !== state.trackGen || currentTrack()?.path !== track.path) return;
-      if (!isPracticeMode()) {
-        audio.play().catch(() => {});
+      if (shouldAutoplayOnSelect()) {
+        playAudio(audio).catch(() => {});
       }
       setPlayerLoading(false);
     }, 160);
@@ -5922,10 +7007,37 @@ function placementCueBadge(hit) {
   return `<span class="badge bad">Not in VDJ</span>`;
 }
 
-function placementPathRow(labelPath, hit) {
+function placementPathRow(labelPath, hit, options = {}) {
   const bpm = hit.bpm ? `<span class="badge neutral">${Number(hit.bpm).toFixed(0)} BPM</span>` : "";
   const grid = hit.has_beatgrid ? `<span class="badge neutral">grid</span>` : "";
   const pathAttr = escapeHtml(hit.path || "");
+  const allowDelete = options.allowDelete !== false;
+  const allowCopyCues = options.allowCopyCues !== false;
+  const copyLabel = hit.is_cued ? "Replace cues" : "Copy cues";
+  const copyTitle = hit.is_cued
+    ? "Replace this copy's VirtualDJ cues with the Ready / Add Cues markers"
+    : "Copy this track's VirtualDJ cues onto this existing file";
+  const actions = [];
+  if (allowCopyCues) {
+    actions.push(`
+      <button
+        type="button"
+        class="btn ghost placement-copy-cues-btn"
+        data-placement-path="${pathAttr}"
+        title="${escapeHtml(copyTitle)}"
+        aria-label="${escapeHtml(copyLabel)} ${escapeHtml(labelPath)}"
+      >${copyLabel}</button>`);
+  }
+  if (allowDelete) {
+    actions.push(`
+      <button
+        type="button"
+        class="btn ghost danger placement-delete-btn"
+        data-placement-path="${pathAttr}"
+        title="Remove this file from its folder (Trash) and delete its VirtualDJ cues for that path"
+        aria-label="Delete from folder ${escapeHtml(labelPath)}"
+      >Delete from folder</button>`);
+  }
   return `
     <div class="placement-path-row" data-placement-path="${pathAttr}">
       <div class="placement-path-main">
@@ -5936,45 +7048,139 @@ function placementPathRow(labelPath, hit) {
           ${grid}
         </div>
       </div>
-      <button
-        type="button"
-        class="btn ghost danger placement-delete-btn"
-        data-placement-path="${pathAttr}"
-        title="Delete this copy from disk and remove its cues from VirtualDJ"
-        aria-label="Delete placement ${escapeHtml(labelPath)}"
-      >✕ Delete</button>
+      <div class="placement-path-actions">${actions.join("")}</div>
     </div>`;
+}
+
+function isPajamathonPlacement(hit) {
+  return String(hit?.event || hit?.root_name || "")
+    .toLowerCase()
+    .startsWith("pajamathon");
+}
+
+function emptyPlacements() {
+  return {
+    in_cues_sorted: false,
+    cues_sorted: [],
+    in_library: false,
+    library: [],
+    in_sets: false,
+    sets: [],
+    already_sorted: false,
+    any_library_cued: false,
+    any_archive_cued: false,
+    any_set_cued: false,
+  };
+}
+
+function placementsArePopulated(placements) {
+  const p = placements || {};
+  return Boolean(
+    p.already_sorted ||
+      p.in_sets ||
+      p.in_library ||
+      p.in_cues_sorted ||
+      (p.library || []).length ||
+      (p.sets || []).length ||
+      (p.cues_sorted || []).length
+  );
+}
+
+function mergeLoadedPlacements(prevTracks, nextTracks) {
+  const prevByPath = new Map((prevTracks || []).map((t) => [t.path, t]));
+  return (nextTracks || []).map((track) => {
+    const prev = prevByPath.get(track.path);
+    if (!prev) return track;
+    const incomingEmpty = !placementsArePopulated(track.placements);
+    if (incomingEmpty && prev.placementsLoaded && prev.placements) {
+      return {
+        ...track,
+        placements: prev.placements,
+        placementsLoaded: true,
+        placementsError: prev.placementsError || "",
+      };
+    }
+    return {
+      ...track,
+      placementsLoaded: Boolean(prev.placementsLoaded && incomingEmpty),
+      placementsError: incomingEmpty ? prev.placementsError || "" : "",
+    };
+  });
+}
+
+function applyExistingSetPlacement(track, result) {
+  if (!track || !result) return track;
+  const dest = result.dest_path || result.existing?.path || "";
+  if (!dest) return track;
+  const placements = {
+    ...(track.placements || emptyPlacements()),
+  };
+  const sets = [...(placements.sets || [])];
+  if (!sets.some((hit) => hit.path === dest)) {
+    sets.push({
+      path: dest,
+      relative_path: result.relative_path || result.existing?.relative_path || "",
+      root_name: result.event || result.existing?.event || result.existing?.root_name || "",
+      event: result.event || result.existing?.event || "",
+      ...(result.existing || {}),
+    });
+  }
+  placements.sets = sets;
+  placements.in_sets = sets.length > 0;
+  track.placements = placements;
+  return track;
 }
 
 function renderPlacementCard(track) {
   const card = $("placementCard");
   if (!card) return;
 
-  if (!track?.placements?.already_sorted) {
+  if (!track || isPracticeMode()) {
     card.hidden = true;
     card.innerHTML = "";
     return;
   }
 
   const rows = [];
-  const libs = track.placements.library || [];
-  const sorted = track.placements.cues_sorted || [];
+  const libs = track.placements?.library || [];
+  const sorted = track.placements?.cues_sorted || [];
+  const sets = track.placements?.sets || [];
 
-  if (libs.length) {
-    const paths = libs
+  const canCopyCues = Boolean(track.is_cued);
+  const libraryGroups = [];
+  const zoukHits = libs.filter((p) => p.root_name === "Zouk");
+  const houseHits = libs.filter((p) => p.root_name === "House");
+  const otherLibs = libs.filter(
+    (p) => p.root_name !== "Zouk" && p.root_name !== "House"
+  );
+  if (zoukHits.length) libraryGroups.push(["Zouk", zoukHits]);
+  if (houseHits.length) libraryGroups.push(["House", houseHits]);
+  for (const p of otherLibs) {
+    libraryGroups.push([p.root_name || "Library", [p]]);
+  }
+  for (const [label, hits] of libraryGroups) {
+    const paths = hits
       .map((p) =>
-        placementPathRow(`${p.root_name}/${p.relative_path}`, p)
+        placementPathRow(`${p.root_name}/${p.relative_path}`, p, {
+          allowCopyCues: canCopyCues,
+          allowDelete: true,
+        })
       )
       .join("");
     rows.push(`
       <div class="placement-row">
-        <div class="placement-label">Library</div>
+        <div class="placement-label">${escapeHtml(label)}</div>
         <div class="placement-paths">${paths}</div>
       </div>`);
   }
   if (sorted.length) {
     const paths = sorted
-      .map((p) => placementPathRow(`Cues Sorted/${p.relative_path}`, p))
+      .map((p) =>
+        placementPathRow(`Cues Sorted/${p.relative_path}`, p, {
+          allowCopyCues: canCopyCues,
+          allowDelete: true,
+        })
+      )
       .join("");
     rows.push(`
       <div class="placement-row">
@@ -5982,24 +7188,86 @@ function renderPlacementCard(track) {
         <div class="placement-paths">${paths}</div>
       </div>`);
   }
+  if (sets.length) {
+    const allPaj = sets.every((p) => isPajamathonPlacement(p));
+    const paths = sets
+      .map((p) =>
+        placementPathRow(`Sets/${p.relative_path}`, p, {
+          allowCopyCues: canCopyCues,
+          allowDelete: true,
+        })
+      )
+      .join("");
+    rows.push(`
+      <div class="placement-row">
+        <div class="placement-label">${allPaj ? "Pajamathon" : "Sets"}</div>
+        <div class="placement-paths">${paths}</div>
+      </div>`);
+  }
 
   const cuedN =
-    libs.filter((h) => h.is_cued).length + sorted.filter((h) => h.is_cued).length;
-  const totalN = libs.length + sorted.length;
+    libs.filter((h) => h.is_cued).length +
+    sorted.filter((h) => h.is_cued).length +
+    sets.filter((h) => h.is_cued).length;
+  const totalN = libs.length + sorted.length + sets.length;
   const titleExtra =
     totalN > 0
       ? ` · ${cuedN}/${totalN} cued`
       : "";
 
   const review = isReviewMode();
-  const title = review
-    ? `Already sorted in main library${titleExtra}`
-    : `Already in library${titleExtra}`;
-  const note = review
-    ? cuedN > 0
-      ? "This filename already exists under House/Zouk and/or Cues Sorted with VDJ cues. Approving still moves this Add Cues copy to Ready — use Delete on a placement only if you want to remove that library copy."
-      : "This filename already exists under House/Zouk and/or Cues Sorted, but those copies are not cued in VirtualDJ yet."
-    : "Sorting still writes to your chosen folder + Cues Sorted when those paths differ. Delete removes that copy (Trash) and its VirtualDJ cues — Ready for Sort stays.";
+  const inPajamathon = sets.some((p) => isPajamathonPlacement(p));
+  const loading = Boolean(track.placementsLoading) && totalN === 0;
+  const loadError = !loading && totalN === 0 ? track.placementsError || "" : "";
+  const title = totalN > 0
+    ? review
+      ? `Already sorted in main library${titleExtra}`
+      : `Already in library${titleExtra}`
+    : loading
+      ? "Looking up library copies…"
+      : loadError
+        ? "Couldn't load library copies"
+        : "Not in Pajamathon";
+  const note = totalN > 0
+    ? review
+      ? cuedN > 0
+        ? "This song already exists under House/Zouk, Cues Sorted, and/or Sets/Pajamathon with VDJ cues. Approving still moves this Add Cues copy to Ready — Copy cues pushes markers onto that copy; Delete from folder removes a library/archive file only."
+        : "This song already exists under House/Zouk, Cues Sorted, and/or Sets/Pajamathon, but those copies are not cued in VirtualDJ yet. Copy cues writes this track's markers onto that file."
+      : "Copy cues writes this Ready track's markers onto the existing House/Zouk/Cues Sorted/Pajamathon file without moving audio. Delete from folder Trashes a duplicate library copy. Add to Pajamathon copies this Ready file into Sets/Pajamathon 2026."
+    : loading
+      ? "Looking up House / Zouk / Pajamathon copies for this track."
+      : loadError
+        ? loadError
+        : "No matching Sets/Pajamathon file. Add to Pajamathon copies this track into the event crate and clones its VirtualDJ cues.";
+
+  const actionBtns = [];
+  if (loadError) {
+    actionBtns.push(`
+      <button
+        type="button"
+        class="btn ghost placement-retry-btn"
+        title="Look up House, Zouk, Cues Sorted, and Sets/Pajamathon again"
+      >Retry library lookup</button>`);
+  }
+  if (!inPajamathon && !loading) {
+    actionBtns.push(`
+      <button
+        type="button"
+        class="btn primary placement-add-set-btn"
+        title="Copy this track into Sets/Pajamathon 2026 and clone its VirtualDJ cues"
+      >Add to Pajamathon</button>`);
+  }
+  if (canCopyCues && totalN > 1) {
+    actionBtns.push(`
+      <button
+        type="button"
+        class="btn ghost placement-copy-cues-all-btn"
+        title="Write this track's VirtualDJ cues onto every House/Zouk, Cues Sorted, and Sets copy listed above"
+      >Copy cues to all ${totalN} locations</button>`);
+  }
+  const allAction = actionBtns.length
+    ? `<div class="placement-card-actions">${actionBtns.join("")}</div>`
+    : "";
 
   card.hidden = false;
   card.classList.toggle("placement-card-review", review);
@@ -6007,6 +7275,7 @@ function renderPlacementCard(track) {
   card.innerHTML = `
     <div class="placement-card-title">${title}</div>
     <div class="placement-rows">${rows.join("")}</div>
+    ${allAction}
     <div class="placement-card-note">${note}</div>
   `;
 
@@ -6017,6 +7286,34 @@ function renderPlacementCard(track) {
       if (path) deleteLibraryPlacement(path);
     });
   });
+  card.querySelectorAll(".placement-copy-cues-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const path = btn.getAttribute("data-placement-path");
+      if (path) copyCuesToPlacement(path);
+    });
+  });
+  const allBtn = card.querySelector(".placement-copy-cues-all-btn");
+  if (allBtn) {
+    allBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      copyCuesToAllPlacements();
+    });
+  }
+  const addSetBtn = card.querySelector(".placement-add-set-btn");
+  if (addSetBtn) {
+    addSetBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      addTrackToPajamathon();
+    });
+  }
+  const retryBtn = card.querySelector(".placement-retry-btn");
+  if (retryBtn) {
+    retryBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      loadTrackPlacements(currentTrack(), { force: true });
+    });
+  }
 }
 
 async function deleteLibraryPlacement(placementPath) {
@@ -6027,13 +7324,10 @@ async function deleteLibraryPlacement(placementPath) {
   const allHits = [
     ...(track?.placements?.library || []),
     ...(track?.placements?.cues_sorted || []),
+    ...(track?.placements?.sets || []),
   ];
   const hit = allHits.find((h) => h.path === placementPath);
-  const label = hit
-    ? hit.root_name === "Cues Sorted" || (hit.root || "").includes("Cues Sorted")
-      ? `Cues Sorted/${hit.relative_path}`
-      : `${hit.root_name}/${hit.relative_path}`
-    : placementPath.split("/").slice(-3).join("/");
+  const label = hit ? placementHitLabel(hit) : placementPath.split("/").slice(-3).join("/");
   const cueNote =
     hit?.is_cued
       ? ` This copy has ${hit.cue_count || 0} cues` +
@@ -6044,12 +7338,12 @@ async function deleteLibraryPlacement(placementPath) {
         : " No VirtualDJ entry was found for this path (file still goes to Trash).";
 
   const ok = await showConfirmDialog({
-    title: "Delete library copy?",
+    title: "Delete from this folder?",
     track: track ? trackDisplayTitle(track) : label,
-    message: `Remove “${label}” from disk and delete its VirtualDJ database entry (cues/loops for that path).`,
+    message: `Remove “${label}” from that folder and delete its VirtualDJ database entry (cues/loops for that path only).`,
     note:
-      `File moves to Trash (recoverable). Ready for Sort is not touched.${cueNote} Close VirtualDJ first if it is open.`,
-    confirmLabel: "Delete copy + VDJ cues",
+      `File moves to Trash (recoverable). Ready for Sort / Add Cues is not touched.${cueNote} Use this to remove a House, Zouk, Cues Sorted, or Pajamathon copy. Close VirtualDJ first if it is open.`,
+    confirmLabel: "Delete from folder",
     tone: "danger",
   });
   if (!ok) return;
@@ -6086,8 +7380,9 @@ async function deleteLibraryPlacement(placementPath) {
       : r.database?.reason === "not_in_database"
         ? " · not in VDJ DB"
         : "";
+    const missingBit = r.missing_file ? " · file was already gone" : "";
     setStatus(
-      `Deleted ${r.root_name || ""}/${r.relative_path || label}${dbBit}`,
+      `Deleted ${r.root_name || ""}/${r.relative_path || label}${missingBit}${dbBit}`,
       "success"
     );
     // Refresh placements for the Ready track (source stays).
@@ -6095,6 +7390,265 @@ async function deleteLibraryPlacement(placementPath) {
     if (!isReviewMode()) await loadFolders();
   } catch (err) {
     setStatus(err.message, "error");
+  }
+}
+
+function allPlacementHits(track) {
+  return [
+    ...(track?.placements?.library || []),
+    ...(track?.placements?.cues_sorted || []),
+    ...(track?.placements?.sets || []),
+  ].filter((h) => h && h.path);
+}
+
+function placementHitLabel(hit) {
+  if (!hit) return "";
+  if (hit.root_name === "Cues Sorted" || (hit.root || "").includes("Cues Sorted")) {
+    return `Cues Sorted/${hit.relative_path}`;
+  }
+  if (hit.event || (hit.root || "").includes("/Sets") || (hit.root || "").endsWith("/Sets")) {
+    return `Sets/${hit.relative_path}`;
+  }
+  return `${hit.root_name}/${hit.relative_path}`;
+}
+
+async function copyCuesToPlacement(placementPath) {
+  const track = currentTrack();
+  if (!placementPath || !track) return;
+  if (!track.is_cued) {
+    setStatus("This track has no cue points to copy.", "error");
+    return;
+  }
+
+  const allHits = [
+    ...(track.placements?.library || []),
+    ...(track.placements?.cues_sorted || []),
+    ...(track.placements?.sets || []),
+  ];
+  const hit = allHits.find((h) => h.path === placementPath);
+  const label = hit
+    ? placementHitLabel(hit)
+    : placementPath.split("/").slice(-3).join("/");
+  const destCued = Boolean(hit?.is_cued) || Number(hit?.loop_count || 0) > 0;
+  const cueNote = destCued
+    ? ` This copy already has ${hit.cue_count || 0} cues` +
+      (hit.loop_count ? ` and ${hit.loop_count} loops` : "") +
+      " — they will be replaced. Beatgrid, BPM, and comments on that file stay."
+    : " The Ready / Add Cues markers will be written onto this file. Audio stays put.";
+
+  const ok = await showConfirmDialog({
+    title: destCued ? "Replace cues on this copy?" : "Copy cues onto this copy?",
+    track: trackDisplayTitle(track),
+    message: `Write cues from “${trackDisplayTitle(track)}” onto “${label}”.`,
+    note: `VirtualDJ database only — files are not moved.${cueNote} Close VirtualDJ first if it is open.`,
+    confirmLabel: destCued ? "Replace cues" : "Copy cues",
+    tone: destCued ? "warning" : "accent",
+  });
+  if (!ok) return;
+
+  let allowRunning = false;
+  if (await isVdjRunningFresh()) {
+    allowRunning = await showConfirmDialog({
+      title: "VirtualDJ is still open",
+      track: trackDisplayTitle(track),
+      message:
+        "Database edits may be overwritten when VirtualDJ quits. Close it first when possible.",
+      confirmLabel: "Copy anyway",
+      tone: "warning",
+    });
+    if (!allowRunning) {
+      setStatus("Close VirtualDJ, then copy cues.", "error");
+      return;
+    }
+  }
+
+  try {
+    setStatus(`Copying cues onto ${label}…`);
+    const data = await api("/api/copy-cues", {
+      method: "POST",
+      body: JSON.stringify({
+        source: track.path,
+        dest: placementPath,
+        overwrite: destCued,
+        allow_vdj_running: Boolean(allowRunning),
+      }),
+    });
+    const r = data.result || {};
+    const destName = r.root_name
+      ? `${r.root_name}/${r.relative_path || label}`
+      : label;
+    setStatus(
+      `Copied ${r.copied_cues || 0} cues` +
+        (r.copied_loops ? ` · ${r.copied_loops} loops` : "") +
+        ` → ${destName}`,
+      "success"
+    );
+    await loadTracks({ keepPath: track.path, skipStatus: true });
+  } catch (err) {
+    setStatus(err.message, "error");
+  }
+}
+
+async function copyCuesToAllPlacements() {
+  const track = currentTrack();
+  if (!track) return;
+  if (!track.is_cued) {
+    setStatus("This track has no cue points to copy.", "error");
+    return;
+  }
+
+  const hits = allPlacementHits(track);
+  if (!hits.length) {
+    setStatus("No existing library copies to write cues onto.", "error");
+    return;
+  }
+
+  const marked = hits.filter(
+    (h) => h.is_cued || Number(h.loop_count || 0) > 0
+  );
+  const labels = hits.map((h) => placementHitLabel(h));
+  const list =
+    labels.length <= 6
+      ? labels.join(", ")
+      : `${labels.slice(0, 5).join(", ")} +${labels.length - 5} more`;
+  const cueNote = marked.length
+    ? ` ${marked.length} of ${hits.length} already have cues/loops and will be replaced.`
+    : " Audio files stay put.";
+
+  const ok = await showConfirmDialog({
+    title: marked.length
+      ? `Replace cues on all ${hits.length} copies?`
+      : `Copy cues to all ${hits.length} locations?`,
+    track: trackDisplayTitle(track),
+    message: `Write cues from “${trackDisplayTitle(track)}” onto: ${list}.`,
+    note: `VirtualDJ database only — files are not moved.${cueNote} Close VirtualDJ first if it is open.`,
+    confirmLabel: marked.length
+      ? `Replace cues on ${hits.length}`
+      : `Copy cues to ${hits.length}`,
+    tone: marked.length ? "warning" : "accent",
+  });
+  if (!ok) return;
+
+  let allowRunning = false;
+  if (await isVdjRunningFresh()) {
+    allowRunning = await showConfirmDialog({
+      title: "VirtualDJ is still open",
+      track: trackDisplayTitle(track),
+      message:
+        "Database edits may be overwritten when VirtualDJ quits. Close it first when possible.",
+      confirmLabel: "Copy anyway",
+      tone: "warning",
+    });
+    if (!allowRunning) {
+      setStatus("Close VirtualDJ, then copy cues.", "error");
+      return;
+    }
+  }
+
+  try {
+    setStatus(`Copying cues onto ${hits.length} locations…`);
+    const data = await api("/api/copy-cues-all", {
+      method: "POST",
+      body: JSON.stringify({
+        source: track.path,
+        dests: hits.map((h) => h.path),
+        overwrite: marked.length > 0,
+        allow_vdj_running: Boolean(allowRunning),
+      }),
+    });
+    const r = data.result || {};
+    const bits = [`Copied to ${r.copied || 0}`];
+    if (r.skipped) bits.push(`skipped ${r.skipped}`);
+    if (r.failed) bits.push(`failed ${r.failed}`);
+    setStatus(
+      `${bits.join(" · ")}` +
+        (r.copied_cues != null ? ` · ${r.copied_cues} cues` : "") +
+        (r.copied_loops ? ` · ${r.copied_loops} loops` : ""),
+      r.failed ? "error" : "success"
+    );
+    await loadTracks({ keepPath: track.path, skipStatus: true });
+  } catch (err) {
+    setStatus(err.message, "error");
+  }
+}
+
+async function addTrackToPajamathon() {
+  const track = currentTrack();
+  if (!track) return;
+  if (isPracticeMode()) return;
+
+  const existing = (track.placements?.sets || []).filter((p) =>
+    isPajamathonPlacement(p)
+  );
+  if (existing.length) {
+    renderPlacementCard(track);
+    setStatus(
+      `Already in Pajamathon: ${existing.map((p) => p.relative_path).join(", ")}`
+    );
+    return;
+  }
+
+  const cueBit = track.is_cued
+    ? ` Its ${track.cues?.cue_count || 0} cues` +
+      (track.cues?.loop_count ? ` and ${track.cues.loop_count} loops` : "") +
+      " will be cloned onto the new set file."
+    : " The audio is copied even without cues.";
+
+  const ok = await showConfirmDialog({
+    title: "Add to Pajamathon?",
+    track: trackDisplayTitle(track),
+    message:
+      "Copy this track into Sets/Pajamathon 2026. Ready for Sort / Add Cues stays put.",
+    note: `Next numbered file in the event crate.${cueBit} Close VirtualDJ first if it is open.`,
+    confirmLabel: "Add to Pajamathon",
+    tone: "accent",
+  });
+  if (!ok) return;
+
+  let allowRunning = false;
+  if (await isVdjRunningFresh()) {
+    allowRunning = await showConfirmDialog({
+      title: "VirtualDJ is still open",
+      track: trackDisplayTitle(track),
+      message:
+        "Database edits may be overwritten when VirtualDJ quits. Close it first when possible.",
+      confirmLabel: "Add anyway",
+      tone: "warning",
+    });
+    if (!allowRunning) {
+      setStatus("Close VirtualDJ, then add to Pajamathon.", "error");
+      return;
+    }
+  }
+
+  try {
+    setStatus("Adding to Pajamathon…");
+    const data = await api("/api/add-to-set", {
+      method: "POST",
+      body: JSON.stringify({
+        path: track.path,
+        allow_vdj_running: Boolean(allowRunning),
+      }),
+    });
+    const r = data.result || {};
+    if (r.already_exists) {
+      applyExistingSetPlacement(track, r);
+      renderPlacementCard(currentTrack());
+      setStatus(`Already in ${r.event || "Pajamathon"}: ${r.relative_path || r.dest_path || ""}`);
+      await loadTrackPlacements(currentTrack(), { force: true });
+      return;
+    }
+    setStatus(
+      `Added to ${r.relative_path || r.dest_path || "Pajamathon"}` +
+        (r.copied_cues ? ` · ${r.copied_cues} cues` : "") +
+        (r.copied_loops ? ` · ${r.copied_loops} loops` : ""),
+      "success"
+    );
+    await loadTracks({ keepPath: track.path, skipStatus: true });
+    await loadTrackPlacements(currentTrack(), { force: true });
+  } catch (err) {
+    setStatus(err.message, "error");
+    await loadTrackPlacements(currentTrack(), { force: true });
   }
 }
 
@@ -6816,7 +8370,7 @@ async function loadTracks({ keepPath, skipStatus = false, silent = false } = {})
 
   try {
     const data = await api(`/api/tracks?mode=${encodeURIComponent(requestedMode)}`, {
-      timeoutMs: 45000,
+      timeoutMs: 120000,
     });
     // Drop stale responses: mode switch or a newer refresh finished first.
     if (loadGen !== state.tracksLoadGen || state.mode !== requestedMode) {
@@ -6827,7 +8381,7 @@ async function loadTracks({ keepPath, skipStatus = false, silent = false } = {})
     }
 
     const prevPath = keepPath || currentTrack()?.path;
-    state.tracks = data.tracks || [];
+    state.tracks = mergeLoadedPlacements(state.tracks, data.tracks || []);
     const counts = data.counts || {};
 
     if (requestedMode === "add_cues") {
@@ -6855,6 +8409,9 @@ async function loadTracks({ keepPath, skipStatus = false, silent = false } = {})
     state.trackGen += 1;
     renderTrackList();
     renderPlayer();
+    if (currentTrack() && !isPracticeMode() && !isRecsMode() && !isAssembleMode()) {
+      loadTrackPlacements(currentTrack());
+    }
     if (currentTrack() && requestedMode === "sort") requestRecommendation(currentTrack());
     // Callers that just finished promote/sort pass skipStatus and set their own
     // success handoff *after* this returns so the CTA is not wiped.
@@ -7062,7 +8619,12 @@ async function setMode(mode) {
     mode !== "assemble"
   )
     return;
-  if (state.mode === mode) return;
+  if (state.mode === mode) {
+    if (!state.tracks.length) {
+      loadTracks();
+    }
+    return;
+  }
   // Leave recs → stop live polls
   stopRecsNowPlayingPoll();
   stopRecsPoll();
@@ -7093,6 +8655,7 @@ async function setMode(mode) {
   });
   $("countsBadge").textContent = "Loading…";
   $("countsBadge").className = "badge neutral";
+  $("trackList")?.classList.add("list-loading");
   applyModeUi();
   document.body.classList.add("is-mode-loading");
   // Clear stage immediately so mode switches never show the previous mode's track.
@@ -7169,22 +8732,67 @@ async function loadFolders() {
   updatePathHint();
 }
 
+async function loadTrackPlacements(track, { force = false } = {}) {
+  if (!track?.path) return;
+  const path = track.path;
+  const liveStart = state.tracks.find((t) => t.path === path) || track;
+  if (!force && (liveStart.placementsLoaded || liveStart.placementsLoading)) {
+    if (currentTrack()?.path === path) renderPlacementCard(currentTrack());
+    return;
+  }
+  liveStart.placementsLoading = true;
+  liveStart.placementsError = "";
+  if (currentTrack()?.path === path) renderPlacementCard(currentTrack());
+  try {
+    const data = await api(
+      `/api/track-placements?path=${encodeURIComponent(path)}`,
+      { timeoutMs: 45000 }
+    );
+    const live = state.tracks.find((t) => t.path === path);
+    if (!live) return;
+    if (data.placements) live.placements = data.placements;
+    live.placementsLoaded = true;
+    live.placementsLoading = false;
+    live.placementsError = "";
+    if (currentTrack()?.path === path) {
+      renderPlacementCard(currentTrack());
+      renderTrackList();
+    }
+  } catch (err) {
+    const live = state.tracks.find((t) => t.path === path);
+    if (live) {
+      live.placementsLoading = false;
+      live.placementsError = err.message || "Could not look up library copies";
+    }
+    if (currentTrack()?.path === path) {
+      renderPlacementCard(currentTrack());
+    }
+  }
+}
+
 async function selectTrack(index) {
   state.index = index;
   state.trackGen += 1;
+  const selected = currentTrack();
+  if (selected) {
+    loadTrackPlacements(selected);
+  }
   updatePipelineStrip();
   state.recommendation = null;
   state.trackMeta = null;
   state.activeLoopKey = null;
   stopLoopWatch();
-  // Leave grid-align without writing when switching tracks.
+  // Leave grid-align / place-cue without writing when switching tracks.
   if (state.gridAlignMode) {
     state.gridAlignMode = false;
+    state.gridAlignPlan = null;
     state.gridAlignAnchor = null;
     state.gridAlignOriginal = null;
     state.gridAlignDragging = false;
     syncGridAlignUi();
   }
+  if (state.placeCueMode) cancelPlaceCueMode();
+  if (state.placeLoopMode) cancelPlaceLoopMode();
   if (state.metaAbort) state.metaAbort.abort();
   // Immediate feedback before any async work
   state.waveform = null;
@@ -8337,6 +9945,10 @@ async function sortSelected() {
     if (r.cues_sorted_copied) archiveBits.push("copied to Cues Sorted");
     else if (r.cues_sorted_already_present) archiveBits.push("already in Cues Sorted");
     if (r.cues_sorted_db_cloned) archiveBits.push("Cues Sorted VDJ entry cloned");
+    if (r.sets_cues_copied) archiveBits.push(`cues copied to Pajamathon (${r.sets_cues_copied})`);
+    else if ((r.sets_cues_skipped || 0) > 0) {
+      archiveBits.push("Pajamathon already cued");
+    }
     clearSelectedDests();
     // Refresh without clobbering status; remaining count comes from post-load list.
     await loadTracks({ skipStatus: true });
@@ -8863,9 +10475,10 @@ function bindUi() {
 
   $("playPauseBtn")?.addEventListener("click", () => {
     if (!audio.src) return;
-    if (audio.paused) audio.play().catch(() => {});
+    if (audio.paused) playAudio(audio).catch(() => {});
     else audio.pause();
   });
+  $("quietSessionChip")?.addEventListener("click", () => disableQuietSession());
   $("previousTrackBtn")?.addEventListener("click", () => stepTrack(-1));
   $("nextTrackBtn")?.addEventListener("click", () => stepTrack(1));
   $("transportProgress")?.addEventListener("input", (e) => {
@@ -8896,19 +10509,23 @@ function bindUi() {
   // passive:false so we can prevent page scroll while zooming the wave
   $("waveformWrap").addEventListener("wheel", onWaveformWheel, { passive: false });
   $("waveformWrap").addEventListener("dblclick", () => {
-    if (state.gridAlignMode) return;
+    if (state.gridAlignMode || state.placeCueMode || state.placeLoopMode) return;
     resetWaveZoom();
     drawWaveform();
   });
   // Beatgrid align: drag ones on the wave
   // Loop move: drag a loop band / start handle
   $("waveformWrap").addEventListener("pointerdown", (e) => {
+    if (hitTestWaveCueChrome(e.clientX, e.clientY)) {
+      state.waveSeekTime = null;
+      return;
+    }
     if (onGridAlignPointerDown(e)) {
       state.waveSeekTime = null;
       e.stopPropagation();
       return;
     }
-    if (onLoopDragPointerDown(e)) {
+    if (!state.placeCueMode && !state.placeLoopMode && onLoopDragPointerDown(e)) {
       state.waveSeekTime = null;
       e.stopPropagation();
       return;
@@ -8918,6 +10535,12 @@ function bindUi() {
   $("waveformWrap").addEventListener("pointermove", (e) => {
     onGridAlignPointerMove(e);
     onLoopDragPointerMove(e);
+    if (state.placeCueMode && !state.loopDrag) {
+      updatePlaceCuePreview(e.clientX, e.shiftKey);
+    }
+    if (state.placeLoopMode && !state.loopDrag) {
+      updatePlaceLoopPreview(e.clientX, e.shiftKey);
+    }
   });
   $("waveformWrap").addEventListener("pointerup", (e) => {
     onGridAlignPointerUp(e);
@@ -8927,16 +10550,28 @@ function bindUi() {
     onGridAlignPointerUp(e);
     onLoopDragPointerUp(e);
   });
-  // Cursor hint when hovering a draggable loop
+  // Cursor hint when hovering a draggable cue or loop
   $("waveformWrap").addEventListener("pointermove", (e) => {
-    if (state.gridAlignMode || state.loopDrag) return;
+    if (state.gridAlignMode || state.loopDrag || state.placeCueMode || state.placeLoopMode) return;
     const wrap = $("waveformWrap");
     if (!wrap) return;
-    const hit = hitTestLoopAtClientX(e.clientX);
-    wrap.classList.toggle("loop-hover", Boolean(hit));
+    const chrome = hitTestWaveCueChrome(e.clientX, e.clientY);
+    const cueHit = chrome ? null : hitTestCueAtClientX(e.clientX);
+    const loopHit = chrome || cueHit ? null : hitTestLoopAtClientX(e.clientX);
+    wrap.classList.toggle("cue-chrome-hover", Boolean(chrome));
+    wrap.classList.toggle("cue-hover", Boolean(cueHit));
+    wrap.classList.toggle("loop-hover", Boolean(loopHit));
   });
   $("waveformWrap").addEventListener("pointerleave", () => {
-    $("waveformWrap")?.classList.remove("loop-hover");
+    $("waveformWrap")?.classList.remove("loop-hover", "cue-hover", "cue-chrome-hover");
+    if (state.placeCueMode) {
+      state.placeCuePreview = null;
+      drawWaveform();
+    }
+    if (state.placeLoopMode) {
+      state.placeLoopPreview = null;
+      drawWaveform();
+    }
   });
   window.addEventListener("resize", () => drawWaveform());
 
@@ -8948,8 +10583,13 @@ function bindUi() {
     if (state.gridAlignMode) cancelGridAlignMode();
     else openGridAlignMode();
   });
+  $("autoAlignGridBtn")?.addEventListener("click", () => attemptAutoGridAlign());
   $("gridAlignCancelBtn")?.addEventListener("click", cancelGridAlignMode);
   $("gridAlignApplyBtn")?.addEventListener("click", applyGridAlign);
+  $("placeCueBtn")?.addEventListener("click", togglePlaceCueMode);
+  $("placeCueDoneBtn")?.addEventListener("click", cancelPlaceCueMode);
+  $("placeLoopBtn")?.addEventListener("click", togglePlaceLoopMode);
+  $("placeLoopDoneBtn")?.addEventListener("click", cancelPlaceLoopMode);
   $("gridNudgeBarLeft")?.addEventListener("click", () => nudgeGridAlignBeats(-4));
   $("gridNudgeBeatLeft")?.addEventListener("click", () => nudgeGridAlignBeats(-1));
   $("gridNudgeBeatRight")?.addEventListener("click", () => nudgeGridAlignBeats(1));
@@ -8996,7 +10636,8 @@ function bindUi() {
     if (e.target.matches("input, textarea")) return;
     if (e.code === "Space") {
       e.preventDefault();
-      if (audio.paused) audio.play();
+      if (!audio.src) return;
+      if (audio.paused) playAudio(audio).catch(() => {});
       else audio.pause();
     } else if (e.key === "j" || e.key === "ArrowDown") {
       e.preventDefault();
@@ -9028,6 +10669,23 @@ function bindUi() {
     } else if (e.key === "g" || e.key === "G") {
       e.preventDefault();
       toggleBeatOnes();
+    } else if (e.key === "c" || e.key === "C") {
+      e.preventDefault();
+      togglePlaceCueMode();
+    } else if (e.key === "o" || e.key === "O") {
+      e.preventDefault();
+      togglePlaceLoopMode();
+    } else if (e.key === "Escape") {
+      if (state.placeCueMode) {
+        e.preventDefault();
+        cancelPlaceCueMode();
+      } else if (state.placeLoopMode) {
+        e.preventDefault();
+        cancelPlaceLoopMode();
+      } else if (state.gridAlignMode) {
+        e.preventDefault();
+        cancelGridAlignMode();
+      }
     } else if (/^[1-9]$/.test(e.key)) {
       const points = filteredCuePoints(currentTrack()?.cues?.points || []);
       const point = points[Number(e.key) - 1];
@@ -9041,6 +10699,7 @@ function bindUi() {
 
 async function boot() {
   applyAccentTheme(storedAccentTheme(), { persist: false });
+  applyQuietSession();
   try {
     bindUi();
   } catch {
@@ -9064,6 +10723,8 @@ async function boot() {
     if (isPracticeMode()) schedulePracticeWaveRedraw();
   });
   applyModeUi();
+  $("trackList")?.classList.add("list-loading");
+  renderTrackList();
   try {
     await loadHealth();
     await loadTracks();

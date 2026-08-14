@@ -18,8 +18,8 @@ from .autocue_path import ensure_autocue_on_path
 from .config import VDJ_DATABASE
 from .relocate import CueSummary, summarize_cues
 
-# AutoCue's _actual_bpm window is 60–200 musical BPM.
-MIN_BPM = 60.0
+# AutoCue's _actual_bpm window is 50–200 musical BPM (slow zouk / half-time).
+MIN_BPM = 50.0
 MAX_BPM = 200.0
 # Common double-time zone (VDJ often reports 140 when the music is ~70).
 DOUBLE_TIME_LOW = 128.0
@@ -35,11 +35,11 @@ def _bpm_ok(bpm: Optional[float]) -> bool:
 
 
 def _grid_anchor(cues: CueSummary) -> Optional[float]:
-    """Best-known downbeat origin: beatgrid POI preferred, else Scan Phase."""
-    if cues.has_beatgrid and cues.beatgrid_pos is not None:
-        return float(cues.beatgrid_pos)
+    """Best-known downbeat origin: Scan Phase (VDJ's live 1), else beatgrid POI."""
     if cues.scan_phase is not None:
         return float(cues.scan_phase)
+    if cues.has_beatgrid and cues.beatgrid_pos is not None:
+        return float(cues.beatgrid_pos)
     return None
 
 
@@ -80,7 +80,7 @@ def _base_from_cues(cues: CueSummary, path_str: str) -> dict[str, Any]:
         status = "blocked"
         label = "No usable BPM"
         issues.append(
-            "VirtualDJ has no usable BPM (need ~60–200). Analyze the track in VDJ "
+            "VirtualDJ has no usable BPM (need ~50–200). Analyze the track in VDJ "
             "before AutoCue."
         )
 
@@ -219,7 +219,8 @@ def assess_grid_for_autocue(
             f"Onset analysis suggests the downbeat is off by "
             f"{alignment.get('shift_beats', 0)} beat(s) "
             f"({alignment.get('fine_shift_seconds', 0):+.3f}s fine), "
-            f"confidence {conf:.1f}×. AutoCue will try to correct when cueing."
+            f"confidence {conf:.1f}×. If the 1 already sounds right, leave it. "
+            "AutoCue will not move the grid. Auto-align is only a preview."
         )
     elif corrected and conf < ALIGN_CONFIDENCE:
         base["needs_align"] = True
@@ -227,8 +228,8 @@ def assess_grid_for_autocue(
             base["status"] = "warn"
             base["label"] = "Ambiguous grid"
         base["warnings"].append(
-            "Weak evidence of grid misalignment — AutoCue may still run, "
-            "but review the '1' in VirtualDJ if cues look early/late."
+            "Weak evidence of grid misalignment — AutoCue will keep the "
+            "current VDJ grid. Use Align grid if the '1' sounds wrong."
         )
     elif conf < 1.05 and float(alignment.get("best_beat_score") or 0) < 0.02:
         # Structural grid exists (BPM + anchor); deep onset just cannot verify.

@@ -114,6 +114,10 @@ class StemProfile:
         window = self._window(start, duration_seconds)
         return sum(window) / len(window) if window else 0.0
 
+    def window_peak(self, start: float, duration_seconds: float) -> float:
+        window = self._window(start, duration_seconds)
+        return max(window) if window else 0.0
+
     def measure(
         self,
         timestamp: float,
@@ -307,6 +311,60 @@ PHRASE_ENTRY_LEAD_IN_PRE = 0.12
 PHRASE_ENTRY_LEAD_IN_POST = 0.35
 PHRASE_ENTRY_CONTINUOUS_PRE = 0.18
 
+# Cue-press window: the instant a DJ jumps to the marker. A vocal already
+# sounding here (held note, mid-syllable, ad-lib) makes the cue unusable
+# even when the 2s phrase average looks fine (Kaysha/Jacira — Havana).
+CUE_PRESS_PRE_SECONDS = 0.20
+CUE_PRESS_WINDOW_SECONDS = 0.10
+CUE_PRESS_PRE_MAX = 0.14
+CUE_PRESS_BUSY = 0.20
+CUE_PRESS_BUSY_PRE = 0.08
+CUE_PRESS_ABS_FLOOR = 0.02
+
+
+def is_clean_cue_press(
+    profiles: Dict[str, StemProfile],
+    timestamp: float,
+) -> bool:
+    """True when the vocal stem is quiet or attacks cleanly at the cue press.
+
+    Always inspects the vocal stem, including Groove/synth-labeled markers.
+    Instrumental jump-ins with a singing vocal at t=0 fail.
+    """
+    vocal = profiles.get("vocal")
+    if vocal is None or vocal.reference_peak < GLOBAL_SILENCE_PEAK:
+        return True
+
+    reference = max(vocal.reference_peak, 1e-6)
+    t = max(0.0, float(timestamp))
+    pre_start = max(0.0, t - CUE_PRESS_PRE_SECONDS)
+    pre_abs = max(
+        vocal.window_average(pre_start, CUE_PRESS_PRE_SECONDS),
+        vocal.window_peak(pre_start, CUE_PRESS_PRE_SECONDS),
+    )
+    press_abs = max(
+        vocal.window_average(max(0.0, t - 0.03), CUE_PRESS_WINDOW_SECONDS),
+        vocal.window_peak(max(0.0, t - 0.03), CUE_PRESS_WINDOW_SECONDS),
+    )
+    # Uniform near-silence would otherwise normalize to 1.0 against itself.
+    if pre_abs < CUE_PRESS_ABS_FLOOR and press_abs < CUE_PRESS_ABS_FLOOR:
+        return True
+
+    pre = pre_abs / reference
+    press = press_abs / reference
+
+    # Already making noise as the playhead lands.
+    if pre >= CUE_PRESS_PRE_MAX and pre_abs >= CUE_PRESS_ABS_FLOOR:
+        return False
+    # At-press vocal without a silent approach = mid-syllable / held note.
+    if (
+        press >= CUE_PRESS_BUSY
+        and pre >= CUE_PRESS_BUSY_PRE
+        and press_abs >= CUE_PRESS_ABS_FLOOR
+    ):
+        return False
+    return True
+
 
 def is_clean_phrase_entry(
     profiles: Dict[str, StemProfile],
@@ -316,13 +374,16 @@ def is_clean_phrase_entry(
 ) -> bool:
     """True when a marker is safe to cue-jump to / loop from.
 
-    Vocal-forward markers must not start while a line is already running
-    (pre-chorus words into a chorus). Instrumental markers always pass.
+    Every marker must be clean at the cue press. Vocal-forward markers also
+    must not start while a line is already running (pre-chorus into chorus).
     """
+    if not is_clean_cue_press(profiles, timestamp):
+        return False
+
     element_set = {
         str(element).strip().lower() for element in (elements or [])
     }
-    # Only gate when vocals are part of the claim (chorus/verse/vocal mix).
+    # Longer mid-phrase gate only when the marker claims vocals.
     if elements is not None and "vocals" not in element_set:
         return True
 

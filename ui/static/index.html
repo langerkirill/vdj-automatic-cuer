@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Music Sorter</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260813-playhead-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260814-add-set-placements" />
   </head>
   <body class="mode-review">
     <div class="shell">
@@ -36,6 +36,9 @@
         </button>
       </nav>
       <span id="autocueJobChip" class="autocue-job-chip" hidden title="AutoCue jobs"></span>
+      <button type="button" id="quietSessionChip" class="quiet-session-chip" hidden title="This tab stays silent so checks do not play songs. Click to turn sound back on.">
+        Sound off
+      </button>
       <div class="topbar-right">
         <div class="accent-picker" id="accentPicker" role="group" aria-label="Accent color">
           <span class="accent-picker-label" aria-hidden="true">Accent</span>
@@ -106,6 +109,9 @@
             <button type="button" data-filter="ready">Ready</button>
             <button type="button" data-filter="partial">Partial</button>
             <button type="button" data-filter="not_cued">Not cued</button>
+            <button type="button" data-filter="retried_cues" id="filterRetriedCues" title="Tracks AutoCue already ran cues-only on">Retried cues</button>
+            <button type="button" data-filter="retried_loops" id="filterRetriedLoops" title="Tracks AutoCue already ran loops-only on">Retried loops</button>
+            <button type="button" data-filter="retried_both" id="filterRetriedBoth" title="Tracks AutoCue already ran cues and loops on">Tried both</button>
           </div>
           <button type="button" class="btn ghost" id="batchPajamathonCuesBtn" hidden title="Queue AutoCue for not-cued Pajamathon songs only">
             Batch Pajamathon cues
@@ -236,13 +242,16 @@
             <div class="cues-header">
               <div>
                 <h3>Waveform + cues</h3>
-                <div class="subtitle" id="cuesSubtitle">Scroll zoom · Shift+scroll pan · click to jump</div>
+                <div class="subtitle" id="cuesSubtitle">Scroll zoom · Shift+scroll pan · drag cues/loops · click to jump</div>
               </div>
               <div class="cues-header-actions">
                 <span class="badge neutral" id="cuesCountBadge">0</span>
                 <div class="seg wave-tools-inline" id="waveToolsInline" role="toolbar" aria-label="Wave tools">
                   <button type="button" class="btn ghost" id="beatOnesBtn" title="Show bar 1 (downbeat) markers. Shortcut: G" aria-pressed="true">Ones</button>
                   <button type="button" class="btn ghost" id="gridAlignBtn" title="Align beatgrid: drag ones, then Apply" aria-pressed="false">Align grid</button>
+                  <button type="button" class="btn ghost" id="autoAlignGridBtn" title="Attempt automatic beatgrid align from stems/onsets. Preview the 1, then Apply.">Auto-align grid</button>
+                  <button type="button" class="btn ghost" id="placeCueBtn" title="Place a cue on the 1. Click the wave, or Alt+click. Shift = free. Shortcut: C" aria-pressed="false">Place cue</button>
+                  <button type="button" class="btn ghost" id="placeLoopBtn" title="Place an 8-beat loop on the 1. Click the wave. Shift = free. Shortcut: O" aria-pressed="false">Place loop</button>
                   <button type="button" class="btn ghost" id="loopPlayBtn" title="Loop playback audition. Shortcut: L" aria-pressed="false">Loop play</button>
                 </div>
                 <div class="autocue-scope-btns" id="autocueScopeHeader" hidden aria-hidden="true"></div>
@@ -265,6 +274,20 @@
                 <button type="button" class="btn ghost" id="gridAlignCancelBtn">Cancel</button>
                 <button type="button" class="btn primary" id="gridAlignApplyBtn" disabled>Apply to VDJ</button>
               </div>
+            </div>
+            <div class="place-cue-bar" id="placeCueBar" hidden>
+              <div class="place-cue-copy">
+                <strong>Place cue</strong>
+                <span class="subtitle">Click the wave to drop a cue on the 1 · Shift+click free · Alt+click anytime · Esc cancel</span>
+              </div>
+              <button type="button" class="btn ghost" id="placeCueDoneBtn">Done</button>
+            </div>
+            <div class="place-loop-bar" id="placeLoopBar" hidden>
+              <div class="place-loop-copy">
+                <strong>Place loop</strong>
+                <span class="subtitle">Click the wave to drop an 8-beat loop on the 1 · Shift+click free · Esc cancel · half/double after</span>
+              </div>
+              <button type="button" class="btn ghost" id="placeLoopDoneBtn">Done</button>
             </div>
             <div class="waveform-wrap waveform-hero" id="waveformWrap">
               <canvas id="waveformCanvas" height="140"></canvas>
@@ -799,6 +822,6 @@
     </dialog>
 
     <script src="/static/status_handoff.js?v=20260812-map-songs-1"></script>
-    <script src="/static/app.js?v=20260813-playhead-2"></script>
+    <script src="/static/app.js?v=20260814-add-set-placements"></script>
   </body>
 </html>

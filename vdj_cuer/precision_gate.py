@@ -6,7 +6,7 @@ import math
 from typing import Dict, Iterable, Optional
 
 
-from .common import TARGET_MAX_LOOPS
+from .common import TARGET_MAX_LOOPS, is_on_downbeat, quantize_to_downbeat
 
 MIN_CUE_CONFIDENCE = 0.70
 MIN_LOOP_CONFIDENCE = 0.62
@@ -64,6 +64,8 @@ def apply_precision_gate(
         "duplicate_cues": 0,
         "low_confidence_loops": 0,
         "invalid_loops": 0,
+        "off_downbeat_cues": 0,
+        "off_downbeat_loops": 0,
     }
 
     accepted_cues = []
@@ -75,6 +77,11 @@ def apply_precision_gate(
         if _confidence(cue) < MIN_CUE_CONFIDENCE:
             rejected["low_confidence_cues"] += 1
             continue
+        if bpm:
+            timestamp = quantize_to_downbeat(timestamp, bpm, beatgrid_offset)
+            if not is_on_downbeat(timestamp, bpm, beatgrid_offset):
+                rejected["off_downbeat_cues"] += 1
+                continue
         cue["timestamp"] = timestamp
         accepted_cues.append(cue)
 
@@ -98,6 +105,11 @@ def apply_precision_gate(
         if _confidence(loop) < MIN_LOOP_CONFIDENCE:
             rejected["low_confidence_loops"] += 1
             continue
+        if bpm:
+            start = quantize_to_downbeat(start, bpm, beatgrid_offset)
+            if not is_on_downbeat(start, bpm, beatgrid_offset):
+                rejected["off_downbeat_loops"] += 1
+                continue
         loop["start"] = start
         loop["length_beats"] = length_beats
         accepted_loops.append(loop)

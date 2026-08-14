@@ -7,6 +7,7 @@ from automatic_music_cuer_gemini import AutomaticMusicCuer
 from vdj_cuer.stem_evidence import (
     StemProfile,
     energy_ratio,
+    is_clean_cue_press,
     is_clean_phrase_entry,
     loop_is_stable,
     loop_seam_is_clean,
@@ -362,8 +363,9 @@ class StemEvidenceTests(unittest.TestCase):
             )
         )
 
-    def test_phrase_entry_skips_instrumental_markers(self):
-        vocal = [0.9] * 40  # would fail if gated
+    def test_phrase_entry_rejects_instrumental_when_vocal_is_noisy_at_press(self):
+        """Havana-class: Groove/synth cue that jumps into a singing stem."""
+        vocal = [0.9] * 40
         profiles = {
             "vocal": StemProfile.from_frames(vocal, frame_seconds=0.25),
             "kick": StemProfile.from_frames([0.5] * 40, frame_seconds=0.25),
@@ -371,8 +373,75 @@ class StemEvidenceTests(unittest.TestCase):
             "bass": StemProfile.from_frames([0.5] * 40, frame_seconds=0.25),
             "hihat": StemProfile.from_frames([0.1] * 40, frame_seconds=0.25),
         }
+        self.assertFalse(is_clean_cue_press(profiles, timestamp=5.0))
+        self.assertFalse(
+            is_clean_phrase_entry(profiles, timestamp=5.0, elements=["drums", "synth"])
+        )
+
+    def test_phrase_entry_allows_instrumental_when_vocal_is_silent(self):
+        vocal = [0.01] * 40
+        profiles = {
+            "vocal": StemProfile.from_frames(vocal, frame_seconds=0.25),
+            "kick": StemProfile.from_frames([0.5] * 40, frame_seconds=0.25),
+            "instruments": StemProfile.from_frames([0.5] * 40, frame_seconds=0.25),
+            "bass": StemProfile.from_frames([0.5] * 40, frame_seconds=0.25),
+            "hihat": StemProfile.from_frames([0.1] * 40, frame_seconds=0.25),
+        }
+        self.assertTrue(is_clean_cue_press(profiles, timestamp=5.0))
         self.assertTrue(
             is_clean_phrase_entry(profiles, timestamp=5.0, elements=["drums", "synth"])
+        )
+
+    def test_cue_press_rejects_short_vocal_burst_before_the_one(self):
+        """2s average stays low; last ~200ms before the 1 is already singing."""
+        # 0.25s frames; t=5.0 is frame 20. Frames 18-19 are the press lead-in.
+        vocal = [0.02] * 18 + [0.85, 0.85] + [0.08] * 20
+        profiles = {
+            "vocal": StemProfile.from_frames(vocal, frame_seconds=0.25),
+            "kick": StemProfile.from_frames([0.5] * 40, frame_seconds=0.25),
+            "instruments": StemProfile.from_frames([0.4] * 40, frame_seconds=0.25),
+            "bass": StemProfile.from_frames([0.4] * 40, frame_seconds=0.25),
+            "hihat": StemProfile.from_frames([0.1] * 40, frame_seconds=0.25),
+        }
+        self.assertFalse(is_clean_cue_press(profiles, timestamp=5.0))
+        self.assertFalse(
+            is_clean_phrase_entry(
+                profiles, timestamp=5.0, elements=["drums", "vocals"]
+            )
+        )
+
+    def test_havana_kizomba_keeps_clean_press_and_drops_noisy_ones(self):
+        """Kaysha/Jacira Havana: remaining good 1s stay; singing-on-press fails."""
+        audio = (
+            "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Pajamathon/"
+            "01 Havana - Kizomba.m4a"
+        )
+        stems = f"{audio}.vdjstems"
+        if not os.path.isfile(audio) or not os.path.isfile(stems):
+            self.skipTest("Havana Kizomba + .vdjstems not on this machine")
+
+        import tempfile
+
+        from vdj_cuer.stems import StemMixin
+        from vdj_cuer.stem_evidence import load_stem_profiles
+
+        mixin = StemMixin()
+        with tempfile.TemporaryDirectory() as tmp:
+            files = mixin._extract_vdj_stems(stems, tmp)
+            profiles = load_stem_profiles(files)
+
+        # Clean vocal entry the user can jump to.
+        self.assertTrue(is_clean_cue_press(profiles, 9.999679))
+        # Intro instrumental 1.
+        self.assertTrue(is_clean_cue_press(profiles, 2.173555))
+        # Mid-song 1s where the vocal is already sounding.
+        self.assertFalse(is_clean_cue_press(profiles, 33.478))
+        self.assertFalse(is_clean_cue_press(profiles, 70.000))
+        # Synth-labeled body 1 with vocal noise — old gate used to allow this.
+        self.assertFalse(
+            is_clean_phrase_entry(
+                profiles, timestamp=70.000, elements=["drums", "synth"]
+            )
         )
 
     def test_loop_length_capped_on_slow_tempo(self):

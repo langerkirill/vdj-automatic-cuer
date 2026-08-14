@@ -12,10 +12,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 from pydantic import BaseModel, Field
+
+from .llm import DEFAULT_MODEL, ask_json, load_api_key, models_to_try
 
 from .autocue_path import ensure_autocue_on_path
 from .config import (
@@ -49,15 +48,7 @@ from .vdj_now_playing import get_now_playing, todays_history_plays
 
 ensure_autocue_on_path()
 
-DEFAULT_MODEL = os.getenv("MUSIC_SORTER_GEMINI_MODEL") or os.getenv(
-    "GEMINI_MODEL", "gemini-3.5-flash"
-)
-MODEL_FALLBACKS = [
-    DEFAULT_MODEL,
-    "gemini-3.5-flash",
-    "gemini-flash-latest",
-    "gemini-3-flash-preview",
-]
+MODEL_FALLBACKS = models_to_try(DEFAULT_MODEL)
 
 BPM_TOLERANCE = float(os.getenv("MUSIC_SORTER_REC_BPM_TOLERANCE", "5"))
 MAX_CANDIDATES_TO_GEMINI = int(os.getenv("MUSIC_SORTER_REC_CANDIDATE_CAP", "48"))
@@ -141,14 +132,7 @@ _scan_lock = threading.Lock()
 
 
 def _load_api_key() -> str:
-    ui_root = Path(__file__).resolve().parents[1]
-    repo_root = Path(__file__).resolve().parents[2]
-    load_dotenv(ui_root / ".env")
-    load_dotenv(repo_root / ".env")
-    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
-    if not key:
-        raise RuntimeError("GEMINI_API_KEY is not set")
-    return key
+    return load_api_key()
 
 
 def _optional_float(value: Optional[str]) -> Optional[float]:
@@ -680,9 +664,6 @@ def _gemini_rank(
     source: dict[str, Any],
     candidates: list[Candidate],
 ) -> dict[str, Any]:
-    api_key = _load_api_key()
-    client = genai.Client(api_key=api_key)
-
     # Cap payload
     top = candidates[:MAX_CANDIDATES_TO_GEMINI]
     cand_lines = []
@@ -707,7 +688,7 @@ def _gemini_rank(
     src_genre = source.get("genre") or "—"
     src_vibe = source.get("vibe") or "—"
     src_origin = {
-        "gemini": " (Gemini guess — treat this as the working genre; ignore inbox folders)",
+        "gemini": " (model guess — treat this as the working genre; ignore inbox folders)",
         "tag": " (VDJ Genre tag)",
         "path": " (from library folder)",
     }.get(str(source.get("genre_source") or ""), "")
@@ -755,7 +736,7 @@ Genre / vibe rules (critical):
 - BPM + key match is NOT enough. A psychedelic/tribal/organic track (e.g. Desert
   Dwellers, India folder, Tribal tag) is NOT "same energy" as contemporary R&B,
   neo-soul, urban kiz, or pop-R&B — even at the same BPM/key.
-- If Genre is a Gemini guess or a VDJ tag, TRUST it for family continuity.
+- If Genre is a model guess or a VDJ tag, TRUST it for family continuity.
 - If Genre is empty, INFER from artist + title only. Ignore inbox folders
   (Add Cues, Ready for Sort, AC Low Quality, Cues Sorted/Energy).
   Example: Rubí "Seadoo" → modern R&B / alternative R&B; not tribal/psy.
@@ -791,91 +772,69 @@ CANDIDATE LIST:
 {chr(10).join(cand_lines) if cand_lines else "(no candidates)"}
 """
 
-    last_err: Optional[Exception] = None
-    for model in MODEL_FALLBACKS:
-        if not model:
-            continue
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.4,
-                    response_mime_type="application/json",
-                    response_schema=TransitionRecSchema,
-                ),
+    try:
+        data = ask_json(prompt, TransitionRecSchema, temperature=0.4)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Gemini ranking failed: {exc}") from exc
+
+    # Attach candidate metadata by path — reject anything not in the pool
+    by_path = {c.path: c for c in top}
+    allowed = set(by_path.keys())
+
+    def _enrich(picks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out = []
+        for p in picks or []:
+            path = (p.get("path") or "").strip()
+            if not path or path not in allowed:
+                continue
+            if not audio_file_exists(path):
+                continue
+            c = by_path[path]
+            if is_same_track(
+                source_path=str(source.get("path") or ""),
+                source_artist=str(source.get("artist") or ""),
+                source_title=str(source.get("title") or ""),
+                source_name=str(source.get("name") or ""),
+                path=path,
+                artist=c.artist,
+                title=c.title,
+                name=c.name,
+            ):
+                continue
+            out.append(
+                {
+                    "path": path,
+                    "title": p.get("title") or c.title,
+                    "artist": p.get("artist") or c.artist,
+                    "reason": p.get("reason") or "",
+                    "confidence": float(p.get("confidence") or 0.7),
+                    "bpm": c.bpm,
+                    "key": c.key,
+                    "camelot": c.camelot,
+                    "genre": c.genre,
+                    "vibe": c.vibe,
+                    "library": c.library,
+                    "relative_path": c.relative_path,
+                    "cue_count": c.cue_count,
+                    "history_count": c.history_count,
+                    "name": c.name,
+                    "timing": c.timing,
+                    "timing_score": c.timing_score,
+                }
             )
-            raw = getattr(response, "parsed", None)
-            if raw is None:
-                text = getattr(response, "text", None) or ""
-                data = json.loads(text)
-            elif hasattr(raw, "model_dump"):
-                data = raw.model_dump()
-            else:
-                data = dict(raw)
+        return out
 
-            # Attach candidate metadata by path — reject anything not in the pool
-            by_path = {c.path: c for c in top}
-            allowed = set(by_path.keys())
-
-            def _enrich(picks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-                out = []
-                for p in picks or []:
-                    path = (p.get("path") or "").strip()
-                    if not path or path not in allowed:
-                        continue
-                    if not audio_file_exists(path):
-                        continue
-                    c = by_path[path]
-                    if is_same_track(
-                        source_path=str(source.get("path") or ""),
-                        source_artist=str(source.get("artist") or ""),
-                        source_title=str(source.get("title") or ""),
-                        source_name=str(source.get("name") or ""),
-                        path=path,
-                        artist=c.artist,
-                        title=c.title,
-                        name=c.name,
-                    ):
-                        continue
-                    out.append(
-                        {
-                            "path": path,
-                            "title": p.get("title") or c.title,
-                            "artist": p.get("artist") or c.artist,
-                            "reason": p.get("reason") or "",
-                            "confidence": float(p.get("confidence") or 0.7),
-                            "bpm": c.bpm,
-                            "key": c.key,
-                            "camelot": c.camelot,
-                            "genre": c.genre,
-                            "vibe": c.vibe,
-                            "library": c.library,
-                            "relative_path": c.relative_path,
-                            "cue_count": c.cue_count,
-                            "history_count": c.history_count,
-                            "name": c.name,
-                            "timing": c.timing,
-                            "timing_score": c.timing_score,
-                        }
-                    )
-                return out
-
-            raw_recs = {
-                "higher_energy": _enrich(data.get("higher_energy") or []),
-                "same_energy": _enrich(data.get("same_energy") or []),
-                "lower_energy": _enrich(data.get("lower_energy") or []),
-                "notes": data.get("notes") or "",
-                "model": model,
-                "candidate_count": len(top),
-            }
-            return sanitize_recommendation_buckets(
-                raw_recs, source=source, allowed_paths=allowed
-            )
-        except Exception as exc:  # noqa: BLE001
-            last_err = exc
-            continue
-    raise RuntimeError(f"Gemini ranking failed: {last_err}")
+    raw_recs = {
+        "higher_energy": _enrich(data.get("higher_energy") or []),
+        "same_energy": _enrich(data.get("same_energy") or []),
+        "lower_energy": _enrich(data.get("lower_energy") or []),
+        "notes": data.get("notes") or "",
+        "model": DEFAULT_MODEL,
+        "candidate_count": len(top),
+    }
+    return sanitize_recommendation_buckets(
+        raw_recs, source=source, allowed_paths=allowed
+    )
 
 
 def _fallback_buckets(

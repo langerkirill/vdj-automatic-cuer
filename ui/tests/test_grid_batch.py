@@ -275,6 +275,58 @@ class SyntheticAudioPlanTests(unittest.TestCase):
         self.assertFalse(plan.halve)
         self.assertAlmostEqual(plan.bpm_after, 120.0, places=3)
 
+    def test_half_beat_late_grid_snaps_to_the_one(self) -> None:
+        """On Se Fait Du Mal-class: stored 1 is ½ beat late; kick lives on the real 1."""
+        beat = 60.0 / 87.0
+        onsets, hop = _synthetic_onsets(period=4 * beat, phase=0.0)
+        late = 0.5 * beat
+        plan = gb.plan_grid_bpm_fix(
+            bpm=87.0,
+            anchor=late,
+            onsets=onsets,
+            hop_seconds=hop,
+            name="half-late",
+            skeptical=True,
+        )
+        self.assertFalse(plan.halve)
+        self.assertEqual(plan.action, "align")
+        self.assertTrue(
+            gb.anchors_share_downbeat(plan.anchor_after, 0.0, 87.0, beat_tol=0.2)
+        )
+        self.assertFalse(
+            gb.anchors_share_downbeat(plan.anchor_after, late, 87.0, beat_tol=0.2)
+        )
+
+    def test_skeptical_does_not_flip_a_trusted_one(self) -> None:
+        """Hand-set 1 must survive Auto-align even if +2 is a bit louder."""
+        beat = 60.0 / 80.0
+        onsets, hop = _synthetic_onsets(period=4 * beat, phase=0.2, extra_offbeat=0.8)
+        plan = gb.plan_grid_bpm_fix(
+            bpm=80.0,
+            anchor=0.2,
+            onsets=onsets,
+            hop_seconds=hop,
+            name="trusted-1",
+            skeptical=True,
+        )
+        self.assertEqual(plan.action, "skip")
+        self.assertTrue(gb.anchors_share_downbeat(plan.anchor_after, 0.2, 80.0))
+        self.assertIn("keep existing 1", plan.reason)
+
+    def test_skeptical_keeps_a_true_one(self) -> None:
+        beat = 60.0 / 90.0
+        onsets, hop = _synthetic_onsets(period=4 * beat, phase=0.2)
+        plan = gb.plan_grid_bpm_fix(
+            bpm=90.0,
+            anchor=0.2,
+            onsets=onsets,
+            hop_seconds=hop,
+            name="true-1",
+            skeptical=True,
+        )
+        self.assertTrue(gb.anchors_share_downbeat(plan.anchor_after, 0.2, 90.0))
+        self.assertIn(plan.action, {"skip", "align"})
+
     def test_one_beat_late_grid_snaps_to_the_one(self) -> None:
         # Only the musical 1s have energy. VDJ put the 1 one beat late (70 BPM).
         beat = 60.0 / 70.0
@@ -285,7 +337,7 @@ class SyntheticAudioPlanTests(unittest.TestCase):
         )
         self.assertFalse(plan.halve)
         self.assertTrue(gb.anchors_share_downbeat(plan.anchor_after, 0.0, 70.0))
-        self.assertEqual(plan.shift_beats % 4, 3)
+        self.assertEqual(plan.action, "align")
 
     def test_walks_back_to_an_early_bar_with_the_same_one(self) -> None:
         beat = 60.0 / 60.0
@@ -304,6 +356,92 @@ class SyntheticAudioPlanTests(unittest.TestCase):
         )
         self.assertTrue(plan.halve)
         self.assertAlmostEqual(plan.bpm_after, 77.0, places=3)
+
+
+class AttemptGridAlignTests(unittest.TestCase):
+    def test_attempt_proposes_late_one_without_writing(self) -> None:
+        beat = 60.0 / 70.0
+        onsets, hop = _synthetic_onsets(period=4 * beat, phase=0.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "late.flac"
+            audio.write_bytes(b"x")
+            cues = type(
+                "Cues",
+                (),
+                {
+                    "in_database": True,
+                    "bpm": 70.0,
+                    "scan_phase": beat,
+                    "beatgrid_pos": beat,
+                },
+            )()
+            with patch.object(gb, "ADD_CUES", root), patch.object(
+                gb, "LIBRARIES", {}
+            ), patch.object(gb, "summarize_cues", return_value=cues), patch.object(
+                gb, "extract_onsets", return_value=(onsets, hop)
+            ), patch.object(
+                gb, "extract_kick_onsets", return_value=None
+            ), patch.object(
+                gb, "set_beatgrid_anchor"
+            ) as mock_grid:
+                result = gb.attempt_grid_align(audio, apply=False)
+            mock_grid.assert_not_called()
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["applied"])
+            self.assertEqual(result["plan"]["action"], "align")
+            self.assertTrue(
+                gb.anchors_share_downbeat(result["plan"]["anchor_after"], 0.0, 70.0)
+            )
+
+    def test_attempt_skip_when_not_in_database(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "missing.flac"
+            audio.write_bytes(b"x")
+            cues = type("Cues", (), {"in_database": False, "bpm": None, "scan_phase": None, "beatgrid_pos": None})()
+            with patch.object(gb, "ADD_CUES", root), patch.object(
+                gb, "LIBRARIES", {}
+            ), patch.object(gb, "summarize_cues", return_value=cues), patch.object(
+                gb, "set_beatgrid_anchor"
+            ) as mock_grid:
+                result = gb.attempt_grid_align(audio, apply=True)
+            mock_grid.assert_not_called()
+            self.assertEqual(result["plan"]["action"], "skip")
+            self.assertFalse(result["applied"])
+
+
+class OnSeFaitDuMalAlignTests(unittest.TestCase):
+    """Real Add Cues copy: stored 1 is ½ beat late vs kick."""
+
+    AUDIO = Path(
+        "/Users/kirilllanger/Music/DJ/Music/Cues/Add Cues/Pajamathon/"
+        "Thebest Kingmalandro - On Se Fait Du Mal (Blvck Skyle Remix).wav"
+    )
+
+    def test_skeptical_align_moves_half_beat_earlier(self) -> None:
+        if not self.AUDIO.is_file():
+            self.skipTest("On Se Fait Du Mal not on this machine")
+        onsets, hop = gb.extract_onsets(self.AUDIO)
+        kick = gb.extract_kick_onsets(self.AUDIO)
+        plan = gb.plan_grid_bpm_fix(
+            self.AUDIO,
+            bpm=87.0,
+            anchor=0.687609,
+            onsets=onsets,
+            hop_seconds=hop,
+            name=self.AUDIO.name,
+            skeptical=True,
+        )
+        self.assertEqual(plan.action, "align")
+        self.assertTrue(
+            gb.anchors_share_downbeat(plan.anchor_after, 0.34424, 87.0, beat_tol=0.25),
+            msg=f"proposed {plan.anchor_after:.3f}s reason={plan.reason}",
+        )
+        self.assertFalse(
+            gb.anchors_share_downbeat(plan.anchor_after, 0.687609, 87.0, beat_tol=0.2)
+        )
+        _ = kick  # kick is used inside plan via audio_path
 
 
 class ApplyPlanTests(unittest.TestCase):

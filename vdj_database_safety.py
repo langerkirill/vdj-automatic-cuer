@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -218,12 +219,20 @@ def find_best_database_recovery_source(
     return ranked[0][4]
 
 
+_LAST_AUTO_GOLDEN_MONO: float = time.monotonic()
+_AUTO_GOLDEN_MIN_INTERVAL_SEC = 600.0
+
+
 def snapshot_last_good_database(database_path: os.PathLike | str) -> Optional[Path]:
     """
     After a successful write, keep a rolling golden so wipe recovery needs no user.
 
-    Safe to call often; rotates old auto goldens.
+    Safe to call often; copies are throttled so color/delete clicks stay fast.
     """
+    global _LAST_AUTO_GOLDEN_MONO
+    now = time.monotonic()
+    if now - _LAST_AUTO_GOLDEN_MONO < _AUTO_GOLDEN_MIN_INTERVAL_SEC:
+        return None
     path = Path(database_path)
     if not path.is_file():
         return None
@@ -269,6 +278,7 @@ def snapshot_last_good_database(database_path: os.PathLike | str) -> Optional[Pa
             old.unlink()
         except OSError:
             pass
+    _LAST_AUTO_GOLDEN_MONO = now
     return dest
 
 
@@ -354,6 +364,22 @@ def recover_vdj_database_if_wiped(
 def ensure_healthy_vdj_database(database_path: os.PathLike | str) -> Dict[str, Any]:
     """Health check + auto-heal entry point used by Music Sorter and writers."""
     path = Path(database_path)
+    # Surgical writes already know the live file is large — skip a 37MB reread.
+    try:
+        size = path.stat().st_size if path.is_file() else 0
+    except OSError:
+        size = 0
+    if size >= WIPE_SIZE_BYTES:
+        return {
+            "ok": True,
+            "recovered": False,
+            "fingerprint": {
+                "exists": True,
+                "size_bytes": size,
+                "healthy": True,
+                "reason": "ok_size",
+            },
+        }
     fp = quick_database_fingerprint(path)
     if fp["healthy"]:
         return {"ok": True, "recovered": False, "fingerprint": fp}
@@ -1002,8 +1028,6 @@ def rewrite_song_xml_in_database(
 
     prefix = content[:start]
     suffix = content[end:]
-    del content
-    gc.collect()
 
     return atomic_replace_database_parts(
         path,
@@ -1076,10 +1100,6 @@ def atomic_replace_database_parts(
                 handle.write(part.encode("utf-8"))
             handle.flush()
             os.fsync(handle.fileno())
-
-        # Free large string parts before re-reading the candidate for stats.
-        del parts
-        gc.collect()
 
         # Hard reject LF-only rewrites of a CRLF VirtualDJ database.
         candidate_raw = temp_path.read_bytes()

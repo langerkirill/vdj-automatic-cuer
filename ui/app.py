@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import mimetypes
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -21,23 +22,33 @@ from sorter.config import (
     LIBRARIES,
     MIXES_ROOT,
     READY_FOR_SORT,
+    SETS_ROOT,
     VDJ_DATABASE,
 )
 from sorter.library import (
-    build_audio_basename_index,
+    add_cues_section,
+    cached_placement_indexes,
     create_folder,
     find_cues_sorted_matches,
     find_library_matches,
+    find_set_matches,
+    invalidate_placement_indexes,
     add_cues_tracks_by_crate,
     list_add_cues_tracks,
+    list_pajamathon_set_tracks,
+    merge_add_cues_and_pajamathon_set,
     list_libraries,
     list_library_tree,
     list_ready_tracks,
 )
+from sorter.pajamathon_set_sync import sync_pajamathon_set_deletes
 from sorter.recommend import get_recommender
 from sorter.autocue_path import ensure_autocue_on_path
 from sorter.relocate import (
     assess_cue_readiness,
+    add_track_to_event_set,
+    copy_cues_to_placement,
+    copy_cues_to_placements,
     delete_add_cues_track,
     delete_library_placement,
     demote_ready_to_add_cues,
@@ -76,17 +87,22 @@ from sorter.autocue_retry import (
     list_batches,
     list_jobs,
     max_concurrent_jobs,
+    retry_history_for_path,
     start_batch_retry_cues,
     start_retry_cues,
+    summarize_retry_history,
 )
 from sorter.bpm_edit import halve_track_bpm
 from sorter.cue_edit import (
+    add_cue_point,
+    add_loop_point,
     delete_cue_point,
     scale_loop_point,
     set_poi_color,
     set_poi_position,
 )
 from sorter.grid_batch import (
+    attempt_grid_align,
     get_grid_fix_batch,
     list_grid_fix_batches,
     start_batch_grid_fix,
@@ -195,6 +211,38 @@ class DeletePlacementRequest(BaseModel):
     allow_vdj_running: bool = False
 
 
+class CopyCuesRequest(BaseModel):
+    """Copy Ready/Add Cues markers onto an existing library or Sets copy."""
+
+    source: str
+    dest: str
+    overwrite: bool = False
+    dry_run: bool = False
+    allow_vdj_running: bool = False
+    create_backup: bool = True
+
+
+class CopyCuesAllRequest(BaseModel):
+    """Copy Ready/Add Cues markers onto every listed library/archive/Sets copy."""
+
+    source: str
+    dests: list[str]
+    overwrite: bool = False
+    dry_run: bool = False
+    allow_vdj_running: bool = False
+    create_backup: bool = True
+
+
+class AddToSetRequest(BaseModel):
+    """Copy a Ready/Add Cues track into Sets/Pajamathon + clone VDJ cues."""
+
+    path: str
+    event_name: str = ""
+    dry_run: bool = False
+    allow_vdj_running: bool = False
+    create_backup: bool = True
+
+
 class DemoteReadyRequest(BaseModel):
     """Kick a Ready for Sort track back to Add Cues."""
 
@@ -224,6 +272,7 @@ class BatchRetryCuesRequest(BaseModel):
     require_grid: bool = True
     deep_grid_check: bool = False
     write_scope: str = "all"
+    model_name: Optional[str] = None
 
 
 class UndoRequest(BaseModel):
@@ -289,6 +338,29 @@ class MovePoiRequest(BaseModel):
     allow_vdj_running: bool = False
 
 
+class AddCueRequest(BaseModel):
+    """Place a new cue at a time (seconds). Snapping is done by the client."""
+
+    path: str
+    pos: float
+    name: Optional[str] = None
+    color: str = "green"
+    dry_run: bool = False
+    allow_vdj_running: bool = False
+
+
+class AddLoopRequest(BaseModel):
+    """Place a new loop at a time (seconds). Snapping is done by the client."""
+
+    path: str
+    pos: float
+    name: Optional[str] = None
+    color: str = "green"
+    beats: float = 8.0
+    dry_run: bool = False
+    allow_vdj_running: bool = False
+
+
 class RenamePoiRequest(BaseModel):
     """Rename a cue or loop Name attribute in VirtualDJ."""
 
@@ -338,6 +410,15 @@ class GridFixBatchRequest(BaseModel):
     allow_vdj_running: bool = False
 
 
+class GridAlignAttemptRequest(BaseModel):
+    """Run automatic 1-finding on one track (preview or write)."""
+
+    path: str
+    apply: bool = False
+    dry_run: bool = False
+    allow_vdj_running: bool = False
+
+
 def _placement_with_cue_status(
     hit: dict[str, Any],
     cue_index: Optional[dict[str, Any]] = None,
@@ -368,7 +449,9 @@ def _enrich_track(
     review: bool = False,
     include_placements: bool = True,
     placement_index: Optional[dict[str, list[dict[str, str]]]] = None,
+    set_index: Optional[dict[str, list[dict[str, str]]]] = None,
     cue_index: Optional[dict[str, Any]] = None,
+    retry_history: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     cues = (cue_index or {}).get(track_dict["path"]) if cue_index is not None else None
     if cues is None:
@@ -394,6 +477,10 @@ def _enrich_track(
                 track_dict["name"], index=placement_index
             )
         ]
+        set_hits = [
+            _placement_with_cue_status(h, cue_index)
+            for h in find_set_matches(track_dict["name"], index=set_index)
+        ]
         # Exclude the track's own Add Cues / Ready path if it ever collides.
         src = str(Path(track_dict["path"]).expanduser().resolve())
         library_hits = [
@@ -406,14 +493,22 @@ def _enrich_track(
             for h in cues_sorted
             if str(Path(h["path"]).expanduser().resolve()) != src
         ]
+        set_hits = [
+            h
+            for h in set_hits
+            if str(Path(h["path"]).expanduser().resolve()) != src
+        ]
         track_dict["placements"] = {
             "in_cues_sorted": len(cues_sorted) > 0,
             "cues_sorted": cues_sorted,
             "in_library": len(library_hits) > 0,
             "library": library_hits,
+            "in_sets": len(set_hits) > 0,
+            "sets": set_hits,
             "already_sorted": len(cues_sorted) > 0 or len(library_hits) > 0,
             "any_library_cued": any(h.get("is_cued") for h in library_hits),
             "any_archive_cued": any(h.get("is_cued") for h in cues_sorted),
+            "any_set_cued": any(h.get("is_cued") for h in set_hits),
         }
     else:
         track_dict["placements"] = {
@@ -421,20 +516,32 @@ def _enrich_track(
             "cues_sorted": [],
             "in_library": False,
             "library": [],
+            "in_sets": False,
+            "sets": [],
             "already_sorted": False,
             "any_library_cued": False,
             "any_archive_cued": False,
+            "any_set_cued": False,
         }
     if review:
         track_dict["readiness"] = assess_cue_readiness(cues)
         # Fast structural grid preflight for list badges (no ffmpeg).
         track_dict["grid"] = preflight_from_cues(cues, track_dict["path"])
+        hist = retry_history_for_path(track_dict["path"], retry_history or {})
+        track_dict["retry_history"] = hist or {
+            "kind": None,
+            "tried_cues": False,
+            "tried_loops": False,
+            "tried_both": False,
+            "scopes": [],
+            "last_ts": None,
+        }
     return track_dict
 
 
 def _assert_under_cues(path: Path) -> Path:
     audio = path.expanduser().resolve()
-    allowed_roots = [CUES_ROOT.resolve(), MIXES_ROOT.resolve()]
+    allowed_roots = [CUES_ROOT.resolve(), MIXES_ROOT.resolve(), SETS_ROOT.resolve()]
     for root in allowed_roots:
         try:
             audio.relative_to(root)
@@ -443,36 +550,20 @@ def _assert_under_cues(path: Path) -> Path:
             continue
     raise HTTPException(
         status_code=403,
-        detail="Audio must be under the Cues or Mixes folder",
+        detail="Audio must be under the Cues, Sets, or Mixes folder",
     )
+
+
+def _cached_placement_indexes() -> tuple[
+    dict[str, list[dict[str, str]]],
+    dict[str, list[dict[str, str]]],
+]:
+    return cached_placement_indexes()
 
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    stage_counts = {}
-    for key, path in CUE_STAGES.items():
-        if not path.is_dir():
-            stage_counts[key] = 0
-            continue
-        if key == "add_cues":
-            stage_counts[key] = len(list_add_cues_tracks(path))
-        else:
-            stage_counts[key] = len(list_ready_tracks(path)) if key == "ready_for_sort" else sum(
-                1
-                for p in path.iterdir()
-                if p.is_file()
-                and p.suffix.lower()
-                in {".mp3", ".flac", ".m4a", ".wav", ".aiff", ".aif", ".ogg", ".opus"}
-            )
-
-    db_health = ensure_healthy_vdj_database(VDJ_DATABASE)
-    if db_health.get("ok") and not db_health.get("recovered"):
-        try:
-            snapshot_last_good_database(VDJ_DATABASE)
-        except Exception:
-            pass
-    fp = db_health.get("fingerprint") or quick_database_fingerprint(VDJ_DATABASE)
-
+    """Must stay cheap — UI boot waits on this before loading tracks."""
     return {
         "ok": True,
         "ready_for_sort": str(READY_FOR_SORT),
@@ -482,13 +573,8 @@ def health() -> dict[str, Any]:
         "vdj_database": str(VDJ_DATABASE),
         "vdj_database_exists": VDJ_DATABASE.is_file(),
         "virtualdj_running": is_virtualdj_running(),
-        "vdj_database_healthy": bool(fp.get("healthy")),
-        "vdj_database_songs": fp.get("song_count"),
-        "vdj_database_size": fp.get("size_bytes"),
-        "vdj_database_recovered": bool(db_health.get("recovered")),
-        "vdj_database_reason": fp.get("reason"),
         "libraries": list_libraries(),
-        "stage_counts": stage_counts,
+        "stage_counts": {},
     }
 
 
@@ -499,26 +585,18 @@ def get_tracks(mode: str = Query("sort")) -> dict[str, Any]:
     mode=add_cues → Add Cues recursive review queue
     """
     if mode == "add_cues":
-        raw = list_add_cues_tracks()
-        # One-pass library/archive index so Add Cues can flag tracks already
-        # sorted (and whether those copies already have cues).
-        placement_index = build_audio_basename_index(
-            [*LIBRARIES.values(), CUES_SORTED]
-        )
-        cue_paths: list[str] = [t.path for t in raw]
-        for t in raw:
-            for hit in find_cues_sorted_matches(t.name, index=placement_index):
-                cue_paths.append(hit["path"])
-            for hit in find_library_matches(t.name, index=placement_index):
-                cue_paths.append(hit["path"])
-        cue_index = summarize_cues_for_paths(cue_paths)
+        raw = merge_add_cues_and_pajamathon_set(list_add_cues_tracks())
+        # List load must stay fast. Skip House/Zouk rglob here — placements
+        # load when a track is selected via /api/track-placements.
+        cue_index = summarize_cues_for_paths([t.path for t in raw])
+        retry_hist = summarize_retry_history()
         tracks = [
             _enrich_track(
                 t.to_dict(),
                 review=True,
-                include_placements=True,
-                placement_index=placement_index,
+                include_placements=False,
                 cue_index=cue_index,
+                retry_history=retry_hist,
             )
             for t in raw
         ]
@@ -537,6 +615,15 @@ def get_tracks(mode: str = Query("sort")) -> dict[str, Any]:
             for t in paj_tracks
             if t.get("readiness", {}).get("status") in {"not_cued", "missing"}
         )
+        retried_cues_n = sum(
+            1 for t in tracks if (t.get("retry_history") or {}).get("kind") == "cues"
+        )
+        retried_loops_n = sum(
+            1 for t in tracks if (t.get("retry_history") or {}).get("kind") == "loops"
+        )
+        retried_both_n = sum(
+            1 for t in tracks if (t.get("retry_history") or {}).get("kind") == "both"
+        )
         return {
             "mode": "add_cues",
             "source": str(ADD_CUES),
@@ -551,10 +638,22 @@ def get_tracks(mode: str = Query("sort")) -> dict[str, Any]:
                 "pajamathon": len(paj_tracks),
                 "pajamathon_not_cued": paj_not_cued,
                 "inbox": len(tracks) - len(paj_tracks),
+                "retried_cues": retried_cues_n,
+                "retried_loops": retried_loops_n,
+                "retried_both": retried_both_n,
             },
         }
 
-    tracks = [_enrich_track(t.to_dict()) for t in list_ready_tracks()]
+    raw_ready = list_ready_tracks()
+    cue_index = summarize_cues_for_paths([t.path for t in raw_ready])
+    tracks = [
+        _enrich_track(
+            t.to_dict(),
+            include_placements=False,
+            cue_index=cue_index,
+        )
+        for t in raw_ready
+    ]
     cued = sum(1 for t in tracks if t["is_cued"])
     return {
         "mode": "sort",
@@ -566,6 +665,31 @@ def get_tracks(mode: str = Query("sort")) -> dict[str, Any]:
             "uncued": len(tracks) - cued,
         },
     }
+
+
+@app.get("/api/track-placements")
+def get_track_placements(path: str = Query(...)) -> dict[str, Any]:
+    """Lazy House/Zouk/Sets placement lookup for the selected track."""
+    audio = Path(path).expanduser()
+    if not audio.is_file():
+        raise HTTPException(status_code=404, detail="Audio not found")
+    placement_index, set_index = _cached_placement_indexes()
+    cue_paths = [str(audio)]
+    for hit in find_cues_sorted_matches(audio.name, index=placement_index):
+        cue_paths.append(hit["path"])
+    for hit in find_library_matches(audio.name, index=placement_index):
+        cue_paths.append(hit["path"])
+    for hit in find_set_matches(audio.name, index=set_index):
+        cue_paths.append(hit["path"])
+    cue_index = summarize_cues_for_paths(cue_paths)
+    enriched = _enrich_track(
+        {"path": str(audio), "name": audio.name},
+        include_placements=True,
+        placement_index=placement_index,
+        set_index=set_index,
+        cue_index=cue_index,
+    )
+    return {"ok": True, "path": str(audio), "placements": enriched.get("placements")}
 
 
 @app.get("/api/libraries")
@@ -732,6 +856,48 @@ def get_grid_fix_batch_route(batch_id: str) -> dict[str, Any]:
 @app.get("/api/grid-fix")
 def get_grid_fix_jobs() -> dict[str, Any]:
     return {"ok": True, "batches": list_grid_fix_batches()}
+
+
+@app.post("/api/grid-align/attempt")
+def post_grid_align_attempt(body: GridAlignAttemptRequest) -> dict[str, Any]:
+    """Stem/onset automatic 1-find for the current track."""
+    try:
+        result = attempt_grid_align(
+            body.path,
+            apply=body.apply,
+            dry_run=body.dry_run,
+            allow_vdj_running=body.allow_vdj_running,
+        )
+        if body.apply and result.get("applied") and not body.dry_run:
+            plan = result.get("plan") or {}
+            append_action(
+                "grid_align_attempt",
+                source_path=body.path,
+                name=Path(body.path).name,
+                details={
+                    "action": plan.get("action"),
+                    "anchor_before": plan.get("anchor_before"),
+                    "anchor_after": plan.get("anchor_after"),
+                    "halve": plan.get("halve"),
+                    "reason": plan.get("reason"),
+                },
+            )
+        return {"ok": True, "result": result}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        append_action(
+            "grid_align_attempt",
+            source_path=body.path,
+            name=Path(body.path).name,
+            success=False,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/set-beatgrid")
@@ -943,6 +1109,102 @@ def post_move_poi(body: MovePoiRequest) -> dict[str, Any]:
                 "pos": body.pos,
                 "new_pos": body.new_pos,
             },
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/add-cue")
+def post_add_cue(body: AddCueRequest) -> dict[str, Any]:
+    """Insert one cue at pos (seconds). Does not strip existing markers."""
+    try:
+        result = add_cue_point(
+            body.path,
+            pos=float(body.pos),
+            name=body.name,
+            color=body.color or "green",
+            dry_run=body.dry_run,
+            allow_vdj_running=body.allow_vdj_running,
+        )
+        if not body.dry_run:
+            ch = result.get("change") or {}
+            append_action(
+                "add_cue",
+                source_path=body.path,
+                name=Path(body.path).name,
+                details={
+                    "pos": ch.get("pos", body.pos),
+                    "marker_name": ch.get("name"),
+                    "num": ch.get("num"),
+                    "color_name": ch.get("color_name"),
+                    "database_backup": result.get("database_backup"),
+                },
+            )
+        return {"ok": True, "result": result}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        append_action(
+            "add_cue",
+            source_path=body.path,
+            name=Path(body.path).name,
+            success=False,
+            error=str(exc),
+            details={"pos": body.pos, "name": body.name},
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/add-loop")
+def post_add_loop(body: AddLoopRequest) -> dict[str, Any]:
+    """Insert one loop at pos (seconds). Does not strip existing markers."""
+    try:
+        result = add_loop_point(
+            body.path,
+            pos=float(body.pos),
+            name=body.name,
+            color=body.color or "green",
+            beats=float(body.beats or 8.0),
+            dry_run=body.dry_run,
+            allow_vdj_running=body.allow_vdj_running,
+        )
+        if not body.dry_run:
+            ch = result.get("change") or {}
+            append_action(
+                "add_loop",
+                source_path=body.path,
+                name=Path(body.path).name,
+                details={
+                    "pos": ch.get("pos", body.pos),
+                    "marker_name": ch.get("name"),
+                    "slot": ch.get("slot"),
+                    "beats": ch.get("beats"),
+                    "color_name": ch.get("color_name"),
+                    "database_backup": result.get("database_backup"),
+                },
+            )
+        return {"ok": True, "result": result}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        append_action(
+            "add_loop",
+            source_path=body.path,
+            name=Path(body.path).name,
+            success=False,
+            error=str(exc),
+            details={"pos": body.pos, "name": body.name},
         )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1207,6 +1469,7 @@ def post_sort(body: SortRequest) -> dict[str, Any]:
         )
         payload = result.to_dict()
         if not body.dry_run:
+            invalidate_placement_indexes()
             append_action(
                 "sort",
                 source_path=body.path,
@@ -1226,6 +1489,8 @@ def post_sort(body: SortRequest) -> dict[str, Any]:
                     "cues_sorted_path": payload.get("cues_sorted_path"),
                     "cues_sorted_copied": payload.get("cues_sorted_copied"),
                     "cues_sorted_db_cloned": payload.get("cues_sorted_db_cloned"),
+                    "sets_cues_copied": payload.get("sets_cues_copied"),
+                    "sets_paths": payload.get("sets_paths"),
                     "database_updated": payload.get("database_updated"),
                     "stems_moved": payload.get("stems_moved"),
                 },
@@ -1337,6 +1602,17 @@ def post_delete_add_cues(body: DeleteAddCuesRequest) -> dict[str, Any]:
             to_trash=body.to_trash,
             allow_vdj_running=body.allow_vdj_running,
         )
+        source = Path(body.path)
+        try:
+            relative = source.expanduser().resolve().relative_to(ADD_CUES.resolve())
+        except ValueError:
+            relative = Path(source.name)
+        if add_cues_section(relative_path=str(relative)) == "pajamathon":
+            result["set_sync"] = sync_pajamathon_set_deletes(
+                extra_deleted=[source.name],
+                dry_run=body.dry_run,
+                to_trash=body.to_trash,
+            )
         if not body.dry_run:
             append_action(
                 "delete_add_cues",
@@ -1349,6 +1625,7 @@ def post_delete_add_cues(body: DeleteAddCuesRequest) -> dict[str, Any]:
                     "had_cues": result.get("had_cues"),
                     "had_loops": result.get("had_loops"),
                     "database_backup": result.get("database_backup"),
+                    "set_sync": result.get("set_sync"),
                 },
             )
         return {"ok": True, "result": result}
@@ -1383,6 +1660,7 @@ def post_delete_placement(body: DeletePlacementRequest) -> dict[str, Any]:
             allow_vdj_running=body.allow_vdj_running,
         )
         if not body.dry_run:
+            invalidate_placement_indexes()
             append_action(
                 "delete_placement",
                 source_path=body.path,
@@ -1408,6 +1686,140 @@ def post_delete_placement(body: DeletePlacementRequest) -> dict[str, Any]:
     except Exception as exc:
         append_action(
             "delete_placement",
+            source_path=body.path,
+            name=Path(body.path).name,
+            success=False,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/copy-cues")
+def post_copy_cues(body: CopyCuesRequest) -> dict[str, Any]:
+    """Copy Ready/Add Cues markers onto a House/Zouk/Cues Sorted/Sets copy."""
+    try:
+        result = copy_cues_to_placement(
+            body.source,
+            body.dest,
+            overwrite=body.overwrite,
+            dry_run=body.dry_run,
+            allow_vdj_running=body.allow_vdj_running,
+            create_backup=body.create_backup,
+        )
+        if not body.dry_run:
+            append_action(
+                "copy_cues",
+                source_path=body.source,
+                dest_path=body.dest,
+                name=Path(body.dest).name,
+                details={
+                    "mode": result.get("mode"),
+                    "root_name": result.get("root_name"),
+                    "relative_path": result.get("relative_path"),
+                    "copied_cues": result.get("copied_cues"),
+                    "copied_loops": result.get("copied_loops"),
+                    "overwrote": result.get("overwrote"),
+                },
+            )
+        return {"ok": True, "result": result}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        append_action(
+            "copy_cues",
+            source_path=body.source,
+            dest_path=body.dest,
+            name=Path(body.dest).name,
+            success=False,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/copy-cues-all")
+def post_copy_cues_all(body: CopyCuesAllRequest) -> dict[str, Any]:
+    """Copy Ready/Add Cues markers onto every listed existing copy."""
+    try:
+        result = copy_cues_to_placements(
+            body.source,
+            body.dests,
+            overwrite=body.overwrite,
+            dry_run=body.dry_run,
+            allow_vdj_running=body.allow_vdj_running,
+            create_backup=body.create_backup,
+        )
+        if not body.dry_run:
+            append_action(
+                "copy_cues_all",
+                source_path=body.source,
+                name=Path(body.source).name,
+                details={
+                    "copied": result.get("copied"),
+                    "skipped": result.get("skipped"),
+                    "failed": result.get("failed"),
+                    "overwrite": result.get("overwrite"),
+                    "dests": [item.get("dest_path") for item in result.get("results") or []],
+                },
+            )
+        return {"ok": True, "result": result}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        append_action(
+            "copy_cues_all",
+            source_path=body.source,
+            name=Path(body.source).name,
+            success=False,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/add-to-set")
+def post_add_to_set(body: AddToSetRequest) -> dict[str, Any]:
+    """Copy this queue track into Sets/Pajamathon and clone its VirtualDJ cues."""
+    try:
+        result = add_track_to_event_set(
+            body.path,
+            event_name=body.event_name,
+            dry_run=body.dry_run,
+            allow_vdj_running=body.allow_vdj_running,
+            create_backup=body.create_backup,
+        )
+        if not body.dry_run and not result.get("already_exists"):
+            invalidate_placement_indexes()
+            append_action(
+                "add_to_set",
+                source_path=body.path,
+                dest_path=result.get("dest_path"),
+                name=Path(body.path).name,
+                details={
+                    "event": result.get("event"),
+                    "relative_path": result.get("relative_path"),
+                    "copied_cues": result.get("copied_cues"),
+                    "copied_loops": result.get("copied_loops"),
+                },
+            )
+        return {"ok": True, "result": result}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        append_action(
+            "add_to_set",
             source_path=body.path,
             name=Path(body.path).name,
             success=False,
@@ -1515,6 +1927,7 @@ def post_retry_cues_batch(body: BatchRetryCuesRequest) -> dict[str, Any]:
             require_grid=body.require_grid,
             deep_grid_check=body.deep_grid_check,
             write_scope=body.write_scope,
+            model_name=body.model_name,
         )
         append_action(
             "retry_cues_batch",

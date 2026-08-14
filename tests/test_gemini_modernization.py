@@ -7,8 +7,8 @@ import automatic_music_cuer_gemini as cuer_module
 
 
 class GeminiModernizationTests(unittest.TestCase):
-    def test_default_model_is_gemini_2_5_pro(self):
-        self.assertEqual(cuer_module.DEFAULT_GEMINI_MODEL, "gemini-2.5-pro")
+    def test_default_model_is_gemini_3_6_flash(self):
+        self.assertEqual(cuer_module.DEFAULT_GEMINI_MODEL, "gemini-3.6-flash")
 
     def test_resolve_gemini_model_prefers_autocue_env(self):
         from vdj_cuer.common import resolve_gemini_model
@@ -72,7 +72,7 @@ class GeminiModernizationTests(unittest.TestCase):
 
         self.assertEqual(result, {"measure_changes": [], "loop_segments": []})
         call_kwargs = cuer.client.models.generate_content.call_args.kwargs
-        self.assertEqual(call_kwargs["model"], "gemini-2.5-pro")
+        self.assertEqual(call_kwargs["model"], "gemini-3.6-flash")
         self.assertEqual(call_kwargs["config"].response_mime_type, "application/json")
         self.assertIsNone(call_kwargs["config"].thinking_config)
         self.assertIn(
@@ -169,8 +169,8 @@ class GeminiModernizationTests(unittest.TestCase):
             for call in cuer.client.models.generate_content.call_args_list
         ]
         self.assertEqual(models[0], "gemini-3.1-pro-preview")
-        self.assertEqual(models[1], "gemini-2.5-pro")
-        self.assertEqual(cuer.model_name, "gemini-2.5-pro")
+        self.assertEqual(models[1], "gemini-3.6-flash")
+        self.assertEqual(cuer.model_name, "gemini-3.6-flash")
 
     def test_upload_uses_ascii_temp_path_for_unicode_filename(self):
         with patch("builtins.print"):
@@ -194,6 +194,114 @@ class GeminiModernizationTests(unittest.TestCase):
         os.path.basename(uploaded_path).encode("ascii")
         self.assertTrue(uploaded_path.endswith(".flac"))
 
+    def test_empty_response_is_retryable(self):
+        self.assertTrue(
+            cuer_module.AutomaticMusicCuer._is_retryable_error(
+                ValueError("Empty response from Gemini")
+            )
+        )
+        self.assertTrue(
+            cuer_module.AutomaticMusicCuer._is_empty_response_error(
+                ValueError("Empty response from Gemini (finish_reason=MAX_TOKENS)")
+            )
+        )
+
+    def test_empty_response_retries_then_switches_model(self):
+        with patch("builtins.print"):
+            cuer = cuer_module.AutomaticMusicCuer(
+                gemini_api_key="test-key",
+                vdj_database_path="/tmp/database.xml",
+                model_name="gemini-3.5-flash-lite",
+            )
+        empty = Mock()
+        empty.text = ""
+        ok = Mock()
+        ok.text = '{"measure_changes": [], "loop_segments": []}'
+        cuer.client = Mock()
+        cuer.client.models.generate_content.side_effect = [empty, empty, ok]
+
+        with patch("builtins.print"), patch("time.sleep"):
+            result = cuer._generate_json_content(
+                contents=["prompt"],
+                schema=cuer_module.MusicAnalysis,
+                timeout_seconds=10,
+            )
+
+        self.assertEqual(result, {"measure_changes": [], "loop_segments": []})
+        models = [
+            call.kwargs["model"]
+            for call in cuer.client.models.generate_content.call_args_list
+        ]
+        self.assertEqual(models[0], "gemini-3.5-flash-lite")
+        self.assertEqual(models[1], "gemini-3.5-flash-lite")
+        self.assertEqual(models[2], "gemini-3.6-flash")
+        self.assertEqual(cuer.model_name, "gemini-3.6-flash")
+
+    def test_generate_music_analysis_uses_stem_plan_when_gemini_empty(self):
+        with patch("builtins.print"):
+            cuer = cuer_module.AutomaticMusicCuer(
+                gemini_api_key="test-key",
+                vdj_database_path="/tmp/database.xml",
+            )
+        cuer._generate_json_content = Mock(
+            side_effect=ValueError("Empty response from Gemini")
+        )
+        stem_cues = [
+            {
+                "timestamp": 8.0,
+                "cue_name": "Intro",
+                "elements": ["drums"],
+                "color": "purple",
+                "role": "section",
+                "confidence": 0.8,
+            }
+        ]
+
+        def _finalize(data, *args, **kwargs):
+            return {
+                **data,
+                "measure_changes": stem_cues,
+                "loop_segments": [],
+            }
+
+        cuer._finalize_music_analysis = Mock(side_effect=_finalize)
+
+        with patch("builtins.print"):
+            result = cuer._generate_music_analysis(
+                "prompt",
+                object(),
+                [],
+                [],
+                120.0,
+                "/tmp/song.mp3",
+            )
+
+        self.assertEqual(result["measure_changes"], stem_cues)
+        self.assertTrue(result.get("gemini_naming_skipped"))
+        cuer._finalize_music_analysis.assert_called_once()
+
+    def test_generate_music_analysis_reraises_when_stem_plan_also_empty(self):
+        with patch("builtins.print"):
+            cuer = cuer_module.AutomaticMusicCuer(
+                gemini_api_key="test-key",
+                vdj_database_path="/tmp/database.xml",
+            )
+        empty = ValueError("Empty response from Gemini")
+        cuer._generate_json_content = Mock(side_effect=empty)
+        cuer._finalize_music_analysis = Mock(side_effect=lambda data, *a, **k: data)
+
+        with patch("builtins.print"), self.assertRaises(ValueError) as raised:
+            cuer._generate_music_analysis(
+                "prompt",
+                object(),
+                [],
+                [],
+                120.0,
+                "/tmp/song.mp3",
+            )
+        self.assertIn("Empty response", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -108,6 +108,7 @@ class AutomaticMusicCuer(
         self.gemini_api_key = gemini_api_key
         self.model_name = resolve_gemini_model(model_name)
         self.client = genai.Client(api_key=gemini_api_key)
+        self.loop_seam_client = self.client
         self._beatgrid_alignment_cache: Dict[Tuple[str, float], BeatgridAlignment] = {}
         self._vdj_metadata_cache = None
         self._vdj_metadata_fingerprint = None
@@ -207,6 +208,34 @@ class AutomaticMusicCuer(
         return "generate_requests_per_model_per_day" in text or (
             "resource_exhausted" in text and "per_day" in text
         )
+
+    @staticmethod
+    def _is_empty_response_error(error: Exception) -> bool:
+        return "empty response" in str(error).lower()
+
+    @staticmethod
+    def _is_capacity_error(error: Exception) -> bool:
+        text = str(error).lower()
+        return any(
+            term in text
+            for term in (
+                "503",
+                "unavailable",
+                "high demand",
+                "overloaded",
+                "429",
+                "too many requests",
+                "rate limit",
+            )
+        )
+
+    def _should_switch_model(self, error: Exception, analysis_retry: int) -> bool:
+        """True when this model is done — quota, or empty/503 after one retry."""
+        if self._is_daily_quota_error(error):
+            return True
+        if self._is_empty_response_error(error) or self._is_capacity_error(error):
+            return analysis_retry >= 1
+        return False
 
     def _model_candidates(self) -> list[str]:
         names: list[str] = []

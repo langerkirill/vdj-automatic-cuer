@@ -166,6 +166,12 @@ class StemMixin:
 
         try:
             extracted_stems = self._extract_vdj_stems(vdj_stems_path, temp_dir)
+            if getattr(self, "client", None) is None:
+                print(
+                    f"🧬 Local stems only ({len(extracted_stems)}) — "
+                    "Grok 4.6 does not accept audio uploads"
+                )
+                return [], extracted_stems, temp_dir
             uploaded_stems = []
 
             for stem_name, stem_path in extracted_stems:
@@ -541,6 +547,64 @@ class StemMixin:
         beat_duration = 60.0 / actual_bpm
         cue_window = 4.0
 
+        if scope != WRITE_SCOPE_LOOPS:
+            from .ml.propose import blend_cue_plans, propose_ml_cues
+            from .stem_cue_plan import merge_gemini_onto_stem_cues, plan_stem_cues
+            from .stem_evidence import StemProfile
+
+            origin = 0.0
+            if audio_file_path:
+                origin = float(self.get_beatgrid_offset(audio_file_path) or 0.0)
+            song_len = self._loop_discovery_song_length(analysis_data, profiles)
+            planned = plan_stem_cues(
+                profiles,
+                bpm=actual_bpm,
+                offset=origin,
+                duration=song_len,
+            )
+            ml_profiles = dict(profiles)
+            if audio_file_path:
+                try:
+                    if cache is not None:
+                        ml_profiles["mix"] = cache.get_or_load_mix_profile(
+                            audio_file_path
+                        )
+                    else:
+                        ml_profiles["mix"] = StemProfile.decode(audio_file_path)
+                except Exception:
+                    pass
+            ml_planned = propose_ml_cues(
+                ml_profiles,
+                bpm=actual_bpm,
+                offset=origin,
+                duration=song_len,
+                audio_path=audio_file_path,
+            )
+            hybrid = blend_cue_plans(ml_planned, planned, bpm=actual_bpm)
+            if hybrid:
+                named = merge_gemini_onto_stem_cues(
+                    hybrid,
+                    list(analysis_data.get("measure_changes") or []),
+                    bpm=actual_bpm,
+                )
+                print(
+                    f"  🎯 Hybrid cue plan: {len(named)} on the 1 "
+                    f"(ML {len(ml_planned)} · stem {len(planned)}) "
+                    f"@ {origin:.3f}s"
+                )
+                analysis_data["measure_changes"] = named
+            elif planned:
+                named = merge_gemini_onto_stem_cues(
+                    planned,
+                    list(analysis_data.get("measure_changes") or []),
+                    bpm=actual_bpm,
+                )
+                print(
+                    f"  🎯 Stem cue plan: {len(named)} change-point(s) "
+                    f"locked to the 1 @ {origin:.3f}s"
+                )
+                analysis_data["measure_changes"] = named
+
         kept_cues = []
         for cue_data in analysis_data.get("measure_changes", []):
             timestamp = cue_data.get("timestamp")
@@ -570,9 +634,10 @@ class StemMixin:
                     elements=evidence.elements,
                 ):
                     print(
-                        f"  🧹 Rejecting mid-phrase cue "
+                        f"  🧹 Rejecting cue "
                         f"'{cue_data.get('cue_name', 'cue')}' at "
-                        f"{float(timestamp):.2f}s (vocals already running)"
+                        f"{float(timestamp):.2f}s "
+                        "(vocal noise on press / mid-phrase)"
                     )
                     continue
                 kept_cues.append(cue_data)

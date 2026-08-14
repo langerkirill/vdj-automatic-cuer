@@ -30,6 +30,7 @@ from .config import (
     SETS_ROOT,
     VDJ_DATABASE,
 )
+from .library import invalidate_placement_indexes, placement_match_keys
 from .musical_key import (
     genre_family,
     key_to_camelot,
@@ -37,6 +38,7 @@ from .musical_key import (
     vibe_label_from_path,
 )
 from .audio_meta import MIN_BITRATE_KBPS, track_meets_bitrate_floor
+from .llm import models_to_try, resolve_sorter_model
 from .relocate import vdj_bpm_to_actual
 from .song_web import lookup_blurbs_for_tracks
 from .transition_recs import track_block_keys
@@ -83,15 +85,9 @@ def normalize_min_fit(raw: Any = None) -> float:
         num = num / 100.0
     return max(0.0, min(1.0, num))
 
-DEFAULT_MODEL = os.getenv("MUSIC_SORTER_GEMINI_MODEL") or os.getenv(
-    "GEMINI_MODEL", "gemini-3.5-flash"
-)
-MODEL_FALLBACKS = [
-    DEFAULT_MODEL,
-    "gemini-3.5-flash",
-    "gemini-flash-latest",
-    "gemini-3-flash-preview",
-]
+
+DEFAULT_MODEL = resolve_sorter_model()
+MODEL_FALLBACKS = models_to_try(DEFAULT_MODEL)
 
 CACHE_PATH = DJ_NOTES_ROOT / "playlist_assemble_scores.json"
 MIX_PREFS_PATH = DJ_NOTES_ROOT / "playlist_assemble_mix.json"
@@ -468,6 +464,33 @@ def stage_uncued_playlist_tracks(
     }
 
 
+def _set_copy_keys(*names: str) -> set[str]:
+    keys: set[str] = set()
+    for name in names:
+        if not name:
+            continue
+        keys.update(key for key in placement_match_keys(name) if key)
+    return keys
+
+
+def _unlink_set_audio(path: Path) -> None:
+    stems = Path(f"{path}.vdjstems")
+    if path.is_file():
+        path.unlink()
+    if stems.is_file():
+        stems.unlink()
+
+
+def _existing_set_audio(folder: Path) -> list[Path]:
+    if not folder.is_dir():
+        return []
+    return [
+        path
+        for path in folder.iterdir()
+        if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS
+    ]
+
+
 def materialize_set_directory(
     playlist: list[dict[str, Any]],
     *,
@@ -479,6 +502,9 @@ def materialize_set_directory(
     """
     Copy/hardlink the crate into Sets/<Event>, same place as Moon / Silesian.
     Then clone VirtualDJ cues onto those new paths.
+
+    Re-assembling at a new index used to leave the previous numbered copy
+    (405 + 406 + 407 of the same song). Drop those leftovers first.
     """
     root = Path(sets_root or SETS_ROOT)
     folder = root / event_folder_name(event_name)
@@ -486,6 +512,8 @@ def materialize_set_directory(
     written: list[dict[str, Any]] = []
     errors: list[str] = []
     cue_pairs: list[tuple[str, str]] = []
+    removed_duplicates = 0
+    existing = _existing_set_audio(folder)
     for i, track in enumerate(playlist, 1):
         if track_is_assemble_excluded(track):
             continue
@@ -497,6 +525,21 @@ def materialize_set_directory(
         title = (track.get("title") or track.get("name") or src.stem).strip()
         label = f"{artist} - {title}" if artist else title
         dest = folder / f"{i:03d}. {_safe_filename(label)}{src.suffix.lower()}"
+        song_keys = _set_copy_keys(
+            dest.name,
+            src.name,
+            f"{artist} - {title}{src.suffix.lower()}" if artist else "",
+        )
+        leftovers = [
+            old
+            for old in existing
+            if old.resolve() != dest.resolve()
+            and (_set_copy_keys(old.name) & song_keys)
+        ]
+        for old in leftovers:
+            _unlink_set_audio(old)
+            removed_duplicates += 1
+        existing = [old for old in existing if old.resolve() != dest.resolve() and old not in leftovers]
         if dest.exists():
             dest.unlink()
         try:
@@ -515,6 +558,7 @@ def materialize_set_directory(
         row["path"] = str(dest)
         written.append(row)
         cue_pairs.append((str(src), str(dest)))
+        existing.append(dest)
     cues = (
         clone_cues_for_set_paths(cue_pairs, database_path=database_path)
         if clone_cues
@@ -533,6 +577,7 @@ def materialize_set_directory(
         "missing": errors,
         "tracks": written,
         "cues": cues,
+        "removed_duplicates": removed_duplicates,
     }
 
 
@@ -1768,6 +1813,7 @@ def write_playlist_files(
     m3u_text = "\n".join(lines) + "\n"
     m3u_path.write_text(m3u_text, encoding="utf-8")
     folder_m3u.write_text(m3u_text, encoding="utf-8")
+    invalidate_placement_indexes()
     return {
         "ok": True,
         "folder": materialized.get("folder") or "",

@@ -33,12 +33,35 @@ class UiClarityAssetsTests(unittest.TestCase):
 
     def test_add_cues_grid_align_is_visible(self) -> None:
         self.assertIn('id="gridAlignBtn"', self.html)
+        self.assertIn('id="autoAlignGridBtn"', self.html)
         self.assertIn('id="gridPreflightCard"', self.html)
         self.assertIn('id="gridAlignBar"', self.html)
         self.assertIn("function openGridAlignMode", self.js)
+        self.assertIn("function attemptAutoGridAlign", self.js)
+        self.assertIn("/api/grid-align/attempt", self.js)
         self.assertIn("alignGridFromCardBtn", self.js)
+        self.assertIn("autoAlignGridFromCardBtn", self.js)
         self.assertIn("wave-tools-inline", self.html)
         self.assertNotIn('id="waveToolsDrawer"', self.html)
+
+    def test_waveform_cue_drag_and_place(self) -> None:
+        self.assertIn('id="placeCueBtn"', self.html)
+        self.assertIn('id="placeLoopBtn"', self.html)
+        self.assertIn("function placeLoopAtTime", self.js)
+        self.assertIn("function togglePlaceLoopMode", self.js)
+        self.assertIn('"/api/add-loop"', self.js)
+        self.assertIn("function snapCueDragTime", self.js)
+        self.assertIn("function hitTestCueAtClientX", self.js)
+        self.assertIn("function existingCueNear", self.js)
+        self.assertIn("function commitCueMove", self.js)
+        self.assertIn("function placeCueAtTime", self.js)
+        self.assertIn("function togglePlaceCueMode", self.js)
+        self.assertIn('"/api/add-cue"', self.js)
+        self.assertIn('kind: "cue"', self.js)
+        self.assertIn("/api/move-poi", self.js)
+        self.assertIn("!state.placeCueMode && !state.placeLoopMode && onLoopDragPointerDown", self.js)
+        self.assertIn("place-cue-mode", self.css)
+        self.assertIn("cue-hover", self.css)
 
     def test_recs_auto_refresh_every_5s(self) -> None:
         self.assertIn("RECS_NOW_POLL_MS = 5_000", self.js)
@@ -58,6 +81,17 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn("assemblePanel", self.html)
         self.assertIn("Assemble Pajamathon", self.html)
 
+    def test_add_cues_retried_filters_are_visible(self) -> None:
+        self.assertIn('data-filter="retried_cues"', self.html)
+        self.assertIn('data-filter="retried_loops"', self.html)
+        self.assertIn('data-filter="retried_both"', self.html)
+        self.assertIn("Retried cues", self.html)
+        self.assertIn("Retried loops", self.html)
+        self.assertIn("Tried both", self.html)
+        self.assertIn("function trackRetryKind", self.js)
+        self.assertIn("retry_history", self.js)
+        self.assertIn('retried_cues"', self.js)
+
     def test_add_cues_ready_requires_two_loops(self) -> None:
         self.assertIn("loopN >= 2", self.js)
         self.assertIn("cueN >= 2 && loopN >= 2 && hasGrid", self.js)
@@ -73,6 +107,37 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn("silent", self.js)
         self.assertIn("scheduleLoadTracks", self.js)
         self.assertIn("Updating cue list", self.js)
+
+    def test_ready_for_sort_copy_cues_to_pajamathon(self) -> None:
+        self.assertIn("/api/copy-cues", self.js)
+        self.assertIn("function copyCuesToPlacement", self.js)
+        self.assertIn("Copy cues", self.js)
+        self.assertIn("placements.sets", self.js)
+        self.assertIn("Pajamathon", self.js)
+        self.assertIn("placement-copy-cues-btn", self.js)
+        self.assertIn("placement-copy-cues-btn", self.css)
+        self.assertIn("/api/copy-cues-all", self.js)
+        self.assertIn("function copyCuesToAllPlacements", self.js)
+        self.assertIn("Copy cues to all", self.js)
+        self.assertIn("placement-copy-cues-all-btn", self.js)
+        self.assertIn("placement-copy-cues-all-btn", self.css)
+        self.assertIn("/api/add-to-set", self.js)
+        self.assertIn("function addTrackToPajamathon", self.js)
+        self.assertIn("Add to Pajamathon", self.js)
+        self.assertIn("Delete from folder", self.js)
+        self.assertIn("allowDelete: true", self.js)
+        self.assertNotIn("allowDelete: false", self.js)
+        self.assertIn("placement-add-set-btn", self.js)
+        self.assertIn('p.root_name === "Zouk"', self.js)
+        self.assertIn('p.root_name === "House"', self.js)
+        self.assertIn("function loadTrackPlacements", self.js)
+        self.assertIn("function applyExistingSetPlacement", self.js)
+        self.assertIn("function mergeLoadedPlacements", self.js)
+        self.assertIn("loadTrackPlacements(selected)", self.js)
+        self.assertIn("Looking up House / Zouk / Pajamathon", self.js)
+        self.assertIn("already_exists", self.js)
+        self.assertIn("placementsLoaded", self.js)
+        self.assertIn("/api/track-placements", self.js)
 
     def test_add_cues_pajamathon_section(self) -> None:
         self.assertIn('id="crateFilter"', self.html)
@@ -154,7 +219,7 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn("schedulePracticeWaveRedraw", self.js)
 
     def test_assemble_keeps_cached_lists_while_scoring(self) -> None:
-        self.assertIn("playhead-2", self.html)
+        self.assertIn("add-set", self.html)
         self.assertIn("previousResult", self.js)
         self.assertIn("state.assemblePreview?.result", self.js)
         self.assertIn("if (!latest.job.result && data.result)", self.js)
@@ -162,7 +227,7 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn("recoverAssembleJob", self.js)
         self.assertIn("function unstickAssembleJob", self.js)
         self.assertIn("function assembleJobBusy", self.js)
-        self.assertIn("playhead-2", self.html)
+        self.assertIn("add-set", self.html)
 
     def test_assemble_playlist_can_sort_by_fit(self) -> None:
         self.assertIn('id="assemblePlaylistSort"', self.html)
@@ -172,7 +237,7 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn("assemblePlaylistSort", self.js)
         self.assertIn("state.assemblePlaylistSort", self.js)
         self.assertIn("sortAssemblePlaylist(", self.js)
-        self.assertIn("styles.css?v=20260813-playhead-2", self.html)
+        self.assertRegex(self.html, r"/static/styles\.css(\?[^\"']*)?")
 
     def test_assemble_mix_tuners_present(self) -> None:
         self.assertIn('id="assembleMixLanes"', self.html)
@@ -194,7 +259,7 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn('id="assembleMinFit"', self.html)
         self.assertIn("function readAssembleMinFit", self.js)
         self.assertIn("min_fit", self.js)
-        self.assertIn("playhead-2", self.html)
+        self.assertIn("add-set", self.html)
         self.assertIn("assemble-mix-pct", self.js)
         self.assertIn('getAttribute("data-pl-sort")', self.js)
 
@@ -248,6 +313,38 @@ class UiClarityAssetsTests(unittest.TestCase):
         # not an empty shell
         self.assertGreater(len(self.html), 2000)
         self.assertIsNotNone(re.search(r"<body[^>]*>", self.html))
+
+    def test_opening_a_track_does_not_autoplay(self) -> None:
+        """Selecting a track must not start audio unless the user already hit Play."""
+        self.assertIn("function shouldAutoplayOnSelect", self.js)
+        self.assertIn("function playAudio", self.js)
+        self.assertIn("state.allowAutoplay", self.js)
+        self.assertIn("allowAutoplay = true", self.js)
+        self.assertIn("if (!audio.src) return Promise.resolve()", self.js)
+        self.assertIn("shouldAutoplayOnSelect()", self.js)
+        self.assertRegex(self.js, r"if\s*\(\s*shouldAutoplayOnSelect\(\)\s*\)")
+        self.assertNotRegex(
+            self.js,
+            r"if\s*\(\s*!isPracticeMode\(\)\s*\)\s*\{\s*audio\.play\(\)\.catch\(\(\)\s*=>\s*\{\}\s*\)",
+        )
+
+    def test_quiet_session_mutes_agent_checks(self) -> None:
+        """?quiet=1 / ?mute=1 / webdriver must keep the sorter silent."""
+        self.assertIn("function wantsQuietSession", self.js)
+        self.assertIn("function applyQuietSession", self.js)
+        self.assertIn("function syncQuietSessionUi", self.js)
+        self.assertIn('params.get("quiet")', self.js)
+        self.assertIn('params.get("mute")', self.js)
+        self.assertIn("navigator.webdriver", self.js)
+        self.assertIn("state.quietSession", self.js)
+        self.assertIn("applyQuietSession()", self.js)
+        apply_at = self.js.find("applyQuietSession()")
+        load_at = self.js.find("await loadTracks()")
+        self.assertGreater(apply_at, 0)
+        self.assertGreater(load_at, apply_at)
+        self.assertIn('id="quietSessionChip"', self.html)
+        self.assertIn("quiet-session-chip", self.css)
+        self.assertIn("Sound off", self.html)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,11 @@
 """GeminiAnalysisMixin for AutomaticMusicCuer."""
 
+from .analysis_cache import (
+    analysis_is_usable,
+    analyze_with_cache,
+    load_cached_analysis,
+    save_cached_analysis,
+)
 from .common import *
 from .precision_gate import apply_precision_gate
 
@@ -24,10 +30,8 @@ class GeminiAnalysisMixin:
         for loop in analysis_data.get("loop_segments", []):
             timestamp = float(loop.get("start", 0.0))
             loop["model_timestamp"] = timestamp
-            # Snap to a beat. Prefer the 1 when the model already aimed there,
-            # but mid-bar beat starts are allowed when they wrap better.
             loop["start"] = self._quantize_grid_time(
-                timestamp, actual_bpm, beatgrid_offset, grid_beats=1
+                timestamp, actual_bpm, beatgrid_offset, grid_beats=4
             )
         return analysis_data
 
@@ -59,11 +63,40 @@ class GeminiAnalysisMixin:
     @staticmethod
     def _model_supports_thinking_level(model: str) -> bool:
         name = (model or "").casefold()
-        return "gemini-3" in name
+        return "gemini-3" in name and "flash" not in name
 
     @staticmethod
     def _is_unsupported_thinking_error(error: Exception) -> bool:
         return "thinking level is not supported" in str(error).lower()
+
+    def _can_skip_gemini_naming(self, error: Exception) -> bool:
+        """True when Gemini naming failed in a way stem+ML can still recover."""
+        return (
+            isinstance(error, json.JSONDecodeError)
+            or self._is_empty_response_error(error)
+            or self._is_capacity_error(error)
+            or self._is_retryable_error(error)
+        )
+
+    @staticmethod
+    def _empty_response_detail(response: object) -> str:
+        """Explain why Gemini returned no text (block, finish_reason, …)."""
+        if response is None:
+            return ""
+        parts: List[str] = []
+        feedback = getattr(response, "prompt_feedback", None)
+        block = getattr(feedback, "block_reason", None)
+        if block:
+            parts.append(f"block_reason={block}")
+        candidates = getattr(response, "candidates", None)
+        first = None
+        if isinstance(candidates, (list, tuple)) and candidates:
+            first = candidates[0]
+        if first is not None:
+            finish = getattr(first, "finish_reason", None)
+            if finish:
+                parts.append(f"finish_reason={finish}")
+        return f" ({', '.join(parts)})" if parts else ""
 
     def _generate_json_config(
         self,
@@ -102,7 +135,10 @@ class GeminiAnalysisMixin:
                         ),
                     )
                     if not response or not response.text:
-                        raise ValueError("Empty response from Gemini")
+                        raise ValueError(
+                            "Empty response from Gemini"
+                            + self._empty_response_detail(response)
+                        )
                     if model != self.model_name:
                         print(f"↪️  Switched AutoCue model to {model}")
                     self.model_name = model
@@ -110,12 +146,17 @@ class GeminiAnalysisMixin:
                 except Exception as analysis_e:
                     last_error = analysis_e
                     if self._is_unsupported_thinking_error(analysis_e) and use_thinking:
-                        print(f"⚠️  {model} does not support thinking_level; retrying without it")
+                        print(
+                            f"⚠️  {model} does not support thinking_level; retrying without it"
+                        )
                         use_thinking = False
                         continue
                     if self._is_daily_quota_error(analysis_e):
+                        print(f"⚠️  Daily quota on {model}; trying another Pro…")
+                        break
+                    if self._should_switch_model(analysis_e, analysis_retry):
                         print(
-                            f"⚠️  Daily quota on {model}; trying another Pro…"
+                            f"⚠️  {model} returned no usable data; trying another model…"
                         )
                         break
                     if self._is_retryable_error(analysis_e) and (
@@ -158,7 +199,10 @@ class GeminiAnalysisMixin:
                         ),
                     )
                     if not response or not response.text:
-                        raise ValueError("Empty response from Gemini")
+                        raise ValueError(
+                            "Empty response from Gemini"
+                            + self._empty_response_detail(response)
+                        )
                     if model != self.model_name:
                         print(f"↪️  Switched AutoCue model to {model}")
                     self.model_name = model
@@ -177,8 +221,11 @@ class GeminiAnalysisMixin:
                         use_thinking = False
                         continue
                     if self._is_daily_quota_error(analysis_error):
+                        print(f"⚠️  Daily quota on {model}; trying another Pro…")
+                        break
+                    if self._should_switch_model(analysis_error, analysis_retry):
                         print(
-                            f"⚠️  Daily quota on {model}; trying another Pro…"
+                            f"⚠️  {model} returned no usable data; trying another model…"
                         )
                         break
                     if self._is_retryable_error(analysis_error) and (
@@ -210,7 +257,7 @@ class GeminiAnalysisMixin:
         actual_bpm = self._actual_bpm(bpm)
         beatgrid_offset = 0.0
         if audio_file_path and actual_bpm:
-            beatgrid_offset = self._get_verified_beatgrid_offset(audio_file_path, bpm)
+            beatgrid_offset = float(self.get_beatgrid_offset(audio_file_path) or 0.0)
         analysis_data = self._align_analysis_candidates(
             analysis_data, actual_bpm, beatgrid_offset
         )
@@ -238,14 +285,33 @@ class GeminiAnalysisMixin:
         """Generate and normalize structured analysis for one uploaded file."""
         stem_uploads = stem_uploads or []
         stem_files = stem_files or []
-        analysis_data = self._generate_json_content(
-            contents=[prompt, audio_file] + [uploaded for _, uploaded in stem_uploads],
-            schema=MusicAnalysis,
-            timeout_seconds=180,
-        )
-        return self._finalize_music_analysis(
+        naming_error: Optional[Exception] = None
+        try:
+            analysis_data = self._generate_json_content(
+                contents=[prompt, audio_file]
+                + [uploaded for _, uploaded in stem_uploads],
+                schema=MusicAnalysis,
+                timeout_seconds=180,
+            )
+        except Exception as exc:
+            if not self._can_skip_gemini_naming(exc):
+                raise
+            naming_error = exc
+            print(
+                f"⚠️  Gemini naming skipped ({exc}); "
+                "using stem + ML times"
+            )
+            analysis_data = {
+                "measure_changes": [],
+                "loop_segments": [],
+                "gemini_naming_skipped": True,
+            }
+        finalized = self._finalize_music_analysis(
             analysis_data, stem_files, bpm, audio_file_path
         )
+        if naming_error is not None and not analysis_is_usable(finalized):
+            raise naming_error
+        return finalized
 
     async def _generate_music_analysis_async(
         self,
@@ -258,14 +324,33 @@ class GeminiAnalysisMixin:
     ) -> Dict:
         stem_uploads = stem_uploads or []
         stem_files = stem_files or []
-        analysis_data = await self._generate_json_content_async(
-            contents=[prompt, audio_file] + [uploaded for _, uploaded in stem_uploads],
-            schema=MusicAnalysis,
-            timeout_seconds=180,
-        )
-        return self._finalize_music_analysis(
+        naming_error: Optional[Exception] = None
+        try:
+            analysis_data = await self._generate_json_content_async(
+                contents=[prompt, audio_file]
+                + [uploaded for _, uploaded in stem_uploads],
+                schema=MusicAnalysis,
+                timeout_seconds=180,
+            )
+        except Exception as exc:
+            if not self._can_skip_gemini_naming(exc):
+                raise
+            naming_error = exc
+            print(
+                f"⚠️  Gemini naming skipped ({exc}); "
+                "using stem + ML times"
+            )
+            analysis_data = {
+                "measure_changes": [],
+                "loop_segments": [],
+                "gemini_naming_skipped": True,
+            }
+        finalized = self._finalize_music_analysis(
             analysis_data, stem_files, bpm, audio_file_path
         )
+        if naming_error is not None and not analysis_is_usable(finalized):
+            raise naming_error
+        return finalized
 
     @staticmethod
     def _report_analysis(analysis_data: Dict) -> None:
@@ -302,7 +387,7 @@ class GeminiAnalysisMixin:
         bpm: Optional[float],
         stem_prompt: str,
     ) -> str:
-        """Build a concise evidence-first prompt for Gemini 3.1 Pro."""
+        """Build a concise evidence-first prompt for Gemini."""
         return f"""
 You are locating reliable DJ cue boundaries in one complete track.
 
@@ -328,6 +413,10 @@ For each cue:
 - cue_name describes only what is supported at that timestamp
 - never use "&" in cue_name or loop_name — write "and" instead
   (e.g. "Bass and Snaps In", not "Bass & Snaps In")
+- A cue must be safe to jump to. At the exact press (the 1) the vocal
+  stem is either silent or starts on that beat. Do not place a cue where
+  a singer is already mid-word, holding a note, or making noise. Groove
+  and instrumental cues fail the same test if vocals are already sounding.
 
 For each loop:
 - Prefer starting on beat 1 of a bar when it still wraps cleanly; starting on
@@ -340,10 +429,12 @@ For each loop:
 - Never place a vocal cue or loop where a lyric line is already running
   (pre-chorus words into a chorus). Markers must be phrase attacks that are
   safe to cue-jump to; mid-line starts are invalid
-- loop_name must match that section and the audible components (use Melodic
-  for instrument-only intro phrases)
+- Same rule at the loop start: if a vocal is already making noise on the
+  press, the loop is invalid even when the body is drums/instruments
+- loop_name must match that section and the stem-supported components (use
+  Melodic for instrument-only intro phrases)
 - the component makeup stays stable for the whole loop
-- the wrap from loop end back to start must sound continuous (same level and
+- the wrap from loop end back to start must stay continuous (same level and
   texture); do not place loops on evolving solos, progressing chords, or
   vocal phrases that do not restart cleanly
 - length_beats is 8 or 16 preferred; 32 only on fast tracks where 32 beats is
@@ -388,12 +479,27 @@ evidence. Do not infer from the filename. Round timestamps to 0.01 seconds.
             print("❌ A valid VirtualDJ BPM/beatgrid is required for precise cues")
             return None
 
+        def _run(_path: str):
+            return self._analyze_audio_with_gemini_uncached(
+                audio_file_path, uploaded_file
+            )
+
+        return analyze_with_cache(
+            _run,
+            audio_file_path,
+            model=getattr(self, "model_name", None),
+        )
+
+    def _analyze_audio_with_gemini_uncached(
+        self, audio_file_path: str, uploaded_file=None
+    ) -> Dict:
+        song_length = self.get_song_length(audio_file_path) or 300
+        bpm = self.get_song_bpm_from_database(audio_file_path)
         audio_file = uploaded_file
         owns_audio_file = uploaded_file is None
         stem_uploads = []
         stem_temp_dir = None
         try:
-            # Upload only when the caller has not already uploaded this file.
             if audio_file is None:
                 print(
                     f"📤 Uploading audio file "
@@ -453,6 +559,13 @@ evidence. Do not infer from the filename. Round timestamps to 0.01 seconds.
             print("❌ A valid VirtualDJ BPM/beatgrid is required for precise cues")
             return None
 
+        cached = load_cached_analysis(
+            audio_file_path, model=getattr(self, "model_name", None)
+        )
+        if cached is not None:
+            print("📦 Reusing cached AutoCue analysis (no Gemini upload)")
+            return cached
+
         audio_file = uploaded_file
         owns_audio_file = uploaded_file is None
         stem_uploads = []
@@ -484,6 +597,12 @@ evidence. Do not infer from the filename. Round timestamps to 0.01 seconds.
                 audio_file_path,
             )
             self._report_analysis(analysis_data)
+            if analysis_data:
+                save_cached_analysis(
+                    audio_file_path,
+                    analysis_data,
+                    model=getattr(self, "model_name", None),
+                )
             return analysis_data
         except asyncio.CancelledError:
             print(f"⏹️  Cancelled analysis for {os.path.basename(audio_file_path)}")

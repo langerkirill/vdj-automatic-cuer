@@ -279,15 +279,13 @@ class BeatgridAlignmentMixin:
     ) -> float:
         """Quantize a model timestamp to a verified downbeat or beat grid."""
         # Get beatgrid info
-        beatgrid_offset = self._get_verified_beatgrid_offset(file_path, bpm)
+        # Snap to the grid already in VirtualDJ. Alignment is a separate UI action.
+        beatgrid_offset = float(self.get_beatgrid_offset(file_path) or 0.0)
 
         actual_bpm = self._actual_bpm(bpm)
         if actual_bpm is None:
-            print(
-                f"🎯 Invalid BPM {bpm}, using Gemini timestamp as-is: "
-                f"{gemini_timestamp:.1f}s"
-            )
-            return gemini_timestamp
+            print(f"🚫 Invalid BPM {bpm} — cannot snap to the 1")
+            return None
 
         grid_beats = max(1, int(grid_beats))
         aligned_time = self._quantize_grid_time(

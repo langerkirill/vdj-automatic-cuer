@@ -179,7 +179,7 @@ class PlayheadFollowAssetTests(unittest.TestCase):
     def test_draw_and_zoom_keep_moving_needle(self) -> None:
         self.assertIn("applyPlayheadFollow(duration", self.js)
         self.assertRegex(self.js, r"function drawWaveform\([\s\S]*applyPlayheadFollow\(")
-        self.assertRegex(self.js, r"function onWaveformWheel\([\s\S]*applyPlayheadFollow\(")
+        self.assertRegex(self.js, r"function onWaveformWheel\([\s\S]*waveViewPinned")
         self.assertRegex(self.js, r"function updatePlayhead\([\s\S]*startPlayheadWatch\(")
         self.assertIn("function syncMovingPlayhead", self.js)
         self.assertIn("function snapshotWaveSeekTime", self.js)
@@ -189,7 +189,7 @@ class PlayheadFollowAssetTests(unittest.TestCase):
         self.assertIn('id="wavePlayhead"', self.html)
         self.assertIn(".wave-playhead", self.css)
         self.assertIn("wavePlayhead", self.js)
-        self.assertRegex(self.html, r"playhead-2")
+        self.assertRegex(self.html, r"/static/app\.js(\?[^\"']*)?")
 
 
 if __name__ == "__main__":

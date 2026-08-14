@@ -90,6 +90,73 @@ class CueEditXmlTests(unittest.TestCase):
         self.assertIn('Name="Loop A"', out)
         self.assertIn('Pos="48.000000"', out)  # other loop unchanged
 
+    def test_set_poi_position_moves_cue(self):
+        xml = SAMPLE_SONG.format(path="/music/a.flac")
+        out, ch = cue_mod.set_poi_position_in_song_xml(
+            xml, kind="cue", pos=32.0, new_pos=40.25, num="2"
+        )
+        self.assertAlmostEqual(ch["pos_before"], 32.0)
+        self.assertAlmostEqual(ch["pos_after"], 40.25)
+        self.assertIn('Name="Drop"', out)
+        self.assertIn('Pos="40.25"', out)
+        self.assertIn('Pos="0.100000"', out)  # intro + beatgrid stay
+
+    def test_add_cue_poi_uses_next_free_num(self):
+        xml = SAMPLE_SONG.format(path="/music/a.flac")
+        out, ch = cue_mod.add_cue_poi_in_song_xml(xml, pos=8.0, name="Verse")
+        self.assertEqual(ch["num"], "3")
+        self.assertEqual(ch["name"], "Verse")
+        self.assertAlmostEqual(ch["pos"], 8.0)
+        self.assertIn('Name="Verse"', out)
+        self.assertIn('Num="3"', out)
+        self.assertIn('Type="cue"', out)
+        self.assertIn('Name="Intro"', out)
+        self.assertIn('Name="Drop"', out)
+        self.assertIn("</Song>", out)
+
+    def test_add_cue_poi_rejects_when_slots_full(self):
+        xml = SAMPLE_SONG.format(path="/music/a.flac")
+        for num in range(3, 9):
+            xml, _ = cue_mod.add_cue_poi_in_song_xml(xml, pos=float(num), name=f"C{num}")
+        with self.assertRaises(ValueError):
+            cue_mod.add_cue_poi_in_song_xml(xml, pos=99.0)
+
+    def test_add_cue_poi_keeps_existing_markers(self):
+        xml = SAMPLE_SONG.format(path="/music/a.flac")
+        out, _ = cue_mod.add_cue_poi_in_song_xml(xml, pos=8.0, name="Verse")
+        self.assertEqual(out.count('Type="cue"'), 3)
+        self.assertIn('Name="Loop A"', out)
+        self.assertIn('Type="beatgrid"', out)
+
+    def test_add_cue_poi_rejects_occupied_downbeat(self):
+        xml = SAMPLE_SONG.format(path="/music/a.flac")
+        with self.assertRaises(ValueError):
+            cue_mod.add_cue_poi_in_song_xml(xml, pos=32.0, name="Dup")
+
+    def test_add_cue_poi_escapes_name_quotes(self):
+        xml = SAMPLE_SONG.format(path="/music/a.flac")
+        out, ch = cue_mod.add_cue_poi_in_song_xml(xml, pos=8.0, name='Verse "A"')
+        self.assertEqual(ch["name"], 'Verse "A"')
+        self.assertIn("Verse &quot;A&quot;", out)
+        self.assertNotIn('Name="Verse "A""', out)
+
+    def test_add_loop_poi_uses_next_free_slot(self):
+        xml = SAMPLE_SONG.format(path="/music/a.flac")
+        out, ch = cue_mod.add_loop_poi_in_song_xml(xml, pos=8.0, name="Fill")
+        self.assertEqual(ch["slot"], "3")
+        self.assertEqual(ch["num"], "-1")
+        self.assertAlmostEqual(ch["beats"], 8.0)
+        self.assertIn('Type="loop"', out)
+        self.assertIn('Size="8.0"', out)
+        self.assertIn('Slot="3"', out)
+        self.assertIn('Name="Loop A"', out)
+        self.assertIn('Name="Intro"', out)
+
+    def test_add_loop_poi_rejects_occupied_start(self):
+        xml = SAMPLE_SONG.format(path="/music/a.flac")
+        with self.assertRaises(ValueError):
+            cue_mod.add_loop_poi_in_song_xml(xml, pos=16.0, name="Dup")
+
 
 class CueEditDeleteTests(unittest.TestCase):
     def test_delete_cue_point_writes(self):
@@ -163,6 +230,109 @@ class CueEditDeleteTests(unittest.TestCase):
             self.assertIn('Size="16.0"', text)
             # Loop A still 16
             self.assertRegex(text, r'Name="Loop A"[^>]*Size="16\.0"')
+
+    def test_add_cue_point_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "track.flac"
+            audio.write_bytes(b"x")
+            path = str(audio.resolve())
+            db = root / "database.xml"
+            db.write_bytes(
+                (
+                    "<VirtualDJ_Database>\r\n"
+                    + SAMPLE_SONG.format(path=path)
+                    + "</VirtualDJ_Database>\r\n"
+                ).encode("utf-8")
+            )
+            with patch.object(cue_mod, "CUES_ROOT", root), patch.object(
+                cue_mod, "LIBRARIES", {}
+            ), patch.object(cue_mod, "VDJ_DATABASE", db), patch(
+                "sorter.cue_edit.is_virtualdj_running", return_value=False
+            ):
+                result = cue_mod.add_cue_point(
+                    audio,
+                    pos=8.0,
+                    name="Verse",
+                    database_path=db,
+                    create_backup=True,
+                )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["change"]["num"], "3")
+            self.assertEqual(result["change"]["name"], "Verse")
+            self.assertEqual(result["cue_count"], 3)
+            text = db.read_text(encoding="utf-8")
+            self.assertIn('Name="Verse"', text)
+            self.assertIn('Name="Intro"', text)
+            self.assertIn('Name="Drop"', text)
+            self.assertIn('Type="beatgrid"', text)
+            self.assertTrue(Path(result["database_backup"]).is_file())
+
+    def test_add_cue_point_refuses_when_vdj_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "track.flac"
+            audio.write_bytes(b"x")
+            path = str(audio.resolve())
+            db = root / "database.xml"
+            db.write_bytes(
+                (
+                    "<VirtualDJ_Database>\r\n"
+                    + SAMPLE_SONG.format(path=path)
+                    + "</VirtualDJ_Database>\r\n"
+                ).encode("utf-8")
+            )
+            before = db.read_bytes()
+            with patch.object(cue_mod, "CUES_ROOT", root), patch.object(
+                cue_mod, "LIBRARIES", {}
+            ), patch.object(cue_mod, "VDJ_DATABASE", db), patch(
+                "sorter.cue_edit.is_virtualdj_running", return_value=True
+            ):
+                with self.assertRaises(RuntimeError):
+                    cue_mod.add_cue_point(
+                        audio,
+                        pos=8.0,
+                        name="Verse",
+                        database_path=db,
+                        create_backup=False,
+                    )
+            self.assertEqual(db.read_bytes(), before)
+
+    def test_add_loop_point_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "track.flac"
+            audio.write_bytes(b"x")
+            path = str(audio.resolve())
+            db = root / "database.xml"
+            db.write_bytes(
+                (
+                    "<VirtualDJ_Database>\r\n"
+                    + SAMPLE_SONG.format(path=path)
+                    + "</VirtualDJ_Database>\r\n"
+                ).encode("utf-8")
+            )
+            with patch.object(cue_mod, "CUES_ROOT", root), patch.object(
+                cue_mod, "LIBRARIES", {}
+            ), patch.object(cue_mod, "VDJ_DATABASE", db), patch(
+                "sorter.cue_edit.is_virtualdj_running", return_value=False
+            ):
+                result = cue_mod.add_loop_point(
+                    audio,
+                    pos=8.0,
+                    name="Fill",
+                    database_path=db,
+                    create_backup=True,
+                )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["change"]["slot"], "3")
+            self.assertEqual(result["loop_count"], 3)
+            text = db.read_text(encoding="utf-8")
+            self.assertIn('Name="Fill"', text)
+            self.assertIn('Type="loop"', text)
+            self.assertIn('Name="Loop A"', text)
+            self.assertIn('Name="Intro"', text)
+            self.assertTrue(Path(result["database_backup"]).is_file())
 
 
 if __name__ == "__main__":

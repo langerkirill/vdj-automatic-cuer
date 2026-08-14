@@ -382,6 +382,12 @@ body {
   border-color: rgba(240, 193, 75, 0.3);
 }
 
+.badge.retry-hist {
+  color: #c4b5fd;
+  background: rgba(167, 139, 250, 0.12);
+  border-color: rgba(167, 139, 250, 0.35);
+}
+
 .badge.bad {
   color: var(--bad);
   background: rgba(255, 107, 122, 0.12);
@@ -593,12 +599,35 @@ body {
   align-items: center;
 }
 
-.placement-delete-btn {
+.placement-path-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.placement-delete-btn,
+.placement-copy-cues-btn {
   flex-shrink: 0;
   align-self: center;
   padding: 5px 10px !important;
   font-size: 11px !important;
   white-space: nowrap;
+}
+
+.placement-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.placement-copy-cues-all-btn,
+.placement-add-set-btn {
+  padding: 7px 12px !important;
+  font-size: 12px !important;
 }
 
 .track-title {
@@ -776,14 +805,108 @@ audio {
   cursor: grabbing;
 }
 
-.waveform-wrap.loop-hover {
+.waveform-wrap.loop-hover,
+.waveform-wrap.cue-hover {
   cursor: grab;
 }
 
-.waveform-wrap.loop-dragging {
+.waveform-wrap.cue-chrome-hover {
+  cursor: pointer;
+}
+
+.waveform-wrap.loop-dragging,
+.waveform-wrap.cue-dragging {
   cursor: grabbing;
   outline: 1px solid rgba(168, 85, 247, 0.4);
   border-radius: 8px;
+}
+
+.waveform-wrap.cue-dragging {
+  outline-color: rgba(52, 211, 153, 0.5);
+}
+
+.waveform-wrap.place-cue-mode {
+  cursor: crosshair;
+  outline: 1px solid rgba(52, 211, 153, 0.4);
+  border-radius: 8px;
+}
+
+#placeCueBtn.active {
+  border-color: rgba(52, 211, 153, 0.55);
+  background: rgba(52, 211, 153, 0.12);
+  color: #6ee7b7;
+  box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.35);
+}
+
+#placeLoopBtn.active {
+  border-color: rgba(168, 85, 247, 0.55);
+  background: rgba(168, 85, 247, 0.14);
+  color: #d8b4fe;
+  box-shadow: 0 0 0 1px rgba(168, 85, 247, 0.35);
+}
+
+.waveform-wrap.place-loop-mode {
+  cursor: crosshair;
+  outline: 1px solid rgba(168, 85, 247, 0.4);
+  border-radius: 8px;
+}
+
+.place-loop-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  background: rgba(168, 85, 247, 0.08);
+}
+
+.place-loop-bar[hidden] {
+  display: none !important;
+}
+
+.place-loop-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 160px;
+  flex: 1;
+}
+
+.place-loop-copy strong {
+  font-size: 12px;
+  color: #d8b4fe;
+}
+
+.place-cue-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  background: rgba(52, 211, 153, 0.08);
+}
+
+.place-cue-bar[hidden] {
+  display: none !important;
+}
+
+.place-cue-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 160px;
+  flex: 1;
+}
+
+.place-cue-copy strong {
+  font-size: 12px;
+  color: #6ee7b7;
 }
 
 .autocue-scope-btns {
@@ -1127,8 +1250,9 @@ button.btn.danger:hover:not(:disabled) {
 
 .cues-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 10px;
 }
@@ -1142,8 +1266,11 @@ button.btn.danger:hover:not(:disabled) {
 .cues-header-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-  flex-shrink: 0;
+  flex: 1 1 280px;
+  min-width: 0;
+  justify-content: flex-end;
 }
 
 .retry-status {
@@ -4656,6 +4783,25 @@ body.mode-practice #cuesPanel {
 .autocue-job-chip.is-error {
   border-color: rgb(var(--bad-rgb) / 0.45);
   background: rgb(var(--bad-rgb) / 0.12);
+}
+
+.quiet-session-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgb(var(--warn-rgb) / 0.45);
+  background: rgb(var(--warn-rgb) / 0.12);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.quiet-session-chip[hidden] { display: none !important; }
+.quiet-session-chip:hover {
+  border-color: rgb(var(--warn-rgb) / 0.7);
 }
 
 /* ==========================================================================

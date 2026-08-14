@@ -12,6 +12,29 @@ class BeatgridAlignmentTests(unittest.TestCase):
                 vdj_database_path="/tmp/database.xml",
             )
 
+    def test_actual_bpm_allows_slow_zouk_57(self):
+        self.assertAlmostEqual(self.cuer._actual_bpm(57.0), 57.0)
+        self.assertAlmostEqual(self.cuer._actual_bpm(60.0 / 57.0), 57.0)
+
+    def test_keeps_existing_grid_when_current_phase_is_trusted(self):
+        """Hand-aligned 1 that already scores well must not be flipped."""
+        from vdj_cuer.common import existing_downbeat_is_trusted
+
+        self.assertTrue(
+            existing_downbeat_is_trusted({0: 0.08, 1: 0.02, 2: 0.09, 3: 0.03})
+        )
+        self.assertFalse(
+            existing_downbeat_is_trusted({0: 0.007, 1: 0.162, 2: 0.013, 3: 0.04})
+        )
+        result = self.cuer._choose_best_downbeat_phase(
+            0.249,
+            0.882,
+            {0: 0.08, 1: 0.02, 2: 0.09, 3: 0.03},
+        )
+        self.assertFalse(result.corrected)
+        self.assertEqual(result.shift_beats, 0)
+        self.assertAlmostEqual(result.offset, 0.249, places=6)
+
     def test_selects_stronger_downbeat_phase(self):
         beat_duration = 0.638299
         current_offset = 2.462313
@@ -159,20 +182,22 @@ class BeatgridAlignmentTests(unittest.TestCase):
         self.assertFalse(result.corrected)
         self.assertEqual(result.shift_beats, 0)
 
-    def test_validate_timing_uses_verified_beatgrid_offset(self):
-        self.cuer.get_beatgrid_offset = Mock(return_value=2.462313)
-        self.cuer._get_verified_beatgrid_offset = Mock(return_value=3.100612)
+    def test_validate_timing_uses_vdj_grid_not_autocue_align(self):
+        """AutoCue must snap to the existing VDJ '1', not a guessed shift."""
+        self.cuer.get_beatgrid_offset = Mock(return_value=36.096237)
+        self.cuer._get_verified_beatgrid_offset = Mock(return_value=37.596237)
 
         aligned = self.cuer.validate_timing_hybrid(
-            gemini_timestamp=20.334685,
-            bpm=94.0,
+            gemini_timestamp=36.1,
+            bpm=80.0,
             file_path="/tmp/song.m4a",
         )
 
-        self.assertAlmostEqual(aligned, 20.334685 + 0.638299, places=3)
+        self.assertAlmostEqual(aligned, 36.096237, places=3)
+        self.cuer._get_verified_beatgrid_offset.assert_not_called()
 
     def test_validate_timing_always_snaps_cue_to_downbeat(self):
-        self.cuer._get_verified_beatgrid_offset = Mock(return_value=0.0)
+        self.cuer.get_beatgrid_offset = Mock(return_value=0.0)
 
         aligned = self.cuer.validate_timing_hybrid(
             gemini_timestamp=2.2,
@@ -184,7 +209,7 @@ class BeatgridAlignmentTests(unittest.TestCase):
 
     def test_loop_timing_snaps_to_downbeat_not_mid_bar(self):
         """Loops use the same bar grid as cues so they do not feel off-beat."""
-        self.cuer._get_verified_beatgrid_offset = Mock(return_value=0.0)
+        self.cuer.get_beatgrid_offset = Mock(return_value=0.0)
 
         aligned = self.cuer.validate_timing_hybrid(
             gemini_timestamp=2.2,
@@ -196,7 +221,7 @@ class BeatgridAlignmentTests(unittest.TestCase):
         self.assertEqual(aligned, 4.0)
 
     def test_track_start_uses_first_nonnegative_downbeat_instead_of_zero(self):
-        self.cuer._get_verified_beatgrid_offset = Mock(return_value=1.9)
+        self.cuer.get_beatgrid_offset = Mock(return_value=1.9)
 
         aligned = self.cuer.validate_timing_hybrid(
             gemini_timestamp=0.0,

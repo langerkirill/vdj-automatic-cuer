@@ -135,8 +135,8 @@ Analyze each file independently and return complete analysis for all
                     actual_bpm = self._actual_bpm(bpm)
                     beatgrid_offset = 0.0
                     if actual_bpm:
-                        beatgrid_offset = self._get_verified_beatgrid_offset(
-                            audio_file_path, bpm
+                        beatgrid_offset = float(
+                            self.get_beatgrid_offset(audio_file_path) or 0.0
                         )
                     analysis_data = self._align_analysis_candidates(
                         analysis_data, actual_bpm, beatgrid_offset
