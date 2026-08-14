@@ -31,15 +31,17 @@ class VdjDatabaseMixin:
         beatgrid_poi_pos: Optional[float],
         scan_phase: Optional[float],
     ) -> float:
-        """Prefer explicit beatgrid POI; otherwise use Scan Phase (VDJ's '1').
+        """Prefer Scan Phase — that is VDJ's live '1' after a hand align.
 
-        Hold Me (Y U QT) failed here: no beatgrid POI, Phase≈56.1s, but cues
-        were quantized to 0.0 and landed ~1 beat early in the VirtualDJ UI.
+        Sozinho: Phase=22.847s (the 1) but a stale beatgrid POI sat 1 beat
+        later at 23.563s. Preferring POI put every cue on the 2.
+        Fall back to POI only when Phase is missing. Hold Me still works:
+        no POI, Phase≈56.1s.
         """
-        if beatgrid_poi_pos is not None:
-            return beatgrid_poi_pos
         if scan_phase is not None:
             return scan_phase
+        if beatgrid_poi_pos is not None:
+            return beatgrid_poi_pos
         return 0.0
 
     def _database_fingerprint(self) -> Tuple[int, int]:
@@ -135,8 +137,8 @@ class VdjDatabaseMixin:
                 # VDJ normally stores beat duration in seconds, so BPM is 60/value.
                 if vdj_bpm > 0:
                     actual_bpm = 60.0 / vdj_bpm
-                    if actual_bpm < 60 or actual_bpm > 200:
-                        if 60 < vdj_bpm < 200:
+                    if actual_bpm < 50 or actual_bpm > 200:
+                        if 50 <= vdj_bpm <= 200:
                             actual_bpm = vdj_bpm
                             print(
                                 f"🎵 VDJ BPM: {vdj_bpm:.6f} (direct) → "

@@ -14,14 +14,14 @@ From the repo root (after `./setup.sh`):
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787).
 
-Uses `GEMINI_API_KEY` from the repo `.env` (or `ui/.env`). Optional: `MUSIC_SORTER_GEMINI_MODEL` / `GEMINI_MODEL`.
+Uses `GEMINI_API_KEY` from the repo `.env` (or `ui/.env`). Sorter defaults to `gemini-2.5-flash`. Optional: `MUSIC_SORTER_GEMINI_MODEL` / `GEMINI_MODEL`. AutoCue defaults to `gemini-2.5-pro`.
 
 ## Modes
 
 | Mode | Purpose |
 |------|---------|
 | **Add Cues** | Review queue under `Cues/Add Cues`. Beatgrid preflight, AutoCue Both/Cues/Loops, delete markers, VDJ notes, promote to Ready for Sort |
-| **Sort** | Ready for Sort → House/Zouk folders + Cues Sorted archive. Gemini folder recommend, FilePath relocate, delete library placements |
+| **Sort** | Ready for Sort → House/Zouk folders + Cues Sorted archive. Gemini folder recommend, FilePath relocate, copy cues onto existing library/Pajamathon copies, delete library placements |
 
 ## Paths (defaults)
 

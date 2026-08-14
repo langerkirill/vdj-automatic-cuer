@@ -484,6 +484,64 @@ class TransitionRecsTests(unittest.TestCase):
         self.assertEqual(out["source"]["genre_source"], "path")
         self.assertNotEqual(out["source"].get("genre_source"), "gemini")
 
+    def test_rank_uses_gemini_text_json(self):
+        cand = Candidate(
+            path="/lib/Zouk/Chill/next.flac",
+            name="next.flac",
+            artist="B",
+            title="Next",
+            bpm=90.0,
+            key="Am",
+            camelot="8A",
+            cue_count=3,
+            library="Zouk",
+            relative_path="Chill/next.flac",
+            energy_hint="same",
+            genre="zouk",
+            vibe="Chill",
+            score=1.0,
+        )
+        source = {
+            "path": "/lib/Zouk/Chill/now.flac",
+            "artist": "A",
+            "title": "Now",
+            "name": "now.flac",
+            "bpm": 90.0,
+            "key": "Am",
+            "camelot": "8A",
+            "genre": "zouk",
+            "vibe": "Chill",
+            "genre_source": "tag",
+            "genre_family": "rnb_soul_zouk",
+            "cue_count": 3,
+        }
+
+        def fake_ask(prompt, schema, **kwargs):
+            self.assertEqual(schema, tr.TransitionRecSchema)
+            self.assertIn("CURRENT TRACK", str(prompt))
+            return {
+                "higher_energy": [],
+                "same_energy": [
+                    {
+                        "path": cand.path,
+                        "title": "Next",
+                        "artist": "B",
+                        "reason": "same pocket",
+                        "confidence": 0.8,
+                    }
+                ],
+                "lower_energy": [],
+                "notes": "hold",
+            }
+
+        with patch("sorter.transition_recs.ask_json", side_effect=fake_ask), patch(
+            "sorter.transition_recs.audio_file_exists", return_value=True
+        ):
+            out = tr._gemini_rank(source=source, candidates=[cand])
+        self.assertEqual(out["same_energy"][0]["path"], cand.path)
+        self.assertEqual(out["model"], tr.MODEL_FALLBACKS[0])
+
 
 if __name__ == "__main__":
     unittest.main()
+

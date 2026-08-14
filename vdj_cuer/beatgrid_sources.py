@@ -19,7 +19,7 @@ class BeatgridSourceMixin:
         if bpm <= 0:
             return None
         actual_bpm = 60.0 / bpm if bpm < 5 else bpm
-        if actual_bpm < 60 or actual_bpm > 200:
+        if actual_bpm < 50 or actual_bpm > 200:
             return None
         return actual_bpm
 
@@ -27,7 +27,19 @@ class BeatgridSourceMixin:
     def _choose_best_downbeat_phase(
         current_offset: float, beat_duration: float, phase_scores: Dict[int, float]
     ) -> BeatgridAlignment:
-        """Pick a stronger whole-beat downbeat phase when confidence is high."""
+        """Pick a stronger whole-beat downbeat phase when confidence is high.
+
+        If the current VDJ 1 already matches stem downbeats, keep it — that is
+        how we honor a manual alignment.
+        """
+        if existing_downbeat_is_trusted(phase_scores):
+            current_score = phase_scores.get(0, 0.0)
+            best_score = max(phase_scores.values()) if phase_scores else 0.0
+            return BeatgridAlignment(
+                offset=current_offset,
+                confidence_ratio=best_score / max(current_score, 0.001),
+                phase_scores=phase_scores,
+            )
         current_score = phase_scores.get(0, 0.0)
         best_phase = max(phase_scores, key=phase_scores.get) if phase_scores else 0
         best_score = phase_scores.get(best_phase, 0.0)

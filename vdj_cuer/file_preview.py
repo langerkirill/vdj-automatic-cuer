@@ -13,6 +13,9 @@ class FilePreviewMixin:
             aligned_time = self.validate_timing_hybrid(
                 gemini_time, working_bpm, audio_file_path
             )
+            if aligned_time is None:
+                print(f"  Cue {i}: skipped — not on the 1")
+                continue
             cue_name = cue_data.get("cue_name") or self.create_cue_name(
                 cue_data.get("elements", []), cue_data.get("measure", i)
             )
@@ -51,8 +54,10 @@ class FilePreviewMixin:
 
             gemini_time = loop_data.get("start", 0)
             aligned_time = self.validate_timing_hybrid(
-                gemini_time, working_bpm, audio_file_path, grid_beats=1
+                gemini_time, working_bpm, audio_file_path, grid_beats=4
             )
+            if aligned_time is None:
+                continue
             gemini_color = loop_data.get("color", "green")
             color_name = gemini_color.capitalize()
 

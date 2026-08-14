@@ -18,9 +18,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .bpm_edit import halve_track_bpm
-from .config import ADD_CUES, LIBRARIES
+from .config import ADD_CUES, CUES_ROOT, LIBRARIES
 from .grid_edit import set_beatgrid_anchor
 from .relocate import is_virtualdj_running, summarize_cues, summarize_cues_for_paths
+from .autocue_path import ensure_autocue_on_path
+
+ensure_autocue_on_path()
+from vdj_cuer.common import existing_downbeat_is_trusted  # noqa: E402
 
 
 NEVER_HALVE_BELOW = 110.0
@@ -37,6 +41,16 @@ FINE_ALIGN_STEP = 0.01
 FINE_ALIGN_MIN_RATIO = 1.35
 FINE_ALIGN_MAX_BEATS = 0.28
 PHASE_WRITE_RATIO = 1.20
+# Auto-align searches ±2 beats in ¼-beat steps. A ½-beat slip is invisible
+# to the 0–3 phase voter and to fine-align (capped at 0.28 beats).
+SUBBEAT_STEP_BEATS = 0.25
+SUBBEAT_SEARCH_BEATS = 2.0
+EARLY_ONES_START = 0.4
+EARLY_ONES_END = 20.0
+SKEPTICAL_WIN_RATIO = 1.28
+SKEPTICAL_WIN_DELTA = 0.015
+HALFBEAT_WIN_RATIO = 1.8
+HALFBEAT_ABS_MIN = 0.03
 
 SOURCE_RANK = {
     "same_path_phase": 0,
@@ -438,6 +452,106 @@ def _fine_align_offset(
     return offset
 
 
+def _score_ones_in_range(
+    onsets: list[float],
+    hop: float,
+    offset: float,
+    bpm: float,
+    *,
+    start: float = EARLY_ONES_START,
+    end: float = EARLY_ONES_END,
+) -> float:
+    """Downbeat energy only inside [start, end] — intro 1s, not late-song fills."""
+    if not onsets or hop <= 0 or bpm <= 0:
+        return 0.0
+    measure = beat_period(bpm) * 4.0
+    radius = max(1, int(0.06 / hop))
+    song_end = len(onsets) * hop
+    hi_limit = min(float(end), song_end)
+    lo_limit = max(0.0, float(start))
+    score = 0.0
+    count = 0
+    timestamp = float(offset)
+    if measure <= 0:
+        return 0.0
+    while timestamp < lo_limit:
+        timestamp += measure
+    while timestamp < hi_limit:
+        center = int(round(timestamp / hop))
+        lo = max(0, center - radius)
+        hi = min(len(onsets), center + radius + 1)
+        if hi > lo:
+            score += max(onsets[lo:hi])
+            count += 1
+        timestamp += measure
+    return score / count if count else 0.0
+
+
+def _wrap_nonnegative(time: float, bpm: float) -> float:
+    if time >= 0:
+        return time
+    bar = beat_period(bpm) * 4.0
+    if bar <= 0:
+        return 0.0
+    while time < 0:
+        time += bar
+    return time
+
+
+def _best_subbeat_offset(
+    onsets: list[float],
+    hop: float,
+    origin: float,
+    bpm: float,
+    *,
+    win_ratio: float = HALFBEAT_WIN_RATIO,
+    win_delta: float = SKEPTICAL_WIN_DELTA,
+) -> tuple[float, float, float]:
+    """
+    Search ±2 beats in ¼-beat steps using early-song bar-1 energy.
+
+    Returns (best_offset, best_score, current_score).
+    """
+    current = _score_ones_in_range(onsets, hop, origin, bpm)
+    beat = beat_period(bpm)
+    # A ½-beat slip is the usual "every cue is off" case. Prefer it over a
+    # louder beat-3 / offbeat that can win a wide ¼-beat search.
+    half_best = origin
+    half_score = current
+    for step in (-0.5, 0.5):
+        candidate = _wrap_nonnegative(origin + step * beat, bpm)
+        score = _score_ones_in_range(onsets, hop, candidate, bpm)
+        if score > half_score:
+            half_score = score
+            half_best = candidate
+    if (
+        half_best != origin
+        and half_score >= HALFBEAT_ABS_MIN
+        and half_score >= max(current * 2.0, current + 0.02)
+    ):
+        return half_best, half_score, current
+
+    best_offset = origin
+    best_score = current
+    steps = int(round(SUBBEAT_SEARCH_BEATS / SUBBEAT_STEP_BEATS))
+    for step in range(-steps, steps + 1):
+        if step == 0:
+            continue
+        candidate = _wrap_nonnegative(origin + step * SUBBEAT_STEP_BEATS * beat, bpm)
+        score = _score_ones_in_range(onsets, hop, candidate, bpm)
+        if score > best_score:
+            best_score = score
+            best_offset = candidate
+    if current <= 1e-9 and best_score >= MIN_PHASE_SCORE:
+        return best_offset, best_score, current
+    if (
+        best_score >= max(current * win_ratio, MIN_PHASE_SCORE)
+        and best_score >= current + win_delta
+    ):
+        return best_offset, best_score, current
+    return origin, current, current
+
+
 def plan_grid_bpm_fix(
     audio_path: str | Path | None = None,
     *,
@@ -446,6 +560,7 @@ def plan_grid_bpm_fix(
     onsets: list[float] | None = None,
     hop_seconds: float | None = None,
     name: str = "",
+    skeptical: bool = False,
 ) -> GridFixPlan:
     """
     Decide half-vs-keep and which beat of the bar is the 1.
@@ -500,6 +615,63 @@ def plan_grid_bpm_fix(
     bpm_after = tempo / 2.0 if halve else tempo
     beat = beat_period(bpm_after)
 
+    search_src = kick if kick else ((onsets, hop) if onsets else None)
+    subbeat_reason = ""
+    if search_src and not halve:
+        win_ratio = SKEPTICAL_WIN_RATIO if skeptical else HALFBEAT_WIN_RATIO
+        best_off, best_sc, cur_sc = _best_subbeat_offset(
+            search_src[0],
+            search_src[1],
+            origin,
+            bpm_after,
+            win_ratio=win_ratio,
+        )
+        if abs(best_off - origin) > 0.02:
+            delta_beats = (best_off - origin) / beat
+            # Fold into (-2, 2] so the reason is readable.
+            while delta_beats > 2:
+                delta_beats -= 4
+            while delta_beats <= -2:
+                delta_beats += 4
+            origin = best_off
+            subbeat_reason = (
+                f"1 is {delta_beats:+.2f} beat "
+                f"(early {'kick' if kick else 'mix'} {cur_sc:.3f}→{best_sc:.3f})"
+            )
+
+    # If the stored 1 already matches kick/mix downbeats, do not fine-shift or
+    # flip phase — that is a hand-aligned grid. Half-beat slips still win via
+    # subbeat_reason (Auto-align / skeptical included).
+    origin_phase_scores: dict[int, float] = {}
+    if kick:
+        origin_phase_scores = _phase_scores(kick[0], kick[1], origin, beat)
+    elif onsets:
+        origin_phase_scores = _phase_scores(onsets, hop, origin, beat)
+    if (
+        not subbeat_reason
+        and existing_downbeat_is_trusted(origin_phase_scores)
+        and not halve
+    ):
+        candidate = _nonnegative_same_phase(origin, bpm_after)
+        if onsets:
+            walked = _earliest_downbeat(onsets, hop, candidate, bpm_after)
+            if anchors_share_downbeat(origin, walked, bpm_after, beat_tol=0.15):
+                candidate = walked
+        return GridFixPlan(
+            path=path_s,
+            name=label,
+            bpm_before=tempo,
+            bpm_after=bpm_after,
+            halve=False,
+            anchor_before=float(anchor),
+            anchor_after=candidate,
+            shift_beats=0,
+            confidence=1.0,
+            action="skip",
+            reason=f"keep existing 1 @ {float(anchor):.3f}s (stems agree)",
+            phase_scores=origin_phase_scores,
+        )
+
     fine_src = kick if kick else ((onsets, hop) if onsets else None)
     fine = (
         _fine_align_offset(fine_src[0], fine_src[1], origin, beat)
@@ -528,7 +700,12 @@ def plan_grid_bpm_fix(
             votes.append(("kick", kick_phase, kick_scores[kick_phase]))
 
     kick_vote = next((vote for name, vote, _score in votes if name == "kick"), None)
-    if halve:
+    if subbeat_reason:
+        # A ½-beat (or other sub-beat) 1 already won the early-kick test.
+        # Whole-beat voting would slide it onto the 3 / the &.
+        phase = 0
+        confidence = 1.0
+    elif halve:
         # Keep VDJ's time origin after a half unless the kick is very sure.
         phase = 0
         confidence = 1.0
@@ -564,9 +741,10 @@ def plan_grid_bpm_fix(
     if onsets:
         candidate = _earliest_downbeat(onsets, hop, candidate, bpm_after)
     anchor_after = candidate
+    stored = float(anchor)
 
     moved = not anchors_share_downbeat(
-        origin, anchor_after, bpm_after, beat_tol=0.15
+        stored, anchor_after, bpm_after, beat_tol=0.15
     )
     if halve and moved:
         action = "halve_and_align"
@@ -590,8 +768,12 @@ def plan_grid_bpm_fix(
             + (f", {', '.join(extra)}" if extra else "")
             + ")"
         )
+    elif action == "skip":
+        reason_parts.append(f"existing 1 still best @ {stored:.3f}s")
     else:
         reason_parts.append(f"keep {tempo:.1f} BPM")
+    if subbeat_reason:
+        reason_parts.append(subbeat_reason)
     if phase:
         reason_parts.append(f"1 is +{phase} beat(s)")
     if abs(fine - origin) > 0.02:
@@ -604,7 +786,7 @@ def plan_grid_bpm_fix(
         bpm_before=tempo,
         bpm_after=bpm_after,
         halve=halve,
-        anchor_before=origin,
+        anchor_before=stored,
         anchor_after=anchor_after,
         shift_beats=phase,
         confidence=confidence,
@@ -677,7 +859,11 @@ def _assert_allowed(path: Path) -> Path:
     audio = path.expanduser().resolve()
     if not audio.is_file():
         raise FileNotFoundError(f"Audio not found: {audio}")
-    roots = [ADD_CUES.resolve(), *[item.resolve() for item in LIBRARIES.values()]]
+    roots = [
+        ADD_CUES.resolve(),
+        CUES_ROOT.resolve(),
+        *[item.resolve() for item in LIBRARIES.values()],
+    ]
     for root in roots:
         try:
             audio.relative_to(root)
@@ -688,14 +874,19 @@ def _assert_allowed(path: Path) -> Path:
 
 
 def _grid_anchor_from_cues(cues: Any) -> Optional[float]:
-    if getattr(cues, "beatgrid_pos", None) is not None:
-        return float(cues.beatgrid_pos)
     if getattr(cues, "scan_phase", None) is not None:
         return float(cues.scan_phase)
+    if getattr(cues, "beatgrid_pos", None) is not None:
+        return float(cues.beatgrid_pos)
     return None
 
 
-def plan_for_track(audio_path: str | Path, *, cues: Any = None) -> GridFixPlan:
+def plan_for_track(
+    audio_path: str | Path,
+    *,
+    cues: Any = None,
+    skeptical: bool = False,
+) -> GridFixPlan:
     audio = _assert_allowed(Path(audio_path))
     if cues is None:
         cues = summarize_cues(audio)
@@ -729,7 +920,50 @@ def plan_for_track(audio_path: str | Path, *, cues: Any = None) -> GridFixPlan:
             action="skip",
             reason="No usable BPM or beatgrid",
         )
-    return plan_grid_bpm_fix(audio, bpm=float(bpm), anchor=float(anchor))
+    return plan_grid_bpm_fix(
+        audio, bpm=float(bpm), anchor=float(anchor), skeptical=skeptical
+    )
+
+
+def attempt_grid_align(
+    source_path: str | Path,
+    *,
+    apply: bool = False,
+    dry_run: bool = False,
+    allow_vdj_running: bool = False,
+    create_backup: bool = True,
+) -> dict[str, Any]:
+    """
+    Run the same stem/onset 1-finder used by batch grid-fix on one track.
+
+    apply=False returns the plan only (UI preview). apply=True writes BPM/grid.
+    """
+    audio = _assert_allowed(Path(source_path))
+    plan = plan_for_track(audio, skeptical=True)
+    payload: dict[str, Any] = {
+        "ok": True,
+        "path": str(audio),
+        "name": audio.name,
+        "plan": plan.to_dict(),
+        "applied": False,
+        "apply_result": None,
+    }
+    if not apply or plan.action == "skip":
+        return payload
+    applied = apply_grid_fix_plan(
+        plan,
+        dry_run=dry_run,
+        allow_vdj_running=allow_vdj_running,
+        create_backup=create_backup,
+    )
+    payload["applied"] = bool(applied.get("ok")) and applied.get("action") not in {
+        "skip",
+        "skipped_stale",
+    }
+    payload["apply_result"] = applied
+    if applied.get("grid", {}).get("cues"):
+        payload["cues"] = applied["grid"]["cues"]
+    return payload
 
 
 def get_grid_fix_batch(batch_id: str) -> Optional[GridFixBatch]:

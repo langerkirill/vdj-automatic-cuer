@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import threading
+import time
 import traceback
 import uuid
 from contextlib import redirect_stderr, redirect_stdout
@@ -16,7 +18,8 @@ from typing import Any, Optional
 from dotenv import load_dotenv
 
 from .autocue_path import ensure_autocue_on_path
-from .config import CUES_ROOT, LIBRARIES, VDJ_DATABASE
+from .config import CUES_ROOT, LIBRARIES, SETS_ROOT, VDJ_DATABASE
+from .action_log import DEFAULT_LOG_PATH
 from .db_lock import get_db_write_lock
 from .grid_preflight import assess_grid_for_autocue
 from .relocate import is_virtualdj_running, summarize_cues, summarize_cues_for_paths
@@ -58,6 +61,201 @@ def write_scope_label(scope: str) -> str:
     if scope == WRITE_SCOPE_LOOPS:
         return "loops only"
     return "cues + loops"
+
+
+ANALYSIS_EMPTY_ATTEMPTS = 3
+
+
+def analyze_audio_until_data(
+    analyze,
+    audio_path: str,
+    *,
+    attempts: int = ANALYSIS_EMPTY_ATTEMPTS,
+    sleep_fn=time.sleep,
+    on_retry=None,
+):
+    """
+    Call analyze(audio_path) until it returns data or attempts are exhausted.
+
+    Gemini sometimes returns empty/invalid JSON after inner API retries.
+    A second full pass (fresh upload) often succeeds — Turn me On did.
+    """
+    last = None
+    total = max(1, int(attempts))
+    for attempt in range(1, total + 1):
+        last = analyze(audio_path)
+        if last:
+            return last
+        if attempt >= total:
+            break
+        if on_retry is not None:
+            on_retry(attempt, total)
+        sleep_fn(min(2 * attempt, 8))
+    return last
+
+
+def autocue_fail_message(
+    log_text: str,
+    *,
+    analysis_empty: bool = False,
+    warn_msg: str = "",
+) -> str:
+    """Prefer the last real AutoCue error over the generic beatgrid sentence."""
+    for line in reversed((log_text or "").splitlines()):
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith("❌"):
+            return text.lstrip("❌ ").strip()
+        if "VirtualDJ is running" in text:
+            return text
+        if "Error applying cues" in text or "Error analyzing audio" in text:
+            return text
+    if analysis_empty:
+        return "AutoCue analysis returned no data (Gemini error or invalid JSON)."
+    if warn_msg:
+        return warn_msg
+    return "AutoCue failed while writing cues (not a missing-beatgrid check)."
+
+
+RETRY_HISTORY_ACTIONS = frozenset({"retry_cues", "retry_cues_complete"})
+_retry_history_cache: dict[str, tuple[int, int, dict[str, dict[str, Any]]]] = {}
+
+
+def _retry_path_keys(path: str | Path) -> list[str]:
+    raw = str(path or "").strip()
+    if not raw:
+        return []
+    keys = [raw]
+    try:
+        keys.append(str(Path(raw).expanduser()))
+    except Exception:
+        pass
+    try:
+        keys.append(str(Path(raw).expanduser().resolve()))
+    except Exception:
+        pass
+    # Unique, keep order
+    seen: set[str] = set()
+    out: list[str] = []
+    for key in keys:
+        if key and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _scope_from_action(row: dict[str, Any]) -> Optional[str]:
+    details = row.get("details") or {}
+    raw = details.get("write_scope") or details.get("writeScope")
+    if not raw:
+        return None
+    try:
+        return normalize_write_scope(str(raw))
+    except ValueError:
+        return None
+
+
+def _kind_from_tried(*, tried_cues: bool, tried_loops: bool) -> Optional[str]:
+    if tried_cues and tried_loops:
+        return "both"
+    if tried_cues:
+        return "cues"
+    if tried_loops:
+        return "loops"
+    return None
+
+
+def summarize_retry_history(
+    *,
+    log_file: Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """
+    Map audio path → AutoCue retry buckets from the durable action log.
+
+    kind is exclusive: cues | loops | both
+    (both = one all/both run, or separate cues + loops runs).
+    """
+    path = Path(log_file) if log_file else DEFAULT_LOG_PATH
+    cache_key = str(path)
+    mtime = 0
+    size = 0
+    if path.is_file():
+        stat = path.stat()
+        mtime = int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1e9)))
+        size = int(stat.st_size)
+    hit = _retry_history_cache.get(cache_key)
+    if hit and hit[0] == mtime and hit[1] == size:
+        return hit[2]
+
+    acc: dict[str, dict[str, Any]] = {}
+    if path.is_file():
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("action") not in RETRY_HISTORY_ACTIONS:
+                    continue
+                source = row.get("source_path")
+                if not source:
+                    continue
+                scope = _scope_from_action(row)
+                if scope is None:
+                    continue
+                keys = _retry_path_keys(source)
+                if not keys:
+                    continue
+                primary = keys[-1]
+                entry = acc.get(primary)
+                if entry is None:
+                    entry = {
+                        "path": primary,
+                        "tried_cues": False,
+                        "tried_loops": False,
+                        "scopes": [],
+                        "last_ts": None,
+                    }
+                    acc[primary] = entry
+                scopes = set(entry["scopes"])
+                scopes.add(scope)
+                if scope in {WRITE_SCOPE_CUES, WRITE_SCOPE_ALL}:
+                    entry["tried_cues"] = True
+                if scope in {WRITE_SCOPE_LOOPS, WRITE_SCOPE_ALL}:
+                    entry["tried_loops"] = True
+                entry["scopes"] = sorted(scopes)
+                ts = row.get("ts")
+                if ts:
+                    entry["last_ts"] = ts
+                for key in keys:
+                    acc[key] = entry
+
+    for entry in acc.values():
+        kind = _kind_from_tried(
+            tried_cues=bool(entry["tried_cues"]),
+            tried_loops=bool(entry["tried_loops"]),
+        )
+        entry["kind"] = kind
+        entry["tried_both"] = kind == "both"
+
+    _retry_history_cache[cache_key] = (mtime, size, acc)
+    return acc
+
+
+def retry_history_for_path(
+    path: str | Path,
+    history: dict[str, dict[str, Any]] | None = None,
+) -> Optional[dict[str, Any]]:
+    hist = history if history is not None else summarize_retry_history()
+    for key in _retry_path_keys(path):
+        hit = hist.get(key)
+        if hit:
+            return hit
+    return None
 
 
 @dataclass
@@ -171,7 +369,11 @@ def _assert_allowed_path(path: Path) -> Path:
     if not audio.is_file():
         raise FileNotFoundError(f"Audio not found: {audio}")
 
-    allowed_roots = [CUES_ROOT.resolve(), *[p.resolve() for p in LIBRARIES.values()]]
+    allowed_roots = [
+        CUES_ROOT.resolve(),
+        SETS_ROOT.resolve(),
+        *[p.resolve() for p in LIBRARIES.values()],
+    ]
     for root in allowed_roots:
         try:
             audio.relative_to(root)
@@ -179,8 +381,20 @@ def _assert_allowed_path(path: Path) -> Path:
         except ValueError:
             continue
     raise ValueError(
-        "Retry cues is only allowed for files under Cues/ or House/Zouk libraries"
+        "Retry cues is only allowed for files under Cues/, Sets/, or House/Zouk"
     )
+
+
+STEMS_REQUIRED_MESSAGE = (
+    "Blocked: analyze stems in VirtualDJ first "
+    "(needs adjacent .vdjstems beside the audio)"
+)
+
+
+def adjacent_vdj_stems(audio: str | Path) -> Optional[Path]:
+    """Sidecar VirtualDJ writes next to the audio file, or None."""
+    stems = Path(f"{audio}.vdjstems")
+    return stems if stems.is_file() else None
 
 
 def _has_active_job_for_path(audio_path: str) -> bool:
@@ -209,6 +423,7 @@ def start_retry_cues(
     batch_id: Optional[str] = None,
     write_scope: str = WRITE_SCOPE_ALL,
     cues_before: Optional[Any] = None,
+    require_stems: bool = True,
 ) -> RetryJob:
     scope = normalize_write_scope(write_scope)
     audio = _assert_allowed_path(Path(source_path))
@@ -228,6 +443,27 @@ def start_retry_cues(
     preflight = assess_grid_for_autocue(
         audio, deep=deep_grid_check and require_grid, cues=before
     )
+    stems = adjacent_vdj_stems(audio)
+    if isinstance(preflight, dict):
+        preflight = {**preflight, "has_stems": stems is not None}
+    if require_stems and stems is None:
+        job = RetryJob(
+            id=uuid.uuid4().hex[:12],
+            path=str(audio),
+            name=audio.name,
+            status="skipped",
+            dry_run=dry_run,
+            created_at=_now(),
+            finished_at=_now(),
+            cue_count_before=before.cue_count,
+            message=STEMS_REQUIRED_MESSAGE,
+            preflight=preflight,
+            batch_id=batch_id,
+            write_scope=scope,
+        )
+        with _lock:
+            _jobs[job.id] = job
+        return job
     if require_grid and not preflight.get("can_autocue"):
         job = RetryJob(
             id=uuid.uuid4().hex[:12],
@@ -290,6 +526,7 @@ def start_batch_retry_cues(
     require_grid: bool = True,
     deep_grid_check: bool = False,
     write_scope: str = WRITE_SCOPE_ALL,
+    model_name: Optional[str] = None,
 ) -> BatchJob:
     """
     Queue AutoCue for many tracks. Up to MUSIC_SORTER_AUTOCUE_CONCURRENCY
@@ -329,6 +566,7 @@ def start_batch_retry_cues(
             require_grid,
             deep_grid_check,
             scope,
+            model_name,
         ),
         name=f"autocue-batch-{batch.id}",
         daemon=True,
@@ -345,6 +583,7 @@ def _run_batch(
     require_grid: bool,
     deep_grid_check: bool,
     write_scope: str = WRITE_SCOPE_ALL,
+    model_name: Optional[str] = None,
 ) -> None:
     scope = normalize_write_scope(write_scope)
     start_errors = 0
@@ -369,6 +608,7 @@ def _run_batch(
                 batch_id=batch_id,
                 write_scope=scope,
                 cues_before=summaries.get(path),
+                model_name=model_name,
             )
         except Exception as exc:
             start_errors += 1
@@ -493,6 +733,14 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
             return
         audio_path = job.path
         scope = normalize_write_scope(getattr(job, "write_scope", WRITE_SCOPE_ALL))
+        if adjacent_vdj_stems(audio_path) is None:
+            _update_job(
+                job_id,
+                status="skipped",
+                finished_at=_now(),
+                message=STEMS_REQUIRED_MESSAGE,
+            )
+            return
 
         _update_job(
             job_id,
@@ -561,11 +809,34 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
                 print(
                     f"🎚️  AutoCue concurrency · max={_MAX_CONCURRENT} · scope={scope}"
                 )
-                analysis = cuer.analyze_audio_with_gemini(audio_path)
+                def _on_empty_retry(attempt: int, total: int) -> None:
+                    print(
+                        f"❌ Analysis returned no data "
+                        f"(attempt {attempt}/{total}) — retrying…"
+                    )
+                    _update_job(
+                        job_id,
+                        message=(
+                            f"Gemini returned no data — retry "
+                            f"{attempt}/{total - 1} on {Path(audio_path).name}…"
+                        ),
+                    )
+
+                from vdj_cuer.analysis_cache import analyze_with_cache
+
+                analysis = analyze_with_cache(
+                    lambda path: analyze_audio_until_data(
+                        cuer.analyze_audio_with_gemini,
+                        path,
+                        on_retry=_on_empty_retry,
+                    ),
+                    audio_path,
+                    model=getattr(cuer, "model_name", None),
+                )
                 ok = False
                 warn_msg = ""
                 if not analysis:
-                    print("❌ Analysis returned no data")
+                    print("❌ Analysis returned no data after retries")
                 else:
                     song_length = cuer.get_song_length(audio_path)
                     database_bpm = cuer.get_song_bpm_from_database(audio_path)
@@ -635,9 +906,10 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
             if "has_stems" not in locals():
                 has_stems = Path(f"{audio_path}.vdjstems").is_file()
 
-            fail_message = (
-                "AutoCue reported failure — check that the track is analyzed "
-                "in VirtualDJ and has a beatgrid."
+            fail_message = autocue_fail_message(
+                tail,
+                analysis_empty=not analysis if "analysis" in locals() else True,
+                warn_msg=warn_msg or "",
             )
             # Treat loops-only with zero loops as a failure so UI shows why.
             if (

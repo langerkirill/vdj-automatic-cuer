@@ -796,6 +796,81 @@ class PlaylistAssembleHelpersTests(unittest.TestCase):
             copied = list(folder.glob("001.*"))[0]
             self.assertEqual(copied.read_bytes(), b"aaa")
 
+    def test_materialize_removes_previous_numbered_copies_of_same_song(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src_root = Path(tmp) / "zouk"
+            dest_root = Path(tmp) / "Sets"
+            src_root.mkdir()
+            dest_root.mkdir()
+            src = src_root / "01 Dusk Till Dawn - Kizomba Remix.m4a"
+            src.write_bytes(b"dusk")
+            folder = dest_root / "Pajamathon 2026"
+            folder.mkdir()
+            leftover_a = folder / "405. 01 Dusk Till Dawn - Kizomba Remix.m4a"
+            leftover_b = folder / "090. Vlad Ivan - Dusk Till Dawn - Kizomba Remix.m4a"
+            leftover_a.write_bytes(b"old-a")
+            leftover_b.write_bytes(b"old-b")
+            Path(f"{leftover_a}.vdjstems").write_bytes(b"stems")
+            keep = folder / "100. Someone Else - Other Song.m4a"
+            keep.write_bytes(b"keep")
+            out = materialize_set_directory(
+                [
+                    {
+                        "path": str(src),
+                        "artist": "Vlad Ivan",
+                        "title": "Dusk Till Dawn - Kizomba Remix",
+                        "name": src.name,
+                    }
+                ],
+                event_name="Pajamathon",
+                sets_root=dest_root,
+                clone_cues=False,
+            )
+            folder = Path(out["folder"])
+            names = sorted(p.name for p in folder.iterdir() if p.suffix.lower() == ".m4a")
+            self.assertEqual(out["count"], 1)
+            self.assertEqual(len(names), 2)
+            self.assertTrue(keep.exists())
+            self.assertFalse(leftover_a.exists())
+            self.assertFalse(leftover_b.exists())
+            self.assertFalse(Path(f"{leftover_a}.vdjstems").exists())
+            self.assertTrue(
+                any(n.startswith("001.") and "Dusk Till Dawn" in n for n in names)
+            )
+            self.assertEqual(out.get("removed_duplicates"), 2)
+
+    def test_materialize_keeps_unrelated_song_with_overlapping_words(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src_root = Path(tmp) / "zouk"
+            dest_root = Path(tmp) / "Sets"
+            src_root.mkdir()
+            dest_root.mkdir()
+            src = src_root / "01 Dusk Till Dawn - Kizomba Remix.m4a"
+            src.write_bytes(b"dusk")
+            folder = dest_root / "Pajamathon 2026"
+            folder.mkdir()
+            other = folder / "048. alayna - Between Dusk And Dawn.flac"
+            other.write_bytes(b"other")
+            out = materialize_set_directory(
+                [
+                    {
+                        "path": str(src),
+                        "artist": "Vlad Ivan",
+                        "title": "Dusk Till Dawn - Kizomba Remix",
+                        "name": src.name,
+                    }
+                ],
+                event_name="Pajamathon",
+                sets_root=dest_root,
+                clone_cues=False,
+            )
+            self.assertTrue(other.exists())
+            self.assertEqual(out.get("removed_duplicates"), 0)
+
     def test_clone_cues_skips_when_vdj_open(self):
         from unittest.mock import patch
 

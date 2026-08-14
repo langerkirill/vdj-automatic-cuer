@@ -42,7 +42,6 @@ def load_gemini_api_key() -> str:
     if os.getenv("GEMINI_API_KEY"):
         return os.environ["GEMINI_API_KEY"]
 
-    # vdj_cuer/common.py → repo root is parents[1]
     repo_root = Path(__file__).resolve().parents[1]
     candidates = [
         repo_root / ".env",
@@ -55,13 +54,11 @@ def load_gemini_api_key() -> str:
     for path in candidates:
         if path.is_file():
             load_dotenv(path, override=False)
-
-    # Final pass: default dotenv behavior (CWD / parents) without clobbering.
     load_dotenv(override=False)
 
-    key = os.getenv("GEMINI_API_KEY")
+    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not key:
-        searched = ", ".join(str(p) for p in candidates)
+        searched = ", ".join(str(path) for path in candidates)
         raise ValueError(
             "GEMINI_API_KEY not found in environment or .env file. "
             f"Looked for: {searched}"
@@ -69,16 +66,25 @@ def load_gemini_api_key() -> str:
     return key
 
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-pro"
-# Separate daily quotas from preview 3.1 Pro. Skip exhausted / retired Pro ids.
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
+# 3.5 Flash-Lite 503s / returns empty under load. 2.5 Flash 404s for new keys.
 GEMINI_PRO_FALLBACKS = (
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
     "gemini-2.5-pro",
-    "gemini-pro-latest",
 )
+_DEAD_GEMINI_MODELS = {
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+}
 
 
 def resolve_gemini_model(explicit: str | None = None) -> str:
-    """Pick AutoCue's Pro model: call arg, AUTOCUE_GEMINI_MODEL, GEMINI_MODEL, default."""
+    """Pick AutoCue model: call arg, AUTOCUE_GEMINI_MODEL, GEMINI_MODEL, default.
+
+    Ignore leftover grok-* and retired 2.5 Flash ids.
+    """
     for candidate in (
         explicit,
         os.getenv("AUTOCUE_GEMINI_MODEL"),
@@ -86,8 +92,11 @@ def resolve_gemini_model(explicit: str | None = None) -> str:
         DEFAULT_GEMINI_MODEL,
     ):
         name = (candidate or "").strip()
-        if name:
-            return name
+        if not name or name.lower().startswith("grok"):
+            continue
+        if name.casefold() in _DEAD_GEMINI_MODELS:
+            continue
+        return name
     return DEFAULT_GEMINI_MODEL
 DEFAULT_UPLOAD_RETRIES = 5
 DEFAULT_ANALYSIS_RETRIES = 3
@@ -117,6 +126,63 @@ BEATGRID_PHASE_SOURCE_MIN_SCORE = 0.02
 # Absolute floor for multi-source votes; relative dominance within a stem can
 # still qualify a quieter source (important when kick is ambiguous).
 BEATGRID_PHASE_SOURCE_RELATIVE_MIN_SCORE = 0.008
+# Keep the current VDJ 1 when it already scores close to the stem-best phase.
+# Manual alignments must not be flipped for a slightly louder +2.
+EXISTING_DOWNBEAT_KEEP_RATIO = 0.72
+EXISTING_DOWNBEAT_MIN_SCORE = 0.02
+
+
+def existing_downbeat_is_trusted(phase_scores: Optional[Dict[int, float]]) -> bool:
+    """True when the current grid (phase 0) already looks like the musical 1.
+
+    Weak or missing evidence → trust the stored grid (often a hand alignment).
+    Only return False when another phase clearly beats the current 1.
+    """
+    if not phase_scores:
+        return True
+    current = float(phase_scores.get(0, 0.0) or 0.0)
+    best = max((float(score or 0.0) for score in phase_scores.values()), default=0.0)
+    if best < EXISTING_DOWNBEAT_MIN_SCORE:
+        return True
+    return current >= best * EXISTING_DOWNBEAT_KEEP_RATIO
+
+
+DOWNBEAT_HARD_FAIL_BEATS = 0.08
+
+
+def quantize_to_downbeat(time_sec: float, bpm: float, offset: float = 0.0) -> float:
+    """Nearest nonnegative bar-1 (beat 1)."""
+    if not bpm or bpm <= 0 or not math.isfinite(float(time_sec)):
+        return float(time_sec)
+    bar = (60.0 / float(bpm)) * 4.0
+    if bar <= 0:
+        return max(0.0, float(time_sec))
+    steps = (float(time_sec) - float(offset)) / bar
+    nearest = math.floor(steps + 0.5)
+    first = math.ceil(-float(offset) / bar)
+    nearest = max(int(nearest), int(first))
+    return float(offset) + nearest * bar
+
+
+def is_on_downbeat(
+    time_sec: float,
+    bpm: float,
+    offset: float = 0.0,
+    *,
+    tol_beats: float = DOWNBEAT_HARD_FAIL_BEATS,
+) -> bool:
+    """True when time is on beat 1 of the bar (the DJ jump point)."""
+    if not bpm or bpm <= 0 or not math.isfinite(float(time_sec)):
+        return False
+    beat = 60.0 / float(bpm)
+    bar = beat * 4.0
+    if bar <= 0:
+        return False
+    pos = (float(time_sec) - float(offset)) % bar
+    if pos < 0:
+        pos += bar
+    dist = min(pos, bar - pos)
+    return dist <= beat * max(0.0, float(tol_beats))
 BEATGRID_PHASE_SOURCE_RELATIVE_RATIO = 1.45
 BEATGRID_PHASE_NEAR_TIE_RATIO = 1.15
 BEATGRID_PHASE_CONSENSUS_MIN_SOURCES = 2
@@ -145,6 +211,9 @@ RETRYABLE_API_ERROR_TERMS = NETWORK_ERROR_TERMS + (
     "quota",
     "rate limit",
     "too many requests",
+    "empty response",
+    "high demand",
+    "overloaded",
 )
 
 

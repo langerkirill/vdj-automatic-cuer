@@ -1,6 +1,7 @@
 """
-Delete individual VirtualDJ cue/loop markers via surgical Song XML rewrite.
+Edit individual VirtualDJ cue/loop markers via surgical Song XML rewrite.
 
+Supports delete, color, rename, move, loop resize, and adding a cue.
 Keeps beatgrid, Num=0 hotcues, automix points, and CRLF line endings intact.
 """
 
@@ -24,6 +25,7 @@ from vdj_database_safety import (  # noqa: E402
     _find_song_span,
     _is_manual_cue_or_loop_poi,
     _poi_attr,
+    format_vdj_poi_line,
     normalize_database_path,
     parse_manual_poi_tag,
     read_vdj_database_text,
@@ -472,7 +474,7 @@ def set_poi_color(
     database_path: Path | None = None,
     dry_run: bool = False,
     allow_vdj_running: bool = False,
-    create_backup: bool = True,
+    create_backup: bool = False,
 ) -> dict[str, Any]:
     """Change Color on one cue or loop in VirtualDJ database.xml."""
     audio = _assert_allowed(Path(source_path))
@@ -520,6 +522,163 @@ def set_poi_color(
         shutil.copy2(db, backup)
 
     with vdj_db_write():
+        rewrite_song_xml_in_database(db, path_in_db, new_song, validate=False)
+
+    return {
+        "ok": True,
+        "dry_run": False,
+        "path": str(audio),
+        "name": audio.name,
+        "change": change,
+        "database_backup": backup,
+        "loop_count": before.loop_count,
+        "cue_count": before.cue_count,
+    }
+
+
+def _format_poi_pos(seconds: float) -> str:
+    if seconds < 0:
+        seconds = 0.0
+    s = f"{seconds:.6f}".rstrip("0").rstrip(".")
+    if "." not in s:
+        s = f"{seconds:.1f}"
+    return s
+
+
+def _existing_cue_near(
+    song_xml: str, pos: float, *, tolerance: float = POS_TOLERANCE
+) -> Optional[dict[str, Any]]:
+    for match in _POI_LINE_RE.finditer(song_xml):
+        parsed = parse_manual_poi_tag(match.group(0))
+        if parsed is None or parsed.get("kind") != "cue":
+            continue
+        try:
+            existing = float(parsed.get("position"))
+        except (TypeError, ValueError):
+            continue
+        if abs(existing - float(pos)) <= tolerance:
+            return parsed
+    return None
+
+
+def _next_cue_num(song_xml: str) -> str:
+    used: set[int] = set()
+    for match in _POI_LINE_RE.finditer(song_xml):
+        tag = match.group(0)
+        parsed = parse_manual_poi_tag(tag)
+        if parsed is None or parsed.get("kind") != "cue":
+            continue
+        try:
+            num = int(str(parsed.get("num") or "0"))
+        except ValueError:
+            continue
+        if 1 <= num <= 8:
+            used.add(num)
+    for candidate in range(1, 9):
+        if candidate not in used:
+            return str(candidate)
+    raise ValueError("All 8 VirtualDJ cue slots are used — delete one first")
+
+
+def add_cue_poi_in_song_xml(
+    song_xml: str,
+    *,
+    pos: float,
+    name: str | None = None,
+    color: str = "green",
+) -> tuple[str, dict[str, Any]]:
+    """Insert one manual cue POI. Does not strip existing markers."""
+    if pos < 0:
+        raise ValueError("pos must be >= 0")
+    occupied = _existing_cue_near(song_xml, float(pos))
+    if occupied is not None:
+        raise ValueError(
+            f"A cue already sits at {float(occupied.get('position') or pos):.3f}s "
+            f"({occupied.get('name') or 'Cue'})"
+        )
+    num = _next_cue_num(song_xml)
+    color_name, color_raw = normalize_cue_color(color)
+    label = (name or f"Cue {num}").strip() or f"Cue {num}"
+    label = label.replace("\n", " ").replace("\r", " ")[:120]
+    newline = "\r\n" if "\r\n" in song_xml else "\n"
+    line = format_vdj_poi_line(
+        pos=float(pos),
+        poi_type="cue",
+        num=num,
+        color=color_raw,
+        name=label,
+        newline=newline,
+    )
+    close_idx = song_xml.rfind("</Song>")
+    if close_idx < 0:
+        raise ValueError("Song XML is missing </Song>")
+    body = song_xml[:close_idx].rstrip(" \t")
+    if not body.endswith("\n"):
+        body += newline
+    out = body + line + song_xml[close_idx:]
+    return out, {
+        "kind": "cue",
+        "name": label,
+        "num": num,
+        "pos": float(pos),
+        "color_name": color_name,
+    }
+
+
+def add_cue_point(
+    source_path: str | Path,
+    *,
+    pos: float,
+    name: str | None = None,
+    color: str = "green",
+    database_path: Path | None = None,
+    dry_run: bool = False,
+    allow_vdj_running: bool = False,
+    create_backup: bool = True,
+) -> dict[str, Any]:
+    """Add one cue at pos (seconds) in VirtualDJ for this audio file."""
+    audio = _assert_allowed(Path(source_path))
+    db = Path(database_path) if database_path else VDJ_DATABASE
+    if not db.is_file():
+        raise FileNotFoundError(f"VDJ database not found: {db}")
+
+    if is_virtualdj_running() and not dry_run and not allow_vdj_running:
+        raise RuntimeError(
+            "VirtualDJ is running. Close it before adding a cue, or pass "
+            "allow_vdj_running=true (not recommended)."
+        )
+
+    before = summarize_cues(audio, db)
+    if not before.in_database:
+        raise KeyError(f"Track is not in VirtualDJ database: {audio}")
+
+    if dry_run:
+        content = read_vdj_database_text(db)
+        _path_in_db, start, end = _resolve_song_span(content, audio, source_path)
+        _new_song, change = add_cue_poi_in_song_xml(
+            content[start:end], pos=float(pos), name=name, color=color
+        )
+        return {
+            "ok": True,
+            "dry_run": True,
+            "path": str(audio),
+            "change": change,
+            "cues": before.to_dict(),
+            "database_backup": None,
+        }
+
+    backup: Optional[str] = None
+    if create_backup:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = f"{db}.backup.{ts}.music-sorter-cue-add"
+        shutil.copy2(db, backup)
+
+    with vdj_db_write():
+        content = read_vdj_database_text(db)
+        path_in_db, start, end = _resolve_song_span(content, audio, source_path)
+        new_song, change = add_cue_poi_in_song_xml(
+            content[start:end], pos=float(pos), name=name, color=color
+        )
         rewrite_song_xml_in_database(db, path_in_db, new_song, validate=True)
     after = summarize_cues(audio, db)
 
@@ -536,13 +695,169 @@ def set_poi_color(
     }
 
 
-def _format_poi_pos(seconds: float) -> str:
-    if seconds < 0:
-        seconds = 0.0
-    s = f"{seconds:.6f}".rstrip("0").rstrip(".")
-    if "." not in s:
-        s = f"{seconds:.1f}"
-    return s
+DEFAULT_LOOP_BEATS = 8.0
+
+
+def _existing_loop_near(
+    song_xml: str, pos: float, *, tolerance: float = POS_TOLERANCE
+) -> Optional[dict[str, Any]]:
+    for match in _POI_LINE_RE.finditer(song_xml):
+        parsed = parse_manual_poi_tag(match.group(0))
+        if parsed is None or parsed.get("kind") != "loop":
+            continue
+        try:
+            existing = float(parsed.get("position"))
+        except (TypeError, ValueError):
+            continue
+        if abs(existing - float(pos)) <= tolerance:
+            return parsed
+    return None
+
+
+def _next_loop_slot(song_xml: str) -> str:
+    used: set[int] = set()
+    for match in _POI_LINE_RE.finditer(song_xml):
+        tag = match.group(0)
+        parsed = parse_manual_poi_tag(tag)
+        if parsed is None or parsed.get("kind") != "loop":
+            continue
+        raw = _poi_attr(tag, "Slot")
+        if raw is None:
+            continue
+        try:
+            slot = int(str(raw))
+        except ValueError:
+            continue
+        if 1 <= slot <= 8:
+            used.add(slot)
+    for candidate in range(1, 9):
+        if candidate not in used:
+            return str(candidate)
+    raise ValueError("All 8 VirtualDJ loop slots are used — delete one first")
+
+
+def add_loop_poi_in_song_xml(
+    song_xml: str,
+    *,
+    pos: float,
+    name: str | None = None,
+    color: str = "green",
+    beats: float = DEFAULT_LOOP_BEATS,
+) -> tuple[str, dict[str, Any]]:
+    """Insert one manual loop POI. Does not strip existing markers."""
+    if pos < 0:
+        raise ValueError("pos must be >= 0")
+    occupied = _existing_loop_near(song_xml, float(pos))
+    if occupied is not None:
+        raise ValueError(
+            f"A loop already starts at {float(occupied.get('position') or pos):.3f}s "
+            f"({occupied.get('name') or 'Loop'})"
+        )
+    length = max(MIN_LOOP_BEATS, min(MAX_LOOP_BEATS, float(beats)))
+    if abs(length - round(length)) < 0.05:
+        length = float(round(length))
+    slot = _next_loop_slot(song_xml)
+    color_name, color_raw = normalize_cue_color(color)
+    label = (name or f"Loop {slot}").strip() or f"Loop {slot}"
+    label = label.replace("\n", " ").replace("\r", " ")[:120]
+    newline = "\r\n" if "\r\n" in song_xml else "\n"
+    line = format_vdj_poi_line(
+        pos=float(pos),
+        poi_type="loop",
+        num="-1",
+        color=color_raw,
+        name=label,
+        size=_format_loop_size(length),
+        slot=slot,
+        newline=newline,
+    )
+    close_idx = song_xml.rfind("</Song>")
+    if close_idx < 0:
+        raise ValueError("Song XML is missing </Song>")
+    body = song_xml[:close_idx].rstrip(" \t")
+    if not body.endswith("\n"):
+        body += newline
+    out = body + line + song_xml[close_idx:]
+    return out, {
+        "kind": "loop",
+        "name": label,
+        "num": "-1",
+        "slot": slot,
+        "pos": float(pos),
+        "beats": length,
+        "color_name": color_name,
+    }
+
+
+def add_loop_point(
+    source_path: str | Path,
+    *,
+    pos: float,
+    name: str | None = None,
+    color: str = "green",
+    beats: float = DEFAULT_LOOP_BEATS,
+    database_path: Path | None = None,
+    dry_run: bool = False,
+    allow_vdj_running: bool = False,
+    create_backup: bool = True,
+) -> dict[str, Any]:
+    """Add one loop at pos (seconds) in VirtualDJ for this audio file."""
+    audio = _assert_allowed(Path(source_path))
+    db = Path(database_path) if database_path else VDJ_DATABASE
+    if not db.is_file():
+        raise FileNotFoundError(f"VDJ database not found: {db}")
+
+    if is_virtualdj_running() and not dry_run and not allow_vdj_running:
+        raise RuntimeError(
+            "VirtualDJ is running. Close it before adding a loop, or pass "
+            "allow_vdj_running=true (not recommended)."
+        )
+
+    before = summarize_cues(audio, db)
+    if not before.in_database:
+        raise KeyError(f"Track is not in VirtualDJ database: {audio}")
+
+    if dry_run:
+        content = read_vdj_database_text(db)
+        _path_in_db, start, end = _resolve_song_span(content, audio, source_path)
+        _new_song, change = add_loop_poi_in_song_xml(
+            content[start:end], pos=float(pos), name=name, color=color, beats=beats
+        )
+        return {
+            "ok": True,
+            "dry_run": True,
+            "path": str(audio),
+            "change": change,
+            "cues": before.to_dict(),
+            "database_backup": None,
+        }
+
+    backup: Optional[str] = None
+    if create_backup:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = f"{db}.backup.{ts}.music-sorter-loop-add"
+        shutil.copy2(db, backup)
+
+    with vdj_db_write():
+        content = read_vdj_database_text(db)
+        path_in_db, start, end = _resolve_song_span(content, audio, source_path)
+        new_song, change = add_loop_poi_in_song_xml(
+            content[start:end], pos=float(pos), name=name, color=color, beats=beats
+        )
+        rewrite_song_xml_in_database(db, path_in_db, new_song, validate=True)
+    after = summarize_cues(audio, db)
+
+    return {
+        "ok": True,
+        "dry_run": False,
+        "path": str(audio),
+        "name": audio.name,
+        "change": change,
+        "cues": after.to_dict(),
+        "database_backup": backup,
+        "loop_count": after.loop_count,
+        "cue_count": after.cue_count,
+    }
 
 
 def set_poi_position_in_song_xml(
@@ -703,7 +1018,7 @@ def delete_cue_point(
     database_path: Path | None = None,
     dry_run: bool = False,
     allow_vdj_running: bool = False,
-    create_backup: bool = True,
+    create_backup: bool = False,
 ) -> dict[str, Any]:
     """
     Delete one cue or loop from VirtualDJ database.xml for this audio path.
@@ -753,9 +1068,9 @@ def delete_cue_point(
         shutil.copy2(db, backup)
 
     with vdj_db_write():
-        rewrite_song_xml_in_database(db, path_in_db, new_song, validate=True)
-    after = summarize_cues(audio, db)
-
+        rewrite_song_xml_in_database(db, path_in_db, new_song, validate=False)
+    after_cues = max(0, before.cue_count - (1 if removed.get("kind") == "cue" else 0))
+    after_loops = max(0, before.loop_count - (1 if removed.get("kind") == "loop" else 0))
     return {
         "ok": True,
         "dry_run": False,
@@ -764,8 +1079,7 @@ def delete_cue_point(
         "removed": removed,
         "cue_count_before": before.cue_count,
         "loop_count_before": before.loop_count,
-        "cue_count_after": after.cue_count,
-        "loop_count_after": after.loop_count,
-        "cues": after.to_dict(),
+        "cue_count_after": after_cues,
+        "loop_count_after": after_loops,
         "database_backup": backup,
     }

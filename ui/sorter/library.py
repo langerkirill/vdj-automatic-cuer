@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import time
+import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -15,8 +17,50 @@ from .config import (
     LIBRARIES,
     LIBRARY_SKIP_DIR_NAMES,
     READY_FOR_SORT,
+    SETS_ROOT,
     ZOUK_VIBE_FOLDERS,
 )
+
+# Set crate indexes: "407. Title"
+_SET_INDEX_PREFIX_RE = re.compile(r"^\d{1,4}\.\s+")
+# One library/crate prefix after that: "01 - Title", "01. Title",
+# "14 - Title" (space before the dash), or zero-padded "01 Title".
+# Do not eat "50 Cent" / "99 Problems".
+_CRATE_PREFIX_RE = re.compile(r"^(?:\d{1,3}\s*[.\-]\s*|0\d\s+)")
+_EXPLICIT_RE = re.compile(r"\s*\(\s*explicit\s*\)", re.I)
+# Promote collisions are "_1" / "_12", not years like "_2024".
+_COLLISION_SUFFIX_RE = re.compile(r"_\d{1,2}$")
+_PARENTHETICAL_RE = re.compile(r"\([^)]*\)")
+_VERSION_NUMBER_RE = re.compile(r"\bversion\s+(\d+)\b", re.I)
+_PAJAMATHON_EVENT_PREFIX = "pajamathon"
+_PLACEMENT_INDEX_CACHE: dict[str, Any] = {
+    "at": 0.0,
+    "placement": None,
+    "sets": None,
+}
+
+
+def invalidate_placement_indexes() -> None:
+    """Drop the House/Zouk/Sets basename cache after files move or vanish."""
+    _PLACEMENT_INDEX_CACHE["at"] = 0.0
+    _PLACEMENT_INDEX_CACHE["placement"] = None
+    _PLACEMENT_INDEX_CACHE["sets"] = None
+
+
+def cached_placement_indexes() -> tuple[
+    dict[str, list[dict[str, str]]],
+    dict[str, list[dict[str, str]]],
+]:
+    now = time.monotonic()
+    cached = _PLACEMENT_INDEX_CACHE
+    if cached["placement"] is not None and now - float(cached["at"]) < 120:
+        return cached["placement"], cached["sets"]
+    placement = build_audio_basename_index([*LIBRARIES.values(), CUES_SORTED])
+    sets = build_set_match_index(SETS_ROOT)
+    cached["at"] = now
+    cached["placement"] = placement
+    cached["sets"] = sets
+    return placement, sets
 
 
 @dataclass(frozen=True)
@@ -115,10 +159,10 @@ def build_audio_basename_index(
     max_per_name: int = 8,
 ) -> dict[str, list[dict[str, str]]]:
     """
-    One-pass index of audio basenames under library / archive roots.
+    One-pass index of audio under library / archive roots.
 
-    Used by Add Cues (and optionally Sort) so N tracks don't each rglob the tree.
-    Keys are exact basenames (case-sensitive match to source filename).
+    Used by Add Cues and Sort so N tracks don't each rglob the tree.
+    Keys are exact basenames and normalized title keys (track numbers stripped).
     """
     index: dict[str, list[dict[str, str]]] = {}
     for root in roots:
@@ -137,17 +181,21 @@ def build_audio_basename_index(
             if any(_should_skip_dir(part) for part in rel_parts[:-1]):
                 continue
             rel = path.relative_to(root).as_posix()
-            bucket = index.setdefault(path.name, [])
-            if len(bucket) >= max_per_name:
-                continue
-            bucket.append(
-                {
-                    "path": str(path),
-                    "relative_path": rel,
-                    "root": str(root),
-                    "root_name": root.name,
-                }
-            )
+            hit = {
+                "path": str(path),
+                "relative_path": rel,
+                "root": str(root),
+                "root_name": root.name,
+            }
+            for key in (path.name, normalize_placement_key(path.name)):
+                if not key:
+                    continue
+                bucket = index.setdefault(key, [])
+                if any(existing["path"] == hit["path"] for existing in bucket):
+                    continue
+                if len(bucket) >= max_per_name:
+                    continue
+                bucket.append(hit)
     return index
 
 
@@ -157,17 +205,158 @@ def find_matches_from_index(
     *,
     root_names: Optional[set[str]] = None,
     max_hits: int = 8,
+    fuzzy: bool = True,
 ) -> list[dict[str, str]]:
     """Filter a prebuilt basename index for one filename (optionally by root)."""
-    hits = index.get(filename) or []
+    keys = [filename]
+    if fuzzy:
+        norm = normalize_placement_key(filename)
+        if norm and norm not in keys:
+            keys.append(norm)
     out: list[dict[str, str]] = []
-    for hit in hits:
-        if root_names is not None and hit.get("root_name") not in root_names:
-            continue
-        out.append(hit)
-        if len(out) >= max_hits:
-            break
+    seen: set[str] = set()
+    for key in keys:
+        for hit in index.get(key) or []:
+            path = hit.get("path") or ""
+            if not path or path in seen:
+                continue
+            if not Path(path).is_file():
+                continue
+            if root_names is not None and hit.get("root_name") not in root_names:
+                continue
+            seen.add(path)
+            out.append(hit)
+            if len(out) >= max_hits:
+                return out
     return out
+
+
+def _stem_after_prefixes(filename: str) -> tuple[str, str]:
+    path = Path(filename)
+    stem = unicodedata.normalize("NFC", path.stem)
+    ext = path.suffix.lower()
+    while True:
+        nxt = _SET_INDEX_PREFIX_RE.sub("", stem, count=1)
+        if nxt == stem:
+            break
+        stem = nxt
+    stem = _CRATE_PREFIX_RE.sub("", stem, count=1)
+    stem = _EXPLICIT_RE.sub("", stem)
+    stem = _COLLISION_SUFFIX_RE.sub("", stem)
+    return stem, ext
+
+
+def _compact_stem_key(stem: str, ext: str) -> str:
+    text = re.sub(r"[^a-z0-9]+", " ", stem.lower()).strip()
+    return f"{text}{ext}" if text else ""
+
+
+def normalize_placement_key(filename: str) -> str:
+    """Comparable stem+ext: strip track numbers, (Explicit), punctuation."""
+    stem, ext = _stem_after_prefixes(filename)
+    return _compact_stem_key(stem, ext)
+
+
+def placement_match_keys(filename: str) -> list[str]:
+    """
+    Lookup keys for the same recording under slightly different filenames.
+
+    Includes the exact name, the normalized title, a parenthetical-stripped
+    title (remix vs featured-artist tags), and Version N collapsed to N.
+    """
+    keys: list[str] = []
+    seen: set[str] = set()
+
+    def add(key: str) -> None:
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+
+    add(filename)
+    stem, ext = _stem_after_prefixes(filename)
+    add(_compact_stem_key(stem, ext))
+    add(_compact_stem_key(_VERSION_NUMBER_RE.sub(r"\1", stem), ext))
+    stripped = _PARENTHETICAL_RE.sub(" ", stem)
+    add(_compact_stem_key(stripped, ext))
+    add(_compact_stem_key(_VERSION_NUMBER_RE.sub(r"\1", stripped), ext))
+    return keys
+
+
+def is_pajamathon_event(name: str) -> bool:
+    return (name or "").strip().lower().startswith(_PAJAMATHON_EVENT_PREFIX)
+
+
+def _set_hit(path: Path, sets_root: Path) -> dict[str, str]:
+    rel = path.relative_to(sets_root).as_posix()
+    event = path.relative_to(sets_root).parts[0]
+    return {
+        "path": str(path),
+        "relative_path": rel,
+        "root": str(sets_root),
+        "root_name": event,
+        "event": event,
+    }
+
+
+def build_set_match_index(
+    sets_root: Path | None = None,
+    *,
+    max_per_key: int = 8,
+) -> dict[str, list[dict[str, str]]]:
+    """Index Sets/ audio by exact basename and normalized title key."""
+    root = Path(sets_root or SETS_ROOT)
+    index: dict[str, list[dict[str, str]]] = {}
+    if not root.is_dir():
+        return index
+    for path in root.rglob("*"):
+        if not _is_audio_file(path):
+            continue
+        try:
+            rel_parts = path.relative_to(root).parts
+        except ValueError:
+            continue
+        if not rel_parts or not is_pajamathon_event(rel_parts[0]):
+            continue
+        if any(_should_skip_dir(part) for part in rel_parts[:-1]):
+            continue
+        hit = _set_hit(path, root)
+        for key in placement_match_keys(path.name):
+            if not key:
+                continue
+            bucket = index.setdefault(key, [])
+            if any(existing["path"] == hit["path"] for existing in bucket):
+                continue
+            if len(bucket) >= max_per_key:
+                continue
+            bucket.append(hit)
+    return index
+
+
+def find_set_matches(
+    filename: str,
+    *,
+    index: Optional[dict[str, list[dict[str, str]]]] = None,
+    sets_root: Path | None = None,
+    max_hits: int = 8,
+) -> list[dict[str, str]]:
+    """Locate the same song under Sets/ (exact name, then fuzzy title)."""
+    lookup = index if index is not None else build_set_match_index(sets_root)
+    hits: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for key in placement_match_keys(filename):
+        if not key:
+            continue
+        for hit in lookup.get(key) or []:
+            path = hit.get("path") or ""
+            if not path or path in seen:
+                continue
+            if not Path(path).is_file():
+                continue
+            seen.add(path)
+            hits.append(hit)
+            if len(hits) >= max_hits:
+                return hits
+    return hits
 
 
 def find_cues_sorted_matches(
@@ -175,11 +364,14 @@ def find_cues_sorted_matches(
     *,
     index: Optional[dict[str, list[dict[str, str]]]] = None,
 ) -> list[dict[str, str]]:
-    if index is not None:
-        return find_matches_from_index(
-            filename, index, root_names={CUES_SORTED.name}
-        )
-    return find_matches_by_filename(filename, [CUES_SORTED])
+    lookup = (
+        index
+        if index is not None
+        else build_audio_basename_index([CUES_SORTED])
+    )
+    return find_matches_from_index(
+        filename, lookup, root_names={CUES_SORTED.name}, fuzzy=True
+    )
 
 
 def find_library_matches(
@@ -187,11 +379,14 @@ def find_library_matches(
     *,
     index: Optional[dict[str, list[dict[str, str]]]] = None,
 ) -> list[dict[str, str]]:
-    if index is not None:
-        return find_matches_from_index(
-            filename, index, root_names=set(LIBRARIES.keys())
-        )
-    return find_matches_by_filename(filename, list(LIBRARIES.values()))
+    lookup = (
+        index
+        if index is not None
+        else build_audio_basename_index(list(LIBRARIES.values()))
+    )
+    return find_matches_from_index(
+        filename, lookup, root_names=set(LIBRARIES.keys()), fuzzy=True
+    )
 
 
 def list_ready_tracks(source_dir: Path | None = None) -> list[TrackInfo]:
@@ -227,12 +422,64 @@ def add_cues_section(*, group: str = "", relative_path: str = "") -> str:
     return "inbox"
 
 
+def list_pajamathon_set_tracks(sets_root: Path | None = None) -> list[TrackInfo]:
+    """Audio in Sets/Pajamathon* — the event crate the Pajamathon tab should show."""
+    root = Path(sets_root or SETS_ROOT)
+    if not root.is_dir():
+        return []
+    tracks: list[TrackInfo] = []
+    for child in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+        if not child.is_dir() or not is_pajamathon_event(child.name):
+            continue
+        try:
+            files = sorted(child.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            continue
+        for path in files:
+            if not _is_audio_file(path):
+                continue
+            stems = Path(f"{path}.vdjstems")
+            tracks.append(
+                TrackInfo(
+                    path=str(path),
+                    name=path.name,
+                    stems_path=str(stems) if stems.is_file() else None,
+                    size_bytes=path.stat().st_size,
+                    relative_path=f"{child.name}/{path.name}",
+                    group=child.name,
+                    section="pajamathon",
+                )
+            )
+    return tracks
+
+
+def merge_add_cues_and_pajamathon_set(
+    add_tracks: list[TrackInfo],
+    set_tracks: list[TrackInfo] | None = None,
+) -> list[TrackInfo]:
+    """Inbox + event crate. Drop Add Cues/Pajamathon dupes that already live in Sets/."""
+    event = list(set_tracks if set_tracks is not None else list_pajamathon_set_tracks())
+    event_keys = {normalize_placement_key(t.name) for t in event}
+    merged: list[TrackInfo] = []
+    for track in add_tracks:
+        if (
+            track.section == "pajamathon"
+            and normalize_placement_key(track.name) in event_keys
+        ):
+            continue
+        merged.append(track)
+    merged.extend(event)
+    return merged
+
+
 def add_cues_tracks_by_crate(
     crate: str = "all",
     source_dir: Path | None = None,
 ) -> list[TrackInfo]:
     """Add Cues tracks for one crate: all, pajamathon, or inbox."""
-    tracks = list_add_cues_tracks(source_dir)
+    add_tracks = list_add_cues_tracks(source_dir)
+    set_tracks = [] if source_dir is not None else list_pajamathon_set_tracks()
+    tracks = merge_add_cues_and_pajamathon_set(add_tracks, set_tracks)
     if crate == "pajamathon":
         return [t for t in tracks if t.section == "pajamathon"]
     if crate == "inbox":

@@ -27,21 +27,12 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+from .llm import models_to_try, resolve_sorter_model, should_try_next_model
 from .practice_sets import get_practice_set_detail
 from .transitions_db import lookup_options, normalize_key, save_practice_score
 
-DEFAULT_MODEL = os.getenv("MUSIC_SORTER_GEMINI_MODEL") or os.getenv(
-    "GEMINI_MODEL", "gemini-3.5-flash"
-)
-MODEL_FALLBACKS = [
-    DEFAULT_MODEL,
-    "gemini-3.5-flash",
-    "gemini-3.6-flash",
-    "gemini-3-flash-preview",
-    "gemini-flash-latest",
-    "gemini-2.0-flash",
-    "gemini-2.5-flash",
-]
+DEFAULT_MODEL = resolve_sorter_model()
+MODEL_FALLBACKS = models_to_try(DEFAULT_MODEL)
 
 # Default blend window (refined per-transition by gap length)
 PRE_ROLL_DEFAULT = 28.0
@@ -321,15 +312,10 @@ Be honest. Average club transitions score 5–6. 9–10 is rare.
         http_options=types.HttpOptions(timeout=180_000),
     )
 
-    models_to_try: list[str] = []
-    for name in [model_name, *MODEL_FALLBACKS]:
-        if name and name not in models_to_try:
-            models_to_try.append(name)
-
     response = None
     last_error: Optional[Exception] = None
     used = model_name
-    for mid in models_to_try:
+    for mid in models_to_try(model_name):
         try:
             response = client.models.generate_content(
                 model=mid,
@@ -340,16 +326,7 @@ Be honest. Average club transitions score 5–6. 9–10 is rare.
             break
         except Exception as exc:
             last_error = exc
-            err = str(exc).lower()
-            if any(
-                t in err
-                for t in (
-                    "not_found",
-                    "not found",
-                    "no longer available",
-                    "invalid model",
-                )
-            ):
+            if should_try_next_model(exc):
                 continue
             raise
 

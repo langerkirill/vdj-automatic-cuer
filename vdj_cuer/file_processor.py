@@ -118,9 +118,6 @@ class FileProcessorMixin:
                 song_element.remove(poi)
 
             print(f"🧹 Removed {len(pois_to_remove)} existing cues/loops")
-            self._apply_verified_beatgrid_to_song(
-                song_element, audio_file_path, working_bpm
-            )
 
             # Prepare all cues and loops with timing alignment
             all_pois = []
@@ -133,6 +130,8 @@ class FileProcessorMixin:
                 aligned_time = self.validate_timing_hybrid(
                     gemini_time, working_bpm, audio_file_path
                 )
+                if aligned_time is None:
+                    continue
 
                 # Skip cues that are beyond song length
                 if song_length and aligned_time >= song_length:
@@ -246,8 +245,10 @@ class FileProcessorMixin:
                 # Snap loop starts to a beat (prefer 1 when already near it).
                 gemini_time = loop_data.get("start", 0)
                 aligned_time = self.validate_timing_hybrid(
-                    gemini_time, working_bpm, audio_file_path, grid_beats=1
+                    gemini_time, working_bpm, audio_file_path, grid_beats=4
                 )
+                if aligned_time is None:
+                    continue
 
                 # Skip loops that are beyond song length (leave some buffer)
                 if song_length and aligned_time >= (song_length - 10):

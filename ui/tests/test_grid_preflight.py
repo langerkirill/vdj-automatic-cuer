@@ -60,6 +60,14 @@ class GridPreflightTests(unittest.TestCase):
         self.assertEqual(result["status"], "warn")
         self.assertTrue(any("double-time" in w.lower() for w in result["warnings"]))
 
+    def test_slow_zouk_57_bpm_can_autocue(self):
+        result = gp.preflight_from_cues(
+            _cues(bpm=57.0, has_beatgrid=True, beatgrid_pos=0.1, scan_phase=0.1)
+        )
+        self.assertTrue(result["can_autocue"])
+        self.assertNotEqual(result["status"], "blocked")
+        self.assertNotEqual(result["label"], "No usable BPM")
+
     def test_ok_grid(self):
         result = gp.preflight_from_cues(
             _cues(bpm=92.0, has_beatgrid=True, beatgrid_pos=0.12, scan_phase=0.12)

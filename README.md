@@ -162,13 +162,13 @@ The setup script will:
 
 ### Gemini Model
 
-The default AutoCue model is `gemini-2.5-pro` (stable Pro, its own daily quota). Preview `gemini-3.1-pro-preview` is capped at 250 requests/day on many paid tiers. If 2.5 Pro is exhausted, AutoCue falls back to `gemini-pro-latest`. Assemble still defaults to `gemini-3.5-flash`.
+The default AutoCue model is `gemini-2.5-pro` (hears audio + stems). If 2.5 Pro is exhausted, AutoCue falls back to `gemini-pro-latest` then `gemini-2.5-flash`. Assemble, Recs, folder recommend, and practice mix scoring default to `gemini-2.5-flash`.
 
 ```bash
 python3 automatic_music_cuer_gemini.py --model gemini-2.5-pro "path/to/song.mp3"
 ```
 
-You can also set `GEMINI_MODEL=gemini-2.5-pro` in `.env`.
+You can also set `GEMINI_MODEL=gemini-2.5-pro` and `MUSIC_SORTER_GEMINI_MODEL=gemini-2.5-flash` in `.env`.
 
 ## Music Sorter UI
 
@@ -195,7 +195,7 @@ Open [http://127.0.0.1:8787](http://127.0.0.1:8787). Close VirtualDJ before data
 4. **Sort** mode:
    - Select destination under House or Zouk (or accept Gemini’s pick)
    - **Sort into folder** — copies to library + Cues Sorted, retargets FilePath
-   - If **Already in library**, use **✕ Delete** on a placement to Trash that copy and remove its VDJ Song
+   - If **Already in library**, use **Copy cues** to write this track’s markers onto that existing House/Zouk/Cues Sorted/Pajamathon file (audio stays put). **✕ Delete** Trashes a library/archive copy and removes its VDJ Song
 
 ### Default folders
 
@@ -234,7 +234,7 @@ python3 automatic_music_cuer_gemini.py --cues-only "path/to/song.mp3"
 python3 automatic_music_cuer_gemini.py --loops-only "path/to/song.mp3"
 
 # Force a different Gemini model
-python3 automatic_music_cuer_gemini.py --model gemini-3.5-flash "path/to/song.mp3"
+python3 automatic_music_cuer_gemini.py --model gemini-2.5-flash "path/to/song.mp3"
 
 # Process an entire folder (1 song at a time by default — safest for large libraries)
 python3 automatic_music_cuer_gemini.py "path/to/folder"
@@ -449,7 +449,7 @@ After running the script:
 
 - Ensure `.env` file exists in this repository directory
 - Check that API key is correctly formatted: `GEMINI_API_KEY=AIza...`
-- Check that `GEMINI_MODEL` is set to a model your API key can access, such as `gemini-3.1-pro-preview` or `gemini-2.5-pro`
+- Check that `GEMINI_MODEL` is set to a model your API key can access, such as `gemini-2.5-pro` or `gemini-2.5-flash`
 
 ### "Database not found"
 

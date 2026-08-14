@@ -61,6 +61,17 @@ class LoopSeamClipTests(unittest.TestCase):
                     os.remove(out)
 
 
+class LoopSeamClientTests(unittest.TestCase):
+    def test_available_when_dedicated_gemini_client_is_set(self):
+        from automatic_music_cuer_gemini import AutomaticMusicCuer
+
+        cuer = AutomaticMusicCuer.__new__(AutomaticMusicCuer)
+        cuer.client = object()
+        self.assertTrue(cuer._gemini_loop_seam_available())
+        cuer.client = None
+        self.assertFalse(cuer._gemini_loop_seam_available())
+
+
 class LoopSeamRetryTests(unittest.TestCase):
     def test_retry_placements_prefer_original_then_neighbor_beats(self):
         placements = StemMixin._loop_retry_placements(

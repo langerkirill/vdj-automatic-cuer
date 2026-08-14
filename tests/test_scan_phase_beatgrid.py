@@ -10,10 +10,11 @@ from vdj_cuer.vdj_database import VdjDatabaseMixin
 
 
 class ScanPhaseBeatgridTests(unittest.TestCase):
-    def test_resolve_prefers_beatgrid_poi_over_scan_phase(self):
+    def test_resolve_prefers_scan_phase_over_stale_poi(self):
+        """Sozinho: Phase is the 1; POI one beat later must not win."""
         self.assertEqual(
-            VdjDatabaseMixin._resolve_beatgrid_offset(0.25, 56.1),
-            0.25,
+            VdjDatabaseMixin._resolve_beatgrid_offset(23.562858, 22.846775),
+            22.846775,
         )
 
     def test_resolve_falls_back_to_scan_phase(self):
@@ -54,6 +55,19 @@ class ScanPhaseBeatgridTests(unittest.TestCase):
             bar = (60.0 / actual_bpm) * 4.0
             steps = (fixed - phase) / bar
             self.assertAlmostEqual(steps, round(steps), places=5)
+
+    def test_sozinho_cues_on_the_two_are_off_the_one(self):
+        from vdj_cuer.common import is_on_downbeat, quantize_to_downbeat
+
+        bpm = 83.99996640001345
+        phase = 22.846775
+        poi = 23.562858
+        self.assertFalse(is_on_downbeat(poi, bpm, phase))
+        snapped = quantize_to_downbeat(poi, bpm, phase)
+        self.assertTrue(is_on_downbeat(snapped, bpm, phase))
+        beat = 60.0 / bpm
+        off = abs(snapped - phase) / beat
+        self.assertLess(min(off % 4, 4 - (off % 4)), 0.08)
 
 
 if __name__ == "__main__":

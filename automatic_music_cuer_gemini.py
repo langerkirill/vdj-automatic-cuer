@@ -102,7 +102,7 @@ def main():
     parser.add_argument(
         "paths", nargs="+", help="Audio files or directories to process"
     )
-    parser.add_argument("--api-key", help="Gemini API key (optional if in .env file)")
+    parser.add_argument("--api-key", help="Gemini API key (optional if GEMINI_API_KEY is in .env)")
     parser.add_argument(
         "--model",
         default=None,

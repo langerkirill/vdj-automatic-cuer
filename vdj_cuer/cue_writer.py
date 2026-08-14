@@ -55,9 +55,7 @@ class CueWriterMixin:
             analysis_data, working_bpm, song_length
         )
         actual_bpm = self._actual_bpm(working_bpm)
-        beatgrid_offset = self._get_verified_beatgrid_offset(
-            audio_file_path, working_bpm
-        )
+        beatgrid_offset = float(self.get_beatgrid_offset(audio_file_path) or 0.0)
         analysis_data = apply_precision_gate(
             analysis_data, actual_bpm, beatgrid_offset
         )
@@ -149,7 +147,7 @@ class CueWriterMixin:
         analysis_data, working_bpm, song_length = self._finalize_analysis_for_write(
             audio_file_path, analysis_data
         )
-        alignment = self._verify_beatgrid_alignment(audio_file_path, working_bpm)
+        vdj_offset = float(self.get_beatgrid_offset(audio_file_path) or 0.0)
 
         prepared_cues: List[PreparedPoi] = []
         if scope != WRITE_SCOPE_LOOPS:
@@ -157,6 +155,19 @@ class CueWriterMixin:
                 aligned_time = self.validate_timing_hybrid(
                     cue_data.get("timestamp", 0), working_bpm, audio_file_path
                 )
+                actual = self._actual_bpm(working_bpm)
+                if (
+                    aligned_time is None
+                    or actual is None
+                    or not is_on_downbeat(
+                        aligned_time, actual, vdj_offset
+                    )
+                ):
+                    print(
+                        f"🚫 Hard-fail cue '{cue_data.get('cue_name', 'cue')}' "
+                        f"at {cue_data.get('timestamp')}s — not on the 1"
+                    )
+                    continue
                 if song_length and aligned_time >= song_length:
                     continue
                 elements = cue_data.get("elements", [])
@@ -194,8 +205,21 @@ class CueWriterMixin:
                     loop_data.get("start", 0),
                     working_bpm,
                     audio_file_path,
-                    grid_beats=1,
+                    grid_beats=4,
                 )
+                actual = self._actual_bpm(working_bpm)
+                if (
+                    aligned_time is None
+                    or actual is None
+                    or not is_on_downbeat(
+                        aligned_time, actual, vdj_offset
+                    )
+                ):
+                    print(
+                        f"🚫 Hard-fail loop '{loop_data.get('loop_name', 'loop')}' "
+                        f"at {loop_data.get('start')}s — not on the 1"
+                    )
+                    continue
                 if song_length and aligned_time >= (song_length - 10):
                     continue
                 elements = loop_data.get("elements", [])
@@ -251,8 +275,8 @@ class CueWriterMixin:
         return PreparedSongCues(
             cues=prepared_cues,
             loops=prepared_loops,
-            beatgrid_offset=alignment.offset if alignment.corrected else None,
-            beatgrid_corrected=alignment.corrected,
+            beatgrid_offset=vdj_offset,
+            beatgrid_corrected=False,
             comment=self.sanitize_xml_content(" ".join(used_colors)),
         )
 
@@ -311,14 +335,7 @@ class CueWriterMixin:
         does not treat the database as corrupted on open.
         """
         newline = _detect_newline(song_xml)
-        # VirtualDJ displays beat "1" from Scan Phase AND the beatgrid POI.
-        # Library analysis shows Phase == beatgrid Pos on ~23k tracks; when we
-        # only update the POI, cues land on our grid while VDJ still draws the
-        # old "1" from Phase (exactly the Vortex Number 9 failure mode).
-        if prepared.beatgrid_corrected and prepared.beatgrid_offset is not None:
-            song_xml = self._apply_beatgrid_to_song_xml(
-                song_xml, prepared.beatgrid_offset, newline=newline
-            )
+        # AutoCue never rewrites Scan Phase / beatgrid POI. Align grid is separate.
 
         poi_lines = self._build_native_poi_lines(prepared, newline=newline)
         return inject_pois_into_song_xml(
@@ -368,18 +385,6 @@ class CueWriterMixin:
             if poi.get("Type") in ["cue", "loop"] and poi.get("Num", "0") != "0":
                 song_element.remove(poi)
 
-        if prepared.beatgrid_corrected and prepared.beatgrid_offset is not None:
-            beatgrid_poi = None
-            for poi in song_element.findall("Poi"):
-                if poi.get("Type") == "beatgrid":
-                    beatgrid_poi = poi
-                    break
-            if beatgrid_poi is None:
-                beatgrid_poi = ET.Element("Poi")
-                beatgrid_poi.set("Type", "beatgrid")
-                song_element.append(beatgrid_poi)
-            beatgrid_poi.set("Pos", f"{prepared.beatgrid_offset:.6f}")
-
         all_pois: List[Tuple[float, ET.Element]] = []
         for index, cue in enumerate(prepared.cues, start=1):
             cue_poi = ET.Element("Poi")
@@ -422,10 +427,6 @@ class CueWriterMixin:
     ) -> bool:
         print(f"\n🎶 Applying cues: {os.path.basename(audio_file_path)}")
         print("🔍 DRY RUN - Would create:")
-        if prepared.beatgrid_corrected and prepared.beatgrid_offset is not None:
-            print(
-                f"  Would update beatgrid '1' → {prepared.beatgrid_offset:.6f}s"
-            )
         for index, cue in enumerate(prepared.cues, start=1):
             print(
                 f"  Cue {index}: '{cue.name}' at {cue.position:.1f}s | "

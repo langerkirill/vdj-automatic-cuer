@@ -69,7 +69,7 @@ class WriteScopePrepareTests(unittest.TestCase):
         analysis = {
             "measure_changes": [
                 {
-                    "timestamp": 5.0,
+                    "timestamp": 4.0,
                     "elements": ["drums"],
                     "cue_name": "New Cue",
                     "color": "green",
@@ -91,9 +91,7 @@ class WriteScopePrepareTests(unittest.TestCase):
         with patch.object(
             cuer, "_finalize_analysis_for_write", return_value=(analysis, 120.0, 200.0)
         ), patch.object(
-            cuer,
-            "_verify_beatgrid_alignment",
-            return_value=type("A", (), {"offset": 0.0, "corrected": False})(),
+            cuer, "get_beatgrid_offset", return_value=0.0
         ), patch.object(
             cuer, "validate_timing_hybrid", side_effect=lambda *a, **k: float(a[0])
         ), patch.object(
@@ -147,9 +145,7 @@ class WriteScopePrepareTests(unittest.TestCase):
         with patch.object(
             cuer, "_finalize_analysis_for_write", return_value=(analysis, 120.0, 200.0)
         ), patch.object(
-            cuer,
-            "_verify_beatgrid_alignment",
-            return_value=type("A", (), {"offset": 0.0, "corrected": False})(),
+            cuer, "get_beatgrid_offset", return_value=0.0
         ), patch.object(
             cuer, "validate_timing_hybrid", side_effect=lambda *a, **k: float(a[0])
         ), patch.object(
