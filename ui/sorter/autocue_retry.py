@@ -22,6 +22,7 @@ from .config import CUES_ROOT, LIBRARIES, SETS_ROOT, VDJ_DATABASE
 from .action_log import DEFAULT_LOG_PATH
 from .db_lock import get_db_write_lock
 from .grid_preflight import assess_grid_for_autocue
+from .ml_training import schedule_training_update
 from .relocate import is_virtualdj_running, summarize_cues, summarize_cues_for_paths
 
 
@@ -116,6 +117,21 @@ def autocue_fail_message(
     if warn_msg:
         return warn_msg
     return "AutoCue failed while writing cues (not a missing-beatgrid check)."
+
+
+def maybe_ingest_after_autocue(
+    audio_path: str | Path,
+    after: Any,
+    *,
+    dry_run: bool,
+    ok: bool,
+) -> None:
+    """Add a successfully cued track to the ML set. No-op on failure/dry-run."""
+    if not ok or dry_run or after is None:
+        return
+    if not (getattr(after, "cue_count", 0) or getattr(after, "loop_count", 0)):
+        return
+    schedule_training_update(audio_path, after)
 
 
 RETRY_HISTORY_ACTIONS = frozenset({"retry_cues", "retry_cues_complete"})
@@ -955,6 +971,9 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
                             "warn": warn_msg or None,
                         },
                     )
+                maybe_ingest_after_autocue(
+                    audio_path, after, dry_run=dry_run, ok=True
+                )
             else:
                 _update_job(
                     job_id,

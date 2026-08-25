@@ -334,6 +334,17 @@ class CueEditDeleteTests(unittest.TestCase):
             self.assertIn('Name="Intro"', text)
             self.assertTrue(Path(result["database_backup"]).is_file())
 
+    def test_schedule_ml_after_cue_change_updates_or_drops(self):
+        cued = type("C", (), {"cue_count": 2, "loop_count": 1})()
+        empty = type("C", (), {"cue_count": 0, "loop_count": 0})()
+        with patch.object(cue_mod, "schedule_training_update") as upd, patch.object(
+            cue_mod, "schedule_training_drop"
+        ) as drop:
+            cue_mod._schedule_ml_after_cue_change(Path("/tmp/song.flac"), cued)
+            cue_mod._schedule_ml_after_cue_change(Path("/tmp/song.flac"), empty)
+        upd.assert_called_once()
+        drop.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

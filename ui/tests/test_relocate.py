@@ -514,13 +514,17 @@ class RelocateTests(unittest.TestCase):
                 },
             ), patch.object(relocate_mod, "CUES_ROOT", root), patch(
                 "sorter.relocate.is_virtualdj_running", return_value=False
-            ):
+            ), patch(
+                "sorter.ml_training.schedule_training_update"
+            ) as ingest:
                 result = relocate_mod.promote_add_cues_track(
                     src,
                     destination_stage="ready_for_sort",
                     database_path=db,
                     create_backup=True,
                 )
+            ingest.assert_called_once()
+            self.assertEqual(Path(ingest.call_args.args[0]).name, "track.flac")
 
             dest = ready / "track.flac"
             self.assertTrue(dest.is_file())

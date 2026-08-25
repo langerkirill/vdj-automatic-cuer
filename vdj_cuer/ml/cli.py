@@ -1,4 +1,4 @@
-"""CLI: export labels from Cues Sorted, train, evaluate."""
+"""CLI: export labels from cued pipeline folders, train, evaluate, ingest."""
 
 from __future__ import annotations
 
@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from .ab import combine_times, f1
+from .dataset import DEFAULT_LABELS, export_training_labels, load_jsonl as _load_jsonl
 from .eval_metrics import bar_window_seconds, score_track
-from .features import bar_seconds, feature_matrix, rows_for_track
-from .labels import attach_labels, is_training_source_path, label_bars
+from .features import feature_matrix
+from .ingest import ingest_cued_track
 from .model import (
     DEFAULT_ARTIFACT,
     auc_or_none,
@@ -25,127 +26,32 @@ from .model import (
 )
 from .propose import propose_cues
 
-DEFAULT_LABELS = (
-    Path.home() / "Music" / "DJ" / "Music" / "Cues" / ".cache" / "ml-labels" / "bars.jsonl"
-)
-AUDIO_EXT = {".mp3", ".flac", ".m4a", ".wav", ".aiff", ".aif", ".ogg", ".opus"}
-
-
-def _ensure_ui_on_path() -> Path:
-    ui_dir = Path(__file__).resolve().parents[2] / "ui"
-    if str(ui_dir) not in sys.path:
-        sys.path.insert(0, str(ui_dir))
-    return ui_dir
-
-
-def _collect_audio(roots: list[Path]) -> list[Path]:
-    files: list[Path] = []
-    for root in roots:
-        if not root.is_dir():
-            continue
-        files.extend(
-            p
-            for p in root.rglob("*")
-            if p.is_file() and p.suffix.lower() in AUDIO_EXT
-        )
-    return sorted({p.resolve() for p in files})
-
 
 def cmd_export(args: argparse.Namespace) -> int:
-    _ensure_ui_on_path()
-    from sorter.config import CUES_SORTED
-    from sorter.relocate import summarize_cues_for_paths
-    from vdj_cuer.stem_evidence import StemProfile, load_stem_profiles
-    from vdj_cuer.stems import StemMixin
-
-    class _StemIO(StemMixin):
-        pass
-
     dest = Path(args.out)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    files = [
-        p
-        for p in _collect_audio([CUES_SORTED])
-        if is_training_source_path(str(p))
-    ]
-    summaries = summarize_cues_for_paths([str(p) for p in files])
-    helper = _StemIO()
-    written = 0
-    skipped = 0
-    with dest.open("w", encoding="utf-8") as handle:
-        for index, path in enumerate(files, start=1):
-            if index == 1 or index % 25 == 0 or index == len(files):
-                print(f"Export {index}/{len(files)} · {path.name}", flush=True)
-            summary = summaries.get(str(path))
-            if summary is None or not summary.bpm or summary.bpm <= 0:
-                skipped += 1
-                continue
-            duration = float(summary.song_length or 0.0)
-            offset = float(
-                summary.scan_phase
-                if summary.scan_phase is not None
-                else (summary.beatgrid_pos or 0.0)
-            )
-            points = [p.to_dict() if hasattr(p, "to_dict") else p for p in summary.points]
-            try:
-                mix = StemProfile.decode(str(path))
-            except Exception:
-                skipped += 1
-                continue
-            if duration <= 0:
-                duration = mix.frame_seconds * len(mix.frames)
-            profiles = {"mix": mix}
-            stems_path = Path(f"{path}.vdjstems")
-            if stems_path.is_file():
-                try:
-                    with tempfile.TemporaryDirectory(prefix="ml-stems-") as tmp:
-                        extracted = helper._extract_vdj_stems(str(stems_path), tmp)
-                        if extracted:
-                            profiles.update(load_stem_profiles(extracted))
-                except Exception:
-                    pass
-            feature_rows = rows_for_track(
-                profiles,
-                duration=duration,
-                bpm=float(summary.bpm),
-                offset=offset,
-                audio_path=str(path),
-            )
-            labeled = attach_labels(
-                feature_rows,
-                label_bars(
-                    points,
-                    duration=duration,
-                    bpm=float(summary.bpm),
-                    offset=offset,
-                ),
-            )
-            if not labeled:
-                skipped += 1
-                continue
-            for row in labeled:
-                payload = {
-                    **row,
-                    "track_id": str(path),
-                    "duration": duration,
-                    "offset": offset,
-                    "has_stems": int(stems_path.is_file()),
-                }
-                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                written += 1
-    print(f"Wrote {written} bar rows → {dest} (skipped {skipped} tracks)")
+    stats = export_training_labels(dest, progress=lambda msg: print(msg, flush=True))
+    print(
+        f"Wrote {stats['written']} bar rows → {dest} "
+        f"(skipped {stats['skipped']} tracks, scanned {stats['tracks']})"
+    )
     return 0
 
 
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            rows.append(json.loads(line))
-    return rows
+def cmd_ingest(args: argparse.Namespace) -> int:
+    result = ingest_cued_track(
+        args.path,
+        labels_path=Path(args.out) if args.out else None,
+        model_path=Path(args.model) if args.model else None,
+        retrain=not args.no_retrain,
+        seed=int(args.seed),
+    )
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if result.get("ok") or result.get("reason") in {
+        "not_training_source",
+        "no_accepted_cues",
+        "no_label_rows",
+        "not_trainable",
+    } else 1
 
 
 def _rows_by_track(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -457,9 +363,23 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vdj_cuer.ml")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    export_p = sub.add_parser("export", help="Write bar labels from Cues Sorted")
+    export_p = sub.add_parser(
+        "export",
+        help="Write bar labels from Cues Sorted, Ready For Sort, and cued Add Cues",
+    )
     export_p.add_argument("--out", default=str(DEFAULT_LABELS))
     export_p.set_defaults(func=cmd_export)
+
+    ingest_p = sub.add_parser(
+        "ingest",
+        help="Incrementally add one cued track to the label set and retrain",
+    )
+    ingest_p.add_argument("path", help="Audio path under Add Cues, Ready For Sort, or Cues Sorted")
+    ingest_p.add_argument("--out", default=str(DEFAULT_LABELS), help="bars.jsonl path")
+    ingest_p.add_argument("--model", default=str(DEFAULT_ARTIFACT))
+    ingest_p.add_argument("--seed", type=int, default=0)
+    ingest_p.add_argument("--no-retrain", action="store_true")
+    ingest_p.set_defaults(func=cmd_ingest)
 
     train_p = sub.add_parser("train", help="Train cue/loop heads and write artifact")
     train_p.add_argument("--labels", default=str(DEFAULT_LABELS))

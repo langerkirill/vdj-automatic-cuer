@@ -203,6 +203,25 @@ class AutoCueRetryPathTests(unittest.TestCase):
             self.assertEqual(job.status, "queued")
             self.assertTrue(job.preflight.get("has_stems"))
 
+    def test_maybe_ingest_after_successful_autocue(self):
+        after = type("C", (), {"cue_count": 4, "loop_count": 2})()
+        with patch.object(retry_mod, "schedule_training_update") as ingest:
+            retry_mod.maybe_ingest_after_autocue(
+                "/Cues/Add Cues/song.flac", after, dry_run=False, ok=True
+            )
+            ingest.assert_called_once()
+            retry_mod.maybe_ingest_after_autocue(
+                "/Cues/Add Cues/song.flac", after, dry_run=True, ok=True
+            )
+            retry_mod.maybe_ingest_after_autocue(
+                "/Cues/Add Cues/song.flac", after, dry_run=False, ok=False
+            )
+            empty = type("C", (), {"cue_count": 0, "loop_count": 0})()
+            retry_mod.maybe_ingest_after_autocue(
+                "/Cues/Add Cues/song.flac", empty, dry_run=False, ok=True
+            )
+        self.assertEqual(ingest.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
