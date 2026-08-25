@@ -27,17 +27,20 @@ class DecodeOnsetEnvelopeStemFailoverTests(unittest.TestCase):
     def setUp(self):
         self.helper = BeatgridSourceMixin()
 
-    def test_stem_epipe_becomes_stem_decode_error(self):
+    def test_stem_epipe_is_caught_in_decode_and_drops_stem_map(self):
         with (
             patch("vdj_cuer.beatgrid_sources.shutil.which", return_value="/usr/bin/ffmpeg"),
             patch(
                 "vdj_cuer.beatgrid_sources.subprocess.run",
                 side_effect=BrokenPipeError(errno.EPIPE, "Broken pipe"),
             ),
+            patch("builtins.print"),
         ):
             with self.assertRaises(StemDecodeError) as ctx:
                 self.helper._decode_onset_envelope("/tmp/song.m4a.vdjstems", "0:2")
         self.assertIn("stem", str(ctx.exception).lower())
+        self.assertNotIsInstance(ctx.exception, BrokenPipeError)
+        self.assertTrue(getattr(self.helper, "_beatgrid_mix_only", False))
 
     def test_mix_epipe_is_not_rewritten_as_stem_success(self):
         with (
@@ -118,6 +121,25 @@ class VerifyBeatgridMixOnlyRetryTests(unittest.TestCase):
 
 
 class MixOnlyFailoverHelperTests(unittest.TestCase):
+    def test_retries_even_if_decode_already_dropped_the_stem_map(self):
+        cuer = cuer_module.AutomaticMusicCuer.__new__(cuer_module.AutomaticMusicCuer)
+        cuer._beatgrid_mix_only = False
+        cuer._beatgrid_alignment_cache = {}
+        calls = []
+
+        def work():
+            calls.append(True)
+            if len(calls) == 1:
+                cuer._beatgrid_mix_only = True
+                raise StemDecodeError("ffmpeg stem decode failed: [Errno 32] Broken pipe")
+            return "cued"
+
+        with patch("builtins.print"):
+            result = run_with_mix_only_stem_failover(cuer, work)
+
+        self.assertEqual(result, "cued")
+        self.assertEqual(len(calls), 2)
+
     def test_stem_epipe_retries_without_stem_map_and_succeeds(self):
         cuer = cuer_module.AutomaticMusicCuer.__new__(cuer_module.AutomaticMusicCuer)
         cuer._beatgrid_mix_only = False

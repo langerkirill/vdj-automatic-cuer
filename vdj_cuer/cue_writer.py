@@ -499,6 +499,8 @@ class CueWriterMixin:
             print(f"❌ Song not found in VDJ database: {audio_file_path}")
             return False
         except Exception as e:
+            if is_stem_decode_error(e):
+                raise
             print(f"❌ Error applying cues to {audio_file_path}: {e}")
             import traceback
 

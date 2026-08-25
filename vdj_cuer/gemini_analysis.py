@@ -534,6 +534,8 @@ evidence. Do not infer from the filename. Round timestamps to 0.01 seconds.
             print(f"❌ Failed to parse structured JSON response: {e}")
             return None
         except Exception as e:
+            if is_stem_decode_error(e):
+                raise
             import traceback
 
             print(f"❌ Error analyzing audio with Gemini: {e}")
@@ -611,6 +613,8 @@ evidence. Do not infer from the filename. Round timestamps to 0.01 seconds.
             print(f"❌ Failed to parse structured JSON response: {error}")
             return None
         except Exception as error:
+            if is_stem_decode_error(error):
+                raise
             import traceback
 
             print(f"❌ Error analyzing audio with Gemini: {error}")

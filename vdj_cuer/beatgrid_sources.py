@@ -367,6 +367,11 @@ class BeatgridSourceMixin:
             result = subprocess.run(command, capture_output=True, check=True)
         except (BrokenPipeError, OSError, subprocess.CalledProcessError) as exc:
             if stream_map:
+                self._beatgrid_mix_only = True
+                print(
+                    f"⚠️  Stem decode failed ({stream_map}); "
+                    "dropping stem map, will retry mix only"
+                )
                 raise StemDecodeError(
                     f"ffmpeg stem decode failed ({stream_map} in "
                     f"{audio_file_path}): {exc}"
@@ -398,16 +403,23 @@ class BeatgridSourceMixin:
 
 
 def run_with_mix_only_stem_failover(cuer, work):
-    """Run work(); on stem EPIPE / ffmpeg decode failure, retry mix-only."""
+    """Run work(); on stem EPIPE / ffmpeg decode failure, retry mix-only.
+
+    Decode may already have dropped the stem map (``_beatgrid_mix_only``)
+    before raising. Still retry the job once so AutoCue can finish on mix.
+    """
     try:
         return work()
     except Exception as exc:
-        if getattr(cuer, "_beatgrid_mix_only", False) or not is_stem_decode_error(exc):
+        if not is_stem_decode_error(exc):
+            raise
+        if getattr(cuer, "_stem_mix_only_retry_done", False):
             raise
         print(
             "⚠️  Stem decode failed; retrying AutoCue without stems (mix only)"
         )
         cuer._beatgrid_mix_only = True
+        cuer._stem_mix_only_retry_done = True
         cache = getattr(cuer, "_beatgrid_alignment_cache", None)
         if cache is not None:
             cache.clear()
