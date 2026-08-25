@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterable
 
 from .features import rows_for_track
 from .labels import (
+    apply_vocal_onset_negatives,
     attach_labels,
     has_training_cue_points,
     is_trainable_track,
@@ -175,9 +176,13 @@ def labeled_rows_for_track(
         offset=offset,
         audio_path=str(audio),
     )
-    labeled = attach_labels(
-        feature_rows,
-        label_bars(points, duration=duration, bpm=bpm, offset=offset),
+    labeled = apply_vocal_onset_negatives(
+        attach_labels(
+            feature_rows,
+            label_bars(points, duration=duration, bpm=bpm, offset=offset),
+        ),
+        profiles,
+        bpm=bpm,
     )
     if not labeled:
         return []

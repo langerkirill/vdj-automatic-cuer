@@ -6,11 +6,13 @@ import unittest
 from types import SimpleNamespace
 
 from vdj_cuer.ml.labels import (
+    apply_vocal_onset_negatives,
     has_training_cue_points,
     is_trainable_track,
     is_training_source_path,
     label_bars,
 )
+from vdj_cuer.stem_evidence import StemProfile
 
 
 class TrainingPathTests(unittest.TestCase):
@@ -135,6 +137,39 @@ class LabelBarsTests(unittest.TestCase):
         self.assertAlmostEqual(loop_rows[0]["timestamp"], 0.47, places=2)
         neighbor = next(r for r in rows if abs(r["timestamp"] - 24.47) < 0.05)
         self.assertEqual(neighbor["is_cue"], 0)
+
+
+class VocalOnsetNegativeLabelTests(unittest.TestCase):
+    def test_onset_on_1_is_hard_negative_already_singing_stays_gold(self) -> None:
+        onset = {
+            "vocal": StemProfile.from_frames(
+                [0.02] * 24 + [0.8] * 16, frame_seconds=0.25
+            )
+        }
+        through = {
+            "vocal": StemProfile.from_frames([0.7] * 40, frame_seconds=0.25)
+        }
+        rows = [
+            {"timestamp": 6.0, "is_cue": 1, "is_loop_start": 0},
+            {"timestamp": 8.0, "is_cue": 0, "is_loop_start": 0},
+        ]
+        demoted = apply_vocal_onset_negatives(rows, onset, bpm=120.0)
+        self.assertEqual(demoted[0]["is_cue"], 0)
+        self.assertEqual(demoted[0].get("vocal_onset_negative"), 1)
+        self.assertEqual(demoted[1]["is_cue"], 0)
+
+        kept = apply_vocal_onset_negatives(
+            [{"timestamp": 5.0, "is_cue": 1, "is_loop_start": 0}],
+            through,
+            bpm=120.0,
+        )
+        self.assertEqual(kept[0]["is_cue"], 1)
+        self.assertNotEqual(kept[0].get("vocal_onset_negative"), 1)
+
+    def test_missing_vocal_stem_leaves_gold(self) -> None:
+        rows = [{"timestamp": 4.0, "is_cue": 1, "is_loop_start": 0}]
+        out = apply_vocal_onset_negatives(rows, {"kick": StemProfile.from_frames([0.4] * 16)}, bpm=120.0)
+        self.assertEqual(out[0]["is_cue"], 1)
 
 
 if __name__ == "__main__":

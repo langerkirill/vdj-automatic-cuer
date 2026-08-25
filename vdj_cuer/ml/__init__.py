@@ -2,6 +2,7 @@
 
 from .features import FEATURE_NAMES, bar_feature_row, iter_bar_times
 from .labels import (
+    apply_vocal_onset_negatives,
     has_training_cue_points,
     is_trainable_track,
     is_training_source_path,
@@ -17,6 +18,7 @@ __all__ = [
     "iter_bar_times",
     "is_trainable_track",
     "is_training_source_path",
+    "apply_vocal_onset_negatives",
     "compare_cue_sets",
     "label_bars",
     "propose_cues",

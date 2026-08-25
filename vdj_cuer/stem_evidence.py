@@ -321,6 +321,42 @@ CUE_PRESS_BUSY = 0.20
 CUE_PRESS_BUSY_PRE = 0.08
 CUE_PRESS_ABS_FLOOR = 0.02
 
+# Vocal *onset* on the downbeat: quiet approach, then the word starts on the 1.
+# Already-singing-through is NOT an onset (that cue can stay training gold).
+VOCAL_ONSET_PRE_MAX = 0.12
+VOCAL_ONSET_ATTACK_MIN = 0.16
+VOCAL_ONSET_RATIO = 2.0
+
+
+def vocal_onset_on_downbeat(
+    profiles: Dict[str, StemProfile],
+    timestamp: float,
+    *,
+    beat_seconds: float = 0.5,
+) -> bool:
+    """True when a vocal attack enters on this bar-1 (cue-jump would catch the word).
+
+    Already-rolling vocal through the 1 returns False. Missing/silent vocal
+    stems also return False — we only flag a detected onset.
+    """
+    vocal = profiles.get("vocal")
+    if vocal is None or vocal.reference_peak < GLOBAL_SILENCE_PEAK:
+        return False
+    reference = max(vocal.reference_peak, 1e-6)
+    t = max(0.0, float(timestamp))
+    beat = max(0.2, float(beat_seconds) if beat_seconds and beat_seconds > 0 else 0.5)
+    pre_w = max(0.12, min(0.35, beat * 0.5))
+    atk_w = max(0.08, min(0.20, beat * 0.35))
+    pre = vocal.window_peak(max(0.0, t - pre_w), pre_w) / reference
+    attack = vocal.window_peak(t, atk_w) / reference
+    if pre >= VOCAL_ONSET_PRE_MAX:
+        return False
+    if attack < VOCAL_ONSET_ATTACK_MIN:
+        return False
+    if attack < max(pre * VOCAL_ONSET_RATIO, pre + 0.08):
+        return False
+    return True
+
 
 def is_clean_cue_press(
     profiles: Dict[str, StemProfile],

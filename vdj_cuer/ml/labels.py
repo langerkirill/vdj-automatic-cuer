@@ -134,6 +134,44 @@ def label_bars(
     return rows
 
 
+def apply_vocal_onset_negatives(
+    rows: list[dict[str, Any]],
+    profiles: Any,
+    *,
+    bpm: float | None = None,
+) -> list[dict[str, Any]]:
+    """Force is_cue=0 on bar-1s where a vocal onset enters on the 1.
+
+    Those placements are hard negatives (cue-jump would catch the word).
+    Vocal already rolling through the 1 is left as gold.
+    """
+    if not rows or not profiles:
+        return rows
+    try:
+        from vdj_cuer.stem_evidence import vocal_onset_on_downbeat
+    except Exception:
+        return rows
+    try:
+        beat = (60.0 / float(bpm)) if bpm and float(bpm) > 0 else 0.5
+    except (TypeError, ValueError):
+        beat = 0.5
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        if int(item.get("is_cue") or 0) == 1:
+            try:
+                stamp = float(item.get("timestamp"))
+            except (TypeError, ValueError):
+                stamp = None
+            if stamp is not None and vocal_onset_on_downbeat(
+                profiles, stamp, beat_seconds=beat
+            ):
+                item["is_cue"] = 0
+                item["vocal_onset_negative"] = 1
+        out.append(item)
+    return out
+
+
 def attach_labels(
     feature_rows: list[dict[str, Any]],
     label_rows: list[dict[str, Any]],
