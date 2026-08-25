@@ -338,6 +338,7 @@ class BeatgridSourceMixin:
 
         command = [
             "ffmpeg",
+            "-nostdin",
             "-hide_banner",
             "-loglevel",
             "error",

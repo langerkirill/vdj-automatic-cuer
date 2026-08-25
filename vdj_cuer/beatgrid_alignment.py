@@ -131,7 +131,11 @@ class BeatgridAlignmentMixin:
         if mix_only:
             self._beatgrid_mix_only = True
 
-        cache_key = (audio_file_path, round(actual_bpm, 3))
+        cache_key = (
+            audio_file_path,
+            round(actual_bpm, 3),
+            bool(mix_only or getattr(self, "_beatgrid_mix_only", False)),
+        )
         if cache_key in self._beatgrid_alignment_cache:
             return self._beatgrid_alignment_cache[cache_key]
 
@@ -199,6 +203,8 @@ class BeatgridAlignmentMixin:
             if not alignment.corrected and len(audio_sources) >= 2:
                 source_phase_scores = []
                 for candidate_name, candidate_path, candidate_stream in audio_sources:
+                    if candidate_stream and stems_skipped:
+                        continue
                     if (
                         candidate_name == source_name
                         and candidate_path == source_path

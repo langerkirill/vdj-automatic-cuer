@@ -41,6 +41,13 @@ STEMS_SKIPPED_WARNING = (
 
 
 def _is_stem_decode_failure(error: object) -> bool:
+    try:
+        from vdj_cuer.common import is_stem_decode_error
+
+        if isinstance(error, BaseException):
+            return is_stem_decode_error(error)
+    except Exception:
+        pass
     text = str(error or "").lower()
     return any(term in text for term in STEM_DECODE_ERROR_TERMS)
 

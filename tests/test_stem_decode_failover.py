@@ -93,6 +93,29 @@ class VerifyBeatgridMixOnlyRetryTests(unittest.TestCase):
         sources = self.cuer._beatgrid_audio_sources("/tmp/song.m4a")
         self.assertEqual(sources, [("mix", "/tmp/song.m4a", None)])
 
+    def test_release_track_resources_clears_mix_only_for_next_track(self):
+        self.cuer._beatgrid_mix_only = True
+        with patch("builtins.print"):
+            self.cuer._release_track_resources("/tmp/song.m4a")
+        self.assertFalse(self.cuer._beatgrid_mix_only)
+
+    def test_prepare_stems_skipped_when_mix_only(self):
+        self.cuer._beatgrid_mix_only = True
+        with (
+            patch.object(
+                self.cuer, "_find_vdj_stems_file", return_value="/tmp/song.m4a.vdjstems"
+            ),
+            patch.object(self.cuer, "_extract_vdj_stems") as extract,
+            patch("builtins.print"),
+        ):
+            uploads, files, temp_dir = self.cuer._prepare_vdj_stems_with_retry(
+                "/tmp/song.m4a"
+            )
+        extract.assert_not_called()
+        self.assertEqual(uploads, [])
+        self.assertEqual(files, [])
+        self.assertIsNone(temp_dir)
+
 
 class MixOnlyFailoverHelperTests(unittest.TestCase):
     def test_stem_epipe_retries_without_stem_map_and_succeeds(self):
