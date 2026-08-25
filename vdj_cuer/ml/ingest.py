@@ -15,6 +15,7 @@ from .dataset import (
     upsert_track_rows,
 )
 from .labels import has_training_cue_points, is_training_source_path, is_trainable_track
+from .match import assess_autocue_match
 from .model import DEFAULT_ARTIFACT
 
 log = logging.getLogger(__name__)
@@ -84,6 +85,21 @@ def ingest_cued_track(
             return result
         if not is_trainable_track(track_id, resolved):
             result["reason"] = "not_trainable"
+            return result
+        match = assess_autocue_match(track_id, resolved)
+        result["autocue_match"] = match
+        if match.get("matches"):
+            with _INGEST_LOCK:
+                dropped = drop_track_rows(dest, track_id)
+            result["reason"] = "autocue_matches"
+            result["dropped"] = dropped
+            if dropped and retrain and dest.is_file():
+                try:
+                    metrics = train_from_labels_file(dest, artifact, seed=seed)
+                    result["retrained"] = True
+                    result["metrics"] = metrics
+                except ValueError:
+                    pass
             return result
         rows = labeled_rows_for_track(track_id, resolved)
         if not rows:

@@ -2905,7 +2905,7 @@ function buildPlayerMetaHtml(track) {
 
   // Keep identity chrome light — at most a few chips (readiness, cues/bpm, bitrate).
   const statusChip = isReviewMode()
-    ? `${readinessBadge(track)}${retryHistoryBadge(track)}`
+    ? `${readinessBadge(track)}${retryHistoryBadge(track)}${autocueMatchBadge(track)}`
     : track.is_cued
       ? `<span class="badge ok">${cues.cue_count || 0} cues${
           cues.loop_count ? ` · ${cues.loop_count} loops` : ""
@@ -6363,6 +6363,27 @@ function trackRetryKind(track) {
   return null;
 }
 
+function autocueMatchBadge(track) {
+  const m = track?.autocue_match;
+  const matched = Boolean(track?.autocue_matches ?? m?.matches);
+  if (!m || !m.status || m.status === "not_cued" || m.status === "unknown") {
+    return "";
+  }
+  const title = escapeHtml(m.reason || "");
+  if (matched && m.status === "match") {
+    return `<span class="badge autocue-match" title="${title}">AutoCue match</span>`;
+  }
+  if (matched) {
+    return `<span class="badge autocue-match" title="${title}">AutoCue ≈</span>`;
+  }
+  if (m.status === "no_proposal") {
+    return track?.is_cued
+      ? `<span class="badge autocue-diff" title="${title}">Not AutoCue</span>`
+      : "";
+  }
+  return `<span class="badge autocue-diff" title="${title}">Not AutoCue</span>`;
+}
+
 function retryHistoryBadge(track) {
   const kind = trackRetryKind(track);
   if (kind === "both") {
@@ -6628,6 +6649,7 @@ function renderQueueTrackRow(i) {
             ${badge}
             ${cueingBadge}
             ${isReviewMode() ? retryHistoryBadge(t) : ""}
+            ${isReviewMode() ? autocueMatchBadge(t) : ""}
             ${grid}
             ${brBadge}
             ${placementBadges}
@@ -7689,7 +7711,7 @@ function renderReviewPanel() {
 
   card.innerHTML = `
     <div class="readiness-heading">
-      <div class="meta-row">${readinessBadge(track)}</div>
+      <div class="meta-row">${readinessBadge(track)}${autocueMatchBadge(track)}</div>
       <div class="readiness-summary">${escapeHtml(r.summary || "")}</div>
     </div>
     <div class="check-list">${rows}</div>

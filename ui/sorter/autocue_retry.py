@@ -131,6 +131,12 @@ def maybe_ingest_after_autocue(
         return
     if not (getattr(after, "cue_count", 0) or getattr(after, "loop_count", 0)):
         return
+    try:
+        from vdj_cuer.ml.match import save_written_autocue_points
+
+        save_written_autocue_points(audio_path, after)
+    except Exception:
+        pass
     schedule_training_update(audio_path, after)
 
 

@@ -443,6 +443,21 @@ def _placement_with_cue_status(
     }
 
 
+def _autocue_match_payload(path: str, cues: Any) -> dict[str, Any]:
+    """Cheap list-load compare of on-screen POIs vs last AutoCue plan."""
+    try:
+        from vdj_cuer.ml.match import assess_autocue_match
+
+        return assess_autocue_match(path, cues)
+    except Exception:
+        return {
+            "matches": False,
+            "autocue_matches": False,
+            "status": "unknown",
+            "reason": "Compare unavailable",
+        }
+
+
 def _enrich_track(
     track_dict: dict[str, Any],
     *,
@@ -527,6 +542,9 @@ def _enrich_track(
         track_dict["readiness"] = assess_cue_readiness(cues)
         # Fast structural grid preflight for list badges (no ffmpeg).
         track_dict["grid"] = preflight_from_cues(cues, track_dict["path"])
+        match = _autocue_match_payload(track_dict["path"], cues)
+        track_dict["autocue_match"] = match
+        track_dict["autocue_matches"] = bool(match.get("matches"))
         hist = retry_history_for_path(track_dict["path"], retry_history or {})
         track_dict["retry_history"] = hist or {
             "kind": None,

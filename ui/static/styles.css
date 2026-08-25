@@ -388,6 +388,18 @@ body {
   border-color: rgba(167, 139, 250, 0.35);
 }
 
+.badge.autocue-match {
+  color: #67e8f9;
+  background: rgba(34, 211, 238, 0.12);
+  border-color: rgba(34, 211, 238, 0.35);
+}
+
+.badge.autocue-diff {
+  color: #f9a8d4;
+  background: rgba(244, 114, 182, 0.12);
+  border-color: rgba(244, 114, 182, 0.35);
+}
+
 .badge.bad {
   color: var(--bad);
   background: rgba(255, 107, 122, 0.12);

@@ -133,6 +133,9 @@ class IngestCuedTrackTests(unittest.TestCase):
             ]
             with patch(
                 "vdj_cuer.ml.ingest.labeled_rows_for_track", return_value=fake_rows
+            ), patch(
+                "vdj_cuer.ml.ingest.assess_autocue_match",
+                return_value={"matches": False, "status": "no_proposal"},
             ):
                 result = ingest_cued_track(
                     add_path,
@@ -164,6 +167,9 @@ class IngestCuedTrackTests(unittest.TestCase):
             with patch(
                 "vdj_cuer.ml.ingest.labeled_rows_for_track",
                 return_value=[_row(ready_path, 0.6, 1)],
+            ), patch(
+                "vdj_cuer.ml.ingest.assess_autocue_match",
+                return_value={"matches": False, "status": "mismatch"},
             ):
                 result = ingest_cued_track(
                     ready_path,
@@ -174,6 +180,29 @@ class IngestCuedTrackTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             ids = [row["track_id"] for row in load_jsonl(labels)]
             self.assertEqual(ids, [ready_path])
+
+    def test_skips_when_autocue_already_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            labels = Path(tmp) / "bars.jsonl"
+            path = "/Users/x/Music/DJ/Music/Cues/Add Cues/song.flac"
+            write_jsonl(labels, [_row(path, 0.5, 1)])
+            with patch(
+                "vdj_cuer.ml.ingest.labeled_rows_for_track",
+                return_value=[_row(path, 0.9, 1)],
+            ), patch(
+                "vdj_cuer.ml.ingest.assess_autocue_match",
+                return_value={"matches": True, "status": "match", "reason": "match"},
+            ):
+                result = ingest_cued_track(
+                    path,
+                    _cued_summary(),
+                    labels_path=labels,
+                    retrain=False,
+                )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["reason"], "autocue_matches")
+            self.assertEqual(result["dropped"], 1)
+            self.assertEqual(load_jsonl(labels), [])
 
     def test_drop_after_empty_cues(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

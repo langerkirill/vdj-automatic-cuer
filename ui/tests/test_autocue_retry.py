@@ -205,11 +205,14 @@ class AutoCueRetryPathTests(unittest.TestCase):
 
     def test_maybe_ingest_after_successful_autocue(self):
         after = type("C", (), {"cue_count": 4, "loop_count": 2})()
-        with patch.object(retry_mod, "schedule_training_update") as ingest:
+        with patch.object(retry_mod, "schedule_training_update") as ingest, patch(
+            "vdj_cuer.ml.match.save_written_autocue_points"
+        ) as snap:
             retry_mod.maybe_ingest_after_autocue(
                 "/Cues/Add Cues/song.flac", after, dry_run=False, ok=True
             )
             ingest.assert_called_once()
+            snap.assert_called_once()
             retry_mod.maybe_ingest_after_autocue(
                 "/Cues/Add Cues/song.flac", after, dry_run=True, ok=True
             )

@@ -7,6 +7,7 @@ from .labels import (
     is_training_source_path,
     label_bars,
 )
+from .match import compare_cue_sets
 from .propose import propose_cues
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "iter_bar_times",
     "is_trainable_track",
     "is_training_source_path",
+    "compare_cue_sets",
     "label_bars",
     "propose_cues",
 ]
