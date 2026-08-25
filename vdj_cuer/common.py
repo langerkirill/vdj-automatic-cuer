@@ -5,6 +5,7 @@ import sys
 import json
 import math
 import re
+import errno
 import shutil
 import subprocess
 import struct
@@ -217,6 +218,36 @@ RETRYABLE_API_ERROR_TERMS = NETWORK_ERROR_TERMS + (
 )
 
 
+class StemDecodeError(RuntimeError):
+    """ffmpeg could not decode a VDJ stem stream (EPIPE, bad map, etc.)."""
+
+
+def is_stem_decode_error(error: BaseException) -> bool:
+    """True for EPIPE / ffmpeg stem-decode failures that should fail over to mix."""
+    if isinstance(error, StemDecodeError):
+        return True
+    if isinstance(error, BrokenPipeError):
+        return True
+    if isinstance(error, OSError) and getattr(error, "errno", None) == errno.EPIPE:
+        return True
+    if isinstance(error, subprocess.CalledProcessError):
+        if error.returncode in {141, -13}:  # SIGPIPE
+            return True
+        raw = error.stderr or error.stdout or b""
+        detail = (
+            raw.decode(errors="replace")
+            if isinstance(raw, (bytes, bytearray))
+            else str(raw)
+        )
+        if "broken pipe" in detail.lower():
+            return True
+    text = str(error).lower()
+    return any(
+        term in text
+        for term in ("broken pipe", "errno 32", "epipe", "stem decode")
+    )
+
+
 @dataclass
 class BeatgridAlignment:
     """Verified beatgrid offset and confidence metadata."""
@@ -230,6 +261,7 @@ class BeatgridAlignment:
     fine_shift_seconds: float = 0.0
     beat_score: float = 0.0
     best_beat_score: float = 0.0
+    stems_skipped: bool = False
 
 
 class StemActivity(BaseModel):

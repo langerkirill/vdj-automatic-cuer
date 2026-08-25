@@ -203,6 +203,58 @@ class AutoCueRetryPathTests(unittest.TestCase):
             self.assertEqual(job.status, "queued")
             self.assertTrue(job.preflight.get("has_stems"))
 
+    def test_start_retry_honors_preflight_stems_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cues = Path(tmp) / "Cues"
+            inbox = cues / "Add Cues"
+            inbox.mkdir(parents=True)
+            audio = inbox / "song.flac"
+            audio.write_bytes(b"x")
+            Path(f"{audio}.vdjstems").write_bytes(b"stems")
+            captured = {}
+
+            def capture_thread(self, *args, **kwargs):
+                captured["target"] = self._target
+                captured["args"] = self._args
+
+            with (
+                patch.object(retry_mod, "CUES_ROOT", cues),
+                patch.object(retry_mod, "LIBRARIES", {}),
+                patch.object(retry_mod, "is_virtualdj_running", return_value=False),
+                patch.object(
+                    retry_mod,
+                    "summarize_cues",
+                    return_value=type("C", (), {"cue_count": 0})(),
+                ),
+                patch.object(
+                    retry_mod,
+                    "assess_grid_for_autocue",
+                    return_value={
+                        "can_autocue": True,
+                        "stems_skipped": True,
+                        "warnings": ["VDJ stems were skipped"],
+                    },
+                ),
+                patch.object(
+                    retry_mod.threading.Thread,
+                    "start",
+                    lambda self: capture_thread(self),
+                ),
+            ):
+                job = retry_mod.start_retry_cues(audio, require_grid=False)
+
+            self.assertEqual(job.status, "queued")
+            self.assertTrue(job.preflight.get("stems_skipped"))
+            self.assertTrue(job.preflight.get("has_stems"))
+
+    def test_configure_cuer_mix_only_from_preflight(self):
+        cuer = type("Cuer", (), {})()
+        retry_mod.apply_preflight_stem_failover(
+            cuer, {"stems_skipped": True, "can_autocue": True}
+        )
+        self.assertTrue(cuer._beatgrid_mix_only)
+
 
 if __name__ == "__main__":
     unittest.main()
+

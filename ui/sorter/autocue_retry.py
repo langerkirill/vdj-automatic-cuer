@@ -391,6 +391,15 @@ STEMS_REQUIRED_MESSAGE = (
 )
 
 
+def apply_preflight_stem_failover(cuer: Any, preflight: Optional[dict[str, Any]]) -> bool:
+    """Honor preflight mix-only failover so AutoCue does not reuse a broken stem map."""
+    if preflight and preflight.get("stems_skipped"):
+        cuer._beatgrid_mix_only = True
+        print("⚠️  Preflight skipped VDJ stems; AutoCue using mix only")
+        return True
+    return False
+
+
 def adjacent_vdj_stems(audio: str | Path) -> Optional[Path]:
     """Sidecar VirtualDJ writes next to the audio file, or None."""
     stems = Path(f"{audio}.vdjstems")
@@ -788,6 +797,7 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
                 vdj_database_path=str(VDJ_DATABASE),
                 model_name=model_name,
             )
+            apply_preflight_stem_failover(cuer, getattr(job, "preflight", None))
             # Keep sorter UI snappy; audits are optional elsewhere.
             cuer.post_cue_audit_enabled = False
             cuer.write_scope = scope_map.get(scope, AC_ALL)
@@ -823,15 +833,19 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
                     )
 
                 from vdj_cuer.analysis_cache import analyze_with_cache
+                from vdj_cuer.beatgrid_sources import run_with_mix_only_stem_failover
 
-                analysis = analyze_with_cache(
-                    lambda path: analyze_audio_until_data(
-                        cuer.analyze_audio_with_gemini,
-                        path,
-                        on_retry=_on_empty_retry,
+                analysis = run_with_mix_only_stem_failover(
+                    cuer,
+                    lambda: analyze_with_cache(
+                        lambda path: analyze_audio_until_data(
+                            cuer.analyze_audio_with_gemini,
+                            path,
+                            on_retry=_on_empty_retry,
+                        ),
+                        audio_path,
+                        model=getattr(cuer, "model_name", None),
                     ),
-                    audio_path,
-                    model=getattr(cuer, "model_name", None),
                 )
                 ok = False
                 warn_msg = ""
