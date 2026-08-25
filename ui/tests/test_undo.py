@@ -45,6 +45,8 @@ class UndoTests(unittest.TestCase):
                 relocate_mod, "CUE_STAGES", {"ready_for_sort": ready}
             ), patch(
                 "sorter.relocate.is_virtualdj_running", return_value=False
+            ), patch(
+                "sorter.ml_training.schedule_training_update"
             ):
                 result = relocate_mod.promote_add_cues_track(
                     src,

@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 from .autocue_path import ensure_autocue_on_path
 from .config import CUES_ROOT, LIBRARIES, VDJ_DATABASE
+from .ml_training import schedule_training_drop, schedule_training_update
 from .relocate import is_virtualdj_running, summarize_cues
 from .db_lock import vdj_db_write
 
@@ -33,6 +34,15 @@ from vdj_database_safety import (  # noqa: E402
 )
 
 POS_TOLERANCE = 0.02  # seconds
+
+
+def _schedule_ml_after_cue_change(path: Path, summary: Any) -> None:
+    if summary is None:
+        return
+    if getattr(summary, "cue_count", 0) or getattr(summary, "loop_count", 0):
+        schedule_training_update(path, summary)
+    else:
+        schedule_training_drop(path)
 
 
 def _assert_allowed(path: Path) -> Path:
@@ -681,6 +691,7 @@ def add_cue_point(
         )
         rewrite_song_xml_in_database(db, path_in_db, new_song, validate=True)
     after = summarize_cues(audio, db)
+    _schedule_ml_after_cue_change(audio, after)
 
     return {
         "ok": True,
@@ -846,6 +857,7 @@ def add_loop_point(
         )
         rewrite_song_xml_in_database(db, path_in_db, new_song, validate=True)
     after = summarize_cues(audio, db)
+    _schedule_ml_after_cue_change(audio, after)
 
     return {
         "ok": True,
@@ -993,6 +1005,7 @@ def set_poi_position(
     with vdj_db_write():
         rewrite_song_xml_in_database(db, path_in_db, new_song, validate=True)
     after = summarize_cues(audio, db)
+    _schedule_ml_after_cue_change(audio, after)
 
     return {
         "ok": True,
@@ -1069,8 +1082,10 @@ def delete_cue_point(
 
     with vdj_db_write():
         rewrite_song_xml_in_database(db, path_in_db, new_song, validate=False)
-    after_cues = max(0, before.cue_count - (1 if removed.get("kind") == "cue" else 0))
-    after_loops = max(0, before.loop_count - (1 if removed.get("kind") == "loop" else 0))
+    after = summarize_cues(audio, db)
+    _schedule_ml_after_cue_change(audio, after)
+    after_cues = after.cue_count
+    after_loops = after.loop_count
     return {
         "ok": True,
         "dry_run": False,

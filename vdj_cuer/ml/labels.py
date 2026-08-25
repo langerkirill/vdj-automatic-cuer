@@ -9,12 +9,14 @@ from .features import iter_bar_times
 
 TRAIN_DIR_MARKERS = (
     "/cues sorted/",
+    "/ready for sort/",
+    "/add cues/",
 )
 EXCLUDE_DIR_MARKERS = (
-    "/add cues/",
     "/no cues found/",
     "/ac low quality/",
     "/low quality skip/",
+    "/mixes/",
 )
 
 
@@ -24,11 +26,59 @@ def _norm_path(path: str) -> str:
 
 
 def is_training_source_path(path: str) -> bool:
-    """Cues Sorted only. Never Add Cues, Ready, or libraries."""
+    """Cue-pipeline folders that may contribute labels.
+
+    Cues Sorted, Ready For Sort, and Add Cues are eligible. Libraries,
+    Mixes, No Cues Found, and low-quality skip folders are never sources.
+    Callers must still require real cue/loop POIs via
+    ``has_training_cue_points`` / ``is_trainable_track``.
+    """
     folded = _norm_path(path)
     if any(marker in folded for marker in EXCLUDE_DIR_MARKERS):
         return False
     return any(marker in folded for marker in TRAIN_DIR_MARKERS)
+
+
+def _summary_field(summary: Any, name: str, default: Any = None) -> Any:
+    if summary is None:
+        return default
+    if isinstance(summary, dict):
+        return summary.get(name, default)
+    return getattr(summary, name, default)
+
+
+def has_training_cue_points(summary: Any) -> bool:
+    """True when summarize_cues found real cue/loop POIs and a usable BPM.
+
+    Empty or failed AutoCue results (no points, missing BPM, not in VDJ)
+    must not enter the training set.
+    """
+    if summary is None:
+        return False
+    in_database = _summary_field(summary, "in_database", True)
+    if in_database is False:
+        return False
+    try:
+        bpm = float(_summary_field(summary, "bpm") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if bpm <= 0:
+        return False
+    points = list(_summary_field(summary, "points") or [])
+    try:
+        cue_count = int(_summary_field(summary, "cue_count") or 0)
+        loop_count = int(_summary_field(summary, "loop_count") or 0)
+    except (TypeError, ValueError):
+        cue_count = 0
+        loop_count = 0
+    if points:
+        return True
+    return cue_count > 0 or loop_count > 0
+
+
+def is_trainable_track(path: str, summary: Any) -> bool:
+    """Path is a cue-pipeline source and the track has accepted cue points."""
+    return is_training_source_path(path) and has_training_cue_points(summary)
 
 
 def _point_kind(point: dict[str, Any]) -> str:
@@ -82,6 +132,44 @@ def label_bars(
             }
         )
     return rows
+
+
+def apply_vocal_onset_negatives(
+    rows: list[dict[str, Any]],
+    profiles: Any,
+    *,
+    bpm: float | None = None,
+) -> list[dict[str, Any]]:
+    """Force is_cue=0 on bar-1s where a vocal onset enters on the 1.
+
+    Those placements are hard negatives (cue-jump would catch the word).
+    Vocal already rolling through the 1 is left as gold.
+    """
+    if not rows or not profiles:
+        return rows
+    try:
+        from vdj_cuer.stem_evidence import vocal_onset_on_downbeat
+    except Exception:
+        return rows
+    try:
+        beat = (60.0 / float(bpm)) if bpm and float(bpm) > 0 else 0.5
+    except (TypeError, ValueError):
+        beat = 0.5
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        if int(item.get("is_cue") or 0) == 1:
+            try:
+                stamp = float(item.get("timestamp"))
+            except (TypeError, ValueError):
+                stamp = None
+            if stamp is not None and vocal_onset_on_downbeat(
+                profiles, stamp, beat_seconds=beat
+            ):
+                item["is_cue"] = 0
+                item["vocal_onset_negative"] = 1
+        out.append(item)
+    return out
 
 
 def attach_labels(

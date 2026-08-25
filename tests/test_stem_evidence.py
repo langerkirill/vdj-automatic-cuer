@@ -12,6 +12,7 @@ from vdj_cuer.stem_evidence import (
     loop_is_stable,
     loop_seam_is_clean,
     measure_stem_evidence,
+    vocal_onset_on_downbeat,
 )
 
 
@@ -362,6 +363,24 @@ class StemEvidenceTests(unittest.TestCase):
                 profiles, timestamp=6.0, elements=["drums", "vocals"]
             )
         )
+        self.assertTrue(vocal_onset_on_downbeat(profiles, 6.0, beat_seconds=0.5))
+
+    def test_vocal_onset_on_1_vs_already_singing_through(self):
+        onset = {
+            "vocal": StemProfile.from_frames(
+                [0.02] * 24 + [0.8] * 16, frame_seconds=0.25
+            )
+        }
+        through = {
+            "vocal": StemProfile.from_frames([0.7] * 40, frame_seconds=0.25)
+        }
+        silent = {
+            "vocal": StemProfile.from_frames([0.01] * 40, frame_seconds=0.25)
+        }
+        self.assertTrue(vocal_onset_on_downbeat(onset, 6.0, beat_seconds=0.5))
+        self.assertFalse(vocal_onset_on_downbeat(through, 5.0, beat_seconds=0.5))
+        self.assertFalse(vocal_onset_on_downbeat(silent, 4.0, beat_seconds=0.5))
+        self.assertFalse(vocal_onset_on_downbeat({}, 4.0, beat_seconds=0.5))
 
     def test_phrase_entry_rejects_instrumental_when_vocal_is_noisy_at_press(self):
         """Havana-class: Groove/synth cue that jumps into a singing stem."""

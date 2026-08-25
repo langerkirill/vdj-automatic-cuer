@@ -1995,7 +1995,7 @@ def promote_add_cues_track(
     if require_cued is None:
         require_cued = destination_stage == "ready_for_sort"
 
-    return _move_audio_and_retarget_db(
+    result = _move_audio_and_retarget_db(
         source,
         dest,
         db=db,
@@ -2005,6 +2005,15 @@ def promote_add_cues_track(
         create_backup=create_backup,
         require_cued=require_cued,
     )
+    if not dry_run:
+        from .ml_training import schedule_training_drop, schedule_training_update
+
+        if destination_stage == "ready_for_sort":
+            schedule_training_update(result.dest_path, result.cues)
+        elif destination_stage in {"no_cues_found", "ac_low_quality", "low_quality_skip"}:
+            schedule_training_drop(source)
+            schedule_training_drop(result.dest_path)
+    return result
 
 
 def demote_ready_to_add_cues(

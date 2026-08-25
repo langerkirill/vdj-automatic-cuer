@@ -96,6 +96,16 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn("loopN >= 2", self.js)
         self.assertIn("cueN >= 2 && loopN >= 2 && hasGrid", self.js)
 
+    def test_add_cues_autocue_match_flag_is_visible(self) -> None:
+        self.assertIn("function autocueMatchBadge", self.js)
+        self.assertIn("autocue_matches", self.js)
+        self.assertIn("autocue_match", self.js)
+        self.assertIn(">same</span>", self.js)
+        self.assertIn(">different</span>", self.js)
+        self.assertIn("autocueMatchBadge(t)", self.js)
+        self.assertIn(".autocue-flag.same", self.css)
+        self.assertIn(".autocue-flag.different", self.css)
+
     def test_add_cues_lists_ready_tracks_first(self) -> None:
         self.assertIn("function addCuesReadinessRank", self.js)
         self.assertIn("function sortAddCuesIndexes", self.js)
