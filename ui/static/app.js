@@ -6370,18 +6370,13 @@ function autocueMatchBadge(track) {
     return "";
   }
   const title = escapeHtml(m.reason || "");
-  if (matched && m.status === "match") {
-    return `<span class="badge autocue-match" title="${title}">AutoCue match</span>`;
-  }
   if (matched) {
-    return `<span class="badge autocue-match" title="${title}">AutoCue ≈</span>`;
+    return `<span class="autocue-flag same" title="${title}">same</span>`;
   }
-  if (m.status === "no_proposal") {
-    return track?.is_cued
-      ? `<span class="badge autocue-diff" title="${title}">Not AutoCue</span>`
-      : "";
+  if (m.status === "no_proposal" && !track?.is_cued) {
+    return "";
   }
-  return `<span class="badge autocue-diff" title="${title}">Not AutoCue</span>`;
+  return `<span class="autocue-flag different" title="${title}">different</span>`;
 }
 
 function retryHistoryBadge(track) {
@@ -6639,7 +6634,10 @@ function renderQueueTrackRow(i) {
           placements.already_sorted ? "already-sorted-row" : ""
         }"
                 data-index="${i}" type="button" title="${escapeHtml(t.name)}">
-          <div class="track-title">${escapeHtml(trackDisplayTitle(t))}</div>
+          <div class="track-title-row">
+            <div class="track-title">${escapeHtml(trackDisplayTitle(t))}</div>
+            ${isReviewMode() ? autocueMatchBadge(t) : ""}
+          </div>
           ${
             trackDisplayArtist(t)
               ? `<div class="track-artist">${escapeHtml(trackDisplayArtist(t))}</div>`
@@ -6649,7 +6647,6 @@ function renderQueueTrackRow(i) {
             ${badge}
             ${cueingBadge}
             ${isReviewMode() ? retryHistoryBadge(t) : ""}
-            ${isReviewMode() ? autocueMatchBadge(t) : ""}
             ${grid}
             ${brBadge}
             ${placementBadges}
