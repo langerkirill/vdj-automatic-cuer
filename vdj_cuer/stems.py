@@ -160,6 +160,12 @@ class StemMixin:
         vdj_stems_path = self._find_vdj_stems_file(audio_file_path)
         if not vdj_stems_path:
             return [], [], None
+        if getattr(self, "_beatgrid_mix_only", False):
+            print(
+                "⚠️  Skipping VDJ stems (mix-only after decode failure); "
+                "using the mix"
+            )
+            return [], [], None
 
         print(f"🧬 Found VDJ stems: {os.path.basename(vdj_stems_path)}")
         temp_dir = tempfile.mkdtemp(prefix="vdj-stems-")
@@ -195,6 +201,12 @@ class StemMixin:
         """Extract stems locally and upload them with cancellable async requests."""
         vdj_stems_path = self._find_vdj_stems_file(audio_file_path)
         if not vdj_stems_path:
+            return [], [], None
+        if getattr(self, "_beatgrid_mix_only", False):
+            print(
+                "⚠️  Skipping VDJ stems (mix-only after decode failure); "
+                "using the mix"
+            )
             return [], [], None
 
         print(f"🧬 Found VDJ stems: {os.path.basename(vdj_stems_path)}")

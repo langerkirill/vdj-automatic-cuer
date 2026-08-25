@@ -341,7 +341,14 @@ def extract_kick_onsets(audio_path: str | Path) -> Optional[tuple[list[float], f
     if "kick" not in index:
         return None
     helper = BeatgridSourceMixin()
-    onsets, hop = helper._decode_onset_envelope(stems, f"0:{index['kick']}")
+    try:
+        onsets, hop = helper._decode_onset_envelope(stems, f"0:{index['kick']}")
+    except Exception as exc:
+        from vdj_cuer.common import is_stem_decode_error
+
+        if not is_stem_decode_error(exc):
+            raise
+        return None
     if not onsets:
         return None
     return list(onsets), float(hop)

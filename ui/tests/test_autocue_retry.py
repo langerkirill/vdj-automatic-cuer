@@ -1,11 +1,15 @@
 """Path guards and write_scope helpers for AutoCue retry jobs."""
 
+import errno
+import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from sorter import autocue_retry as retry_mod
+from vdj_cuer.beatgrid_sources import BeatgridSourceMixin
+from vdj_cuer.common import StemDecodeError
 
 
 class AutoCueRetryPathTests(unittest.TestCase):
@@ -203,6 +207,146 @@ class AutoCueRetryPathTests(unittest.TestCase):
             self.assertEqual(job.status, "queued")
             self.assertTrue(job.preflight.get("has_stems"))
 
+    def test_start_retry_honors_preflight_stems_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cues = Path(tmp) / "Cues"
+            inbox = cues / "Add Cues"
+            inbox.mkdir(parents=True)
+            audio = inbox / "song.flac"
+            audio.write_bytes(b"x")
+            Path(f"{audio}.vdjstems").write_bytes(b"stems")
+            captured = {}
+
+            def capture_thread(self, *args, **kwargs):
+                captured["target"] = self._target
+                captured["args"] = self._args
+
+            with (
+                patch.object(retry_mod, "CUES_ROOT", cues),
+                patch.object(retry_mod, "LIBRARIES", {}),
+                patch.object(retry_mod, "is_virtualdj_running", return_value=False),
+                patch.object(
+                    retry_mod,
+                    "summarize_cues",
+                    return_value=type("C", (), {"cue_count": 0})(),
+                ),
+                patch.object(
+                    retry_mod,
+                    "assess_grid_for_autocue",
+                    return_value={
+                        "can_autocue": True,
+                        "stems_skipped": True,
+                        "warnings": ["VDJ stems were skipped"],
+                    },
+                ),
+                patch.object(
+                    retry_mod.threading.Thread,
+                    "start",
+                    lambda self: capture_thread(self),
+                ),
+            ):
+                job = retry_mod.start_retry_cues(audio, require_grid=False)
+
+            self.assertEqual(job.status, "queued")
+            self.assertTrue(job.preflight.get("stems_skipped"))
+            self.assertTrue(job.preflight.get("has_stems"))
+
+    def test_configure_cuer_mix_only_from_preflight(self):
+        cuer = type("Cuer", (), {})()
+        retry_mod.apply_preflight_stem_failover(
+            cuer, {"stems_skipped": True, "can_autocue": True}
+        )
+        self.assertTrue(cuer._beatgrid_mix_only)
+
+    def test_run_job_decode_onset_epipe_retries_mix_only(self):
+        """Preflight can_autocue=true is not enough: the job must catch stem EPIPE."""
+        usable = {
+            "measure_changes": [
+                {"timestamp": 4.0, "elements": ["drums"], "cue_name": "Drop"}
+            ],
+            "loop_segments": [],
+        }
+
+        class FakeCuer(BeatgridSourceMixin):
+            def __init__(self, *args, **kwargs):
+                self._beatgrid_mix_only = False
+                self._beatgrid_alignment_cache = {}
+                self.post_cue_audit_enabled = True
+                self.write_scope = "all"
+                self.model_name = "test"
+                self.decode_maps = []
+
+            def analyze_audio_with_gemini(self, path):
+                return usable
+
+            def get_song_length(self, path):
+                return 180.0
+
+            def get_song_bpm_from_database(self, path):
+                return 120.0
+
+            def backup_database(self):
+                return "/tmp/database.xml.backup"
+
+            def _apply_cues_to_database(self, path, analysis, dry_run=False):
+                stream_map = None if self._beatgrid_mix_only else "0:2"
+                audio = path if self._beatgrid_mix_only else f"{path}.vdjstems"
+                self.decode_maps.append(stream_map)
+                self._decode_onset_envelope(audio, stream_map)
+                return True
+
+        fake = FakeCuer()
+
+        def fake_run(command, **kwargs):
+            if "-map" in command:
+                raise BrokenPipeError(errno.EPIPE, "Broken pipe")
+            return Mock(stdout=b"\x00\x00" * 20000, returncode=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cues = Path(tmp) / "Cues"
+            inbox = cues / "Add Cues"
+            inbox.mkdir(parents=True)
+            audio = inbox / "song.flac"
+            audio.write_bytes(b"x")
+            Path(f"{audio}.vdjstems").write_bytes(b"stems")
+            job = retry_mod.RetryJob(
+                id="stem-epipe-job",
+                path=str(audio.resolve()),
+                name=audio.name,
+                status="queued",
+                created_at=retry_mod._now(),
+                preflight={"can_autocue": True, "stems_skipped": False},
+                write_scope="all",
+            )
+            retry_mod._jobs[job.id] = job
+            env = {**os.environ, "AUTOCUE_DISABLE_ANALYSIS_CACHE": "1"}
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(retry_mod, "VDJ_DATABASE", Path(tmp) / "database.xml"),
+                patch.object(retry_mod, "ensure_autocue_on_path", return_value=Path(tmp)),
+                patch("vdj_cuer.AutomaticMusicCuer", return_value=fake),
+                patch(
+                    "vdj_cuer.beatgrid_sources.shutil.which",
+                    return_value="/usr/bin/ffmpeg",
+                ),
+                patch("vdj_cuer.beatgrid_sources.subprocess.run", side_effect=fake_run),
+                patch.object(
+                    retry_mod,
+                    "summarize_cues",
+                    return_value=type("C", (), {"cue_count": 1, "loop_count": 0})(),
+                ),
+                patch("builtins.print"),
+            ):
+                retry_mod._run_job(job.id, dry_run=True, model_name=None)
+
+            live = retry_mod.get_job(job.id)
+            self.assertIsNotNone(live)
+            self.assertEqual(live.status, "ok", live.message)
+            self.assertIn("0:2", fake.decode_maps)
+            self.assertIn(None, fake.decode_maps)
+            self.assertTrue(fake._beatgrid_mix_only)
+
 
 if __name__ == "__main__":
     unittest.main()
+

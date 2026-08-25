@@ -255,9 +255,12 @@ class BeatgridSourceMixin:
         )
 
     def _beatgrid_audio_sources(
-        self, audio_file_path: str
+        self, audio_file_path: str, *, mix_only: bool = False
     ) -> List[Tuple[str, str, Optional[str]]]:
         """Return candidate audio sources for beatgrid verification."""
+        if mix_only or getattr(self, "_beatgrid_mix_only", False):
+            return [("mix", audio_file_path, None)]
+
         sources = []
         stems_path = self._find_vdj_stems_file(audio_file_path)
         if stems_path and shutil.which("ffmpeg") and shutil.which("ffprobe"):
@@ -303,7 +306,17 @@ class BeatgridSourceMixin:
         cache_key = (audio_file_path, stream_map)
 
         def load() -> Tuple[List[float], float]:
-            return self._decode_onset_envelope(audio_file_path, stream_map)
+            try:
+                return self._decode_onset_envelope(audio_file_path, stream_map)
+            except StemDecodeError:
+                raise
+            except Exception as exc:
+                if stream_map and is_stem_decode_error(exc):
+                    raise StemDecodeError(
+                        f"ffmpeg stem decode failed ({stream_map} in "
+                        f"{audio_file_path}): {exc}"
+                    ) from exc
+                raise
 
         if cache is not None:
             return cache.get_or_load_onset(cache_key, load)
@@ -325,6 +338,7 @@ class BeatgridSourceMixin:
 
         command = [
             "ffmpeg",
+            "-nostdin",
             "-hide_banner",
             "-loglevel",
             "error",
@@ -349,7 +363,20 @@ class BeatgridSourceMixin:
             ]
         )
 
-        result = subprocess.run(command, capture_output=True, check=True)
+        try:
+            result = subprocess.run(command, capture_output=True, check=True)
+        except (BrokenPipeError, OSError, subprocess.CalledProcessError) as exc:
+            if stream_map:
+                self._beatgrid_mix_only = True
+                print(
+                    f"⚠️  Stem decode failed ({stream_map}); "
+                    "dropping stem map, will retry mix only"
+                )
+                raise StemDecodeError(
+                    f"ffmpeg stem decode failed ({stream_map} in "
+                    f"{audio_file_path}): {exc}"
+                ) from exc
+            raise
         if not result.stdout:
             return [], hop_seconds
 
@@ -373,3 +400,27 @@ class BeatgridSourceMixin:
             onsets.append(max(0.0, energies[index] - energies[index - 1]))
 
         return onsets, hop_seconds
+
+
+def run_with_mix_only_stem_failover(cuer, work):
+    """Run work(); on stem EPIPE / ffmpeg decode failure, retry mix-only.
+
+    Decode may already have dropped the stem map (``_beatgrid_mix_only``)
+    before raising. Still retry the job once so AutoCue can finish on mix.
+    """
+    try:
+        return work()
+    except Exception as exc:
+        if not is_stem_decode_error(exc):
+            raise
+        if getattr(cuer, "_stem_mix_only_retry_done", False):
+            raise
+        print(
+            "⚠️  Stem decode failed; retrying AutoCue without stems (mix only)"
+        )
+        cuer._beatgrid_mix_only = True
+        cuer._stem_mix_only_retry_done = True
+        cache = getattr(cuer, "_beatgrid_alignment_cache", None)
+        if cache is not None:
+            cache.clear()
+        return work()

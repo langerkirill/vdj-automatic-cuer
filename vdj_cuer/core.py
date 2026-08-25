@@ -109,7 +109,12 @@ class AutomaticMusicCuer(
         self.model_name = resolve_gemini_model(model_name)
         self.client = genai.Client(api_key=gemini_api_key)
         self.loop_seam_client = self.client
-        self._beatgrid_alignment_cache: Dict[Tuple[str, float], BeatgridAlignment] = {}
+        self._beatgrid_alignment_cache: Dict[
+            Tuple[str, float, bool], BeatgridAlignment
+        ] = {}
+        # Set when a VDJ stem stream fails to decode (EPIPE / ffmpeg); beatgrid
+        # then uses the mix only so AutoCue can still cue the track.
+        self._beatgrid_mix_only = False
         self._vdj_metadata_cache = None
         self._vdj_metadata_fingerprint = None
         self._vdj_metadata_lock = threading.Lock()
@@ -165,6 +170,9 @@ class AutomaticMusicCuer(
                 self._beatgrid_alignment_cache.pop(key, None)
         else:
             self._beatgrid_alignment_cache.clear()
+        # Mix-only is per-track: a broken stem on one song must not disable
+        # stems for the rest of a library / batch run.
+        self._beatgrid_mix_only = False
         gc.collect()
         print(f"🧹 Track resources released (RSS peak ~{self.process_rss_mb():.0f} MB)")
 

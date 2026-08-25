@@ -120,7 +120,7 @@ class BeatgridAlignmentMixin:
         )
 
     def _verify_beatgrid_alignment(
-        self, audio_file_path: str, bpm: float
+        self, audio_file_path: str, bpm: float, *, mix_only: bool = False
     ) -> BeatgridAlignment:
         """Validate VDJ beatgrid downbeat phase against audio transients."""
         actual_bpm = self._actual_bpm(bpm)
@@ -128,19 +128,42 @@ class BeatgridAlignmentMixin:
         if actual_bpm is None:
             return BeatgridAlignment(offset=current_offset)
 
-        cache_key = (audio_file_path, round(actual_bpm, 3))
+        if mix_only:
+            self._beatgrid_mix_only = True
+
+        cache_key = (
+            audio_file_path,
+            round(actual_bpm, 3),
+            bool(mix_only or getattr(self, "_beatgrid_mix_only", False)),
+        )
         if cache_key in self._beatgrid_alignment_cache:
             return self._beatgrid_alignment_cache[cache_key]
 
         beat_duration = 60.0 / actual_bpm
         measure_duration = beat_duration * 4
+        stems_skipped = bool(getattr(self, "_beatgrid_mix_only", False))
 
         try:
             audio_sources = self._beatgrid_audio_sources(audio_file_path)
             source_path, stream_map, source_name = self._beatgrid_audio_source(
                 audio_file_path
             )
-            onsets, hop_seconds = self._extract_onset_envelope(source_path, stream_map)
+            try:
+                onsets, hop_seconds = self._extract_onset_envelope(
+                    source_path, stream_map
+                )
+            except StemDecodeError as stem_exc:
+                print(
+                    f"⚠️  Skipping VDJ stems ({source_name} decode failed: "
+                    f"{stem_exc}); using mix only"
+                )
+                self._beatgrid_mix_only = True
+                stems_skipped = True
+                audio_sources = [("mix", audio_file_path, None)]
+                source_path, stream_map, source_name = audio_file_path, None, "mix"
+                onsets, hop_seconds = self._extract_onset_envelope(
+                    source_path, None
+                )
             fine_alignment = self._find_best_fine_beat_offset(
                 onsets,
                 hop_seconds,
@@ -180,6 +203,8 @@ class BeatgridAlignmentMixin:
             if not alignment.corrected and len(audio_sources) >= 2:
                 source_phase_scores = []
                 for candidate_name, candidate_path, candidate_stream in audio_sources:
+                    if candidate_stream and stems_skipped:
+                        continue
                     if (
                         candidate_name == source_name
                         and candidate_path == source_path
@@ -188,11 +213,20 @@ class BeatgridAlignmentMixin:
                         candidate_onsets = onsets
                         candidate_hop_seconds = hop_seconds
                     else:
-                        candidate_onsets, candidate_hop_seconds = (
-                            self._extract_onset_envelope(
-                                candidate_path, candidate_stream
+                        try:
+                            candidate_onsets, candidate_hop_seconds = (
+                                self._extract_onset_envelope(
+                                    candidate_path, candidate_stream
+                                )
                             )
-                        )
+                        except StemDecodeError as stem_exc:
+                            print(
+                                f"⚠️  Skipping {candidate_name} "
+                                f"(stem decode failed: {stem_exc})"
+                            )
+                            self._beatgrid_mix_only = True
+                            stems_skipped = True
+                            continue
 
                     # Score from the fine-aligned base when available so phase
                     # candidates share the same sub-beat origin.
@@ -237,9 +271,12 @@ class BeatgridAlignmentMixin:
                     f"🎚️  Beatgrid downbeat looks usable at "
                     f"{current_offset:.6f}s ({alignment.source})"
                 )
+            alignment.stems_skipped = stems_skipped
         except Exception as e:
             print(f"⚠️  Beatgrid verification failed; using VDJ grid: {e}")
-            alignment = BeatgridAlignment(offset=current_offset)
+            alignment = BeatgridAlignment(
+                offset=current_offset, stems_skipped=stems_skipped
+            )
 
         self._beatgrid_alignment_cache[cache_key] = alignment
         return alignment

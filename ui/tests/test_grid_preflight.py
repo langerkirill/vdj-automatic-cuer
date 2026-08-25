@@ -97,6 +97,86 @@ class GridPreflightTests(unittest.TestCase):
                 mock_sum.assert_not_called()
             self.assertTrue(result["can_autocue"])
 
+    def test_stem_epipe_deep_verify_retries_mix_only(self):
+        """Stem decode EPIPE must not leave can_autocue with a live stem map."""
+        calls = []
+
+        def fake_deep(audio_path, bpm, mix_only=False):
+            calls.append(bool(mix_only))
+            if not mix_only:
+                return {"verified": False, "error": "[Errno 32] Broken pipe"}
+            return {
+                "verified": True,
+                "offset": 0.12,
+                "corrected": False,
+                "shift_beats": 0,
+                "fine_shift_seconds": 0.0,
+                "confidence_ratio": 1.6,
+                "source": "mix",
+                "beat_score": 0.08,
+                "best_beat_score": 0.08,
+                "error": None,
+                "stems_skipped": True,
+            }
+
+        with tempfile.NamedTemporaryFile(suffix=".m4a") as handle:
+            path = Path(handle.name)
+            path.write_bytes(b"x")
+            cues = _cues(bpm=92.0, has_beatgrid=True, beatgrid_pos=0.12, scan_phase=0.12)
+            with patch.object(gp, "_deep_verify_alignment", side_effect=fake_deep):
+                result = gp.assess_grid_for_autocue(path, deep=True, cues=cues)
+
+        self.assertEqual(calls, [False, True])
+        self.assertTrue(result["can_autocue"])
+        self.assertTrue(result["stems_skipped"])
+        self.assertTrue(any("stem" in warning.lower() for warning in result["warnings"]))
+
+    def test_successful_mix_verify_with_stems_skipped_keeps_can_autocue(self):
+        """Inner verify failover (no error) must still mark stems skipped."""
+        with tempfile.NamedTemporaryFile(suffix=".m4a") as handle:
+            path = Path(handle.name)
+            path.write_bytes(b"x")
+            cues = _cues(bpm=92.0, has_beatgrid=True, beatgrid_pos=0.12, scan_phase=0.12)
+            with patch.object(
+                gp,
+                "_deep_verify_alignment",
+                return_value={
+                    "verified": True,
+                    "offset": 0.12,
+                    "corrected": False,
+                    "shift_beats": 0,
+                    "fine_shift_seconds": 0.0,
+                    "confidence_ratio": 1.6,
+                    "source": "mix",
+                    "beat_score": 0.08,
+                    "best_beat_score": 0.08,
+                    "error": None,
+                    "stems_skipped": True,
+                },
+            ):
+                result = gp.assess_grid_for_autocue(path, deep=True, cues=cues)
+
+        self.assertTrue(result["can_autocue"])
+        self.assertTrue(result["stems_skipped"])
+        self.assertTrue(any("stem" in warning.lower() for warning in result["warnings"]))
+
+    def test_stem_epipe_without_mix_success_does_not_keep_stem_map(self):
+        def always_epipe(audio_path, bpm, mix_only=False):
+            return {"verified": False, "error": "[Errno 32] Broken pipe"}
+
+        with tempfile.NamedTemporaryFile(suffix=".m4a") as handle:
+            path = Path(handle.name)
+            path.write_bytes(b"x")
+            cues = _cues(bpm=92.0, has_beatgrid=True, beatgrid_pos=0.12)
+            with patch.object(gp, "_deep_verify_alignment", side_effect=always_epipe):
+                result = gp.assess_grid_for_autocue(path, deep=True, cues=cues)
+
+        # Structural grid is fine, but AutoCue must not keep the broken stem map.
+        if result["can_autocue"]:
+            self.assertTrue(result["stems_skipped"])
+        self.assertTrue(result.get("stems_skipped"))
+
 
 if __name__ == "__main__":
     unittest.main()
+

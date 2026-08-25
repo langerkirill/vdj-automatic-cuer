@@ -391,6 +391,15 @@ STEMS_REQUIRED_MESSAGE = (
 )
 
 
+def apply_preflight_stem_failover(cuer: Any, preflight: Optional[dict[str, Any]]) -> bool:
+    """Honor preflight mix-only failover so AutoCue does not reuse a broken stem map."""
+    if preflight and preflight.get("stems_skipped"):
+        cuer._beatgrid_mix_only = True
+        print("⚠️  Preflight skipped VDJ stems; AutoCue using mix only")
+        return True
+    return False
+
+
 def adjacent_vdj_stems(audio: str | Path) -> Optional[Path]:
     """Sidecar VirtualDJ writes next to the audio file, or None."""
     stems = Path(f"{audio}.vdjstems")
@@ -788,6 +797,7 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
                 vdj_database_path=str(VDJ_DATABASE),
                 model_name=model_name,
             )
+            apply_preflight_stem_failover(cuer, getattr(job, "preflight", None))
             # Keep sorter UI snappy; audits are optional elsewhere.
             cuer.post_cue_audit_enabled = False
             cuer.write_scope = scope_map.get(scope, AC_ALL)
@@ -823,51 +833,53 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
                     )
 
                 from vdj_cuer.analysis_cache import analyze_with_cache
+                from vdj_cuer.beatgrid_sources import run_with_mix_only_stem_failover
 
-                analysis = analyze_with_cache(
-                    lambda path: analyze_audio_until_data(
-                        cuer.analyze_audio_with_gemini,
-                        path,
-                        on_retry=_on_empty_retry,
-                    ),
-                    audio_path,
-                    model=getattr(cuer, "model_name", None),
-                )
-                ok = False
-                warn_msg = ""
-                if not analysis:
-                    print("❌ Analysis returned no data after retries")
-                else:
+                def _analyze_and_apply():
+                    analysis_data = analyze_with_cache(
+                        lambda path: analyze_audio_until_data(
+                            cuer.analyze_audio_with_gemini,
+                            path,
+                            on_retry=_on_empty_retry,
+                        ),
+                        audio_path,
+                        model=getattr(cuer, "model_name", None),
+                    )
+                    applied = False
+                    note = ""
+                    if not analysis_data:
+                        print("❌ Analysis returned no data after retries")
+                        return analysis_data, applied, note
                     song_length = cuer.get_song_length(audio_path)
                     database_bpm = cuer.get_song_bpm_from_database(audio_path)
-                    analysis_bpm = analysis.get("song_structure", {}).get(
+                    analysis_bpm = analysis_data.get("song_structure", {}).get(
                         "bpm", database_bpm or 120
                     )
                     working_bpm = database_bpm or analysis_bpm
                     if hasattr(cuer, "_postprocess_loop_segments"):
-                        analysis = cuer._postprocess_loop_segments(
-                            analysis, working_bpm, song_length
+                        analysis_data = cuer._postprocess_loop_segments(
+                            analysis_data, working_bpm, song_length
                         )
-                    loop_n = len(analysis.get("loop_segments") or [])
-                    cue_n = len(analysis.get("measure_changes") or [])
+                    loop_n = len(analysis_data.get("loop_segments") or [])
+                    cue_n = len(analysis_data.get("measure_changes") or [])
                     print(
                         f"📋 Scope={scope} · analysis cues={cue_n} "
                         f"loops={loop_n} · stems={'yes' if has_stems else 'NO'}"
                     )
                     if scope in (WRITE_SCOPE_LOOPS, WRITE_SCOPE_ALL) and loop_n == 0:
                         if not has_stems:
-                            warn_msg = (
+                            note = (
                                 "No loops written — AutoCue needs adjacent "
                                 f"{Path(audio_path).name}.vdjstems (stems) to "
                                 "validate loop seams. Analyze stems in VirtualDJ first."
                             )
-                            print(f"⚠️  {warn_msg}")
+                            print(f"⚠️  {note}")
                         else:
-                            warn_msg = (
+                            note = (
                                 "No loops passed stem/seam validation "
                                 "(Gemini/stem gates rejected all candidates)."
                             )
-                            print(f"⚠️  {warn_msg}")
+                            print(f"⚠️  {note}")
                     # Serialize DB backup + write so concurrent jobs never
                     # clobber database.xml mid-rewrite.
                     _update_job(
@@ -884,11 +896,16 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
                                 print(f"backup: {backup}")
                             except Exception as backup_exc:
                                 print(f"⚠️  Backup warning: {backup_exc}")
-                        ok = bool(
+                        applied = bool(
                             cuer._apply_cues_to_database(
-                                audio_path, analysis, dry_run=dry_run
+                                audio_path, analysis_data, dry_run=dry_run
                             )
                         )
+                    return analysis_data, applied, note
+
+                analysis, ok, warn_msg = run_with_mix_only_stem_failover(
+                    cuer, _analyze_and_apply
+                )
 
             log_text = log_buf.getvalue()
             tail = log_text[-4000:] if log_text else ""

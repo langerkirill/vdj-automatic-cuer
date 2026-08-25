@@ -28,6 +28,28 @@ DOUBLE_TIME_HIGH = 155.0
 PHASE_POI_TOLERANCE = 0.02
 # Deep verify: require this confidence ratio to claim a clear misalignment.
 ALIGN_CONFIDENCE = 1.5
+STEM_DECODE_ERROR_TERMS = (
+    "broken pipe",
+    "errno 32",
+    "epipe",
+    "stem decode",
+)
+STEMS_SKIPPED_WARNING = (
+    "VDJ stems were skipped after a decode failure (broken pipe / ffmpeg). "
+    "AutoCue will use the mix only."
+)
+
+
+def _is_stem_decode_failure(error: object) -> bool:
+    try:
+        from vdj_cuer.common import is_stem_decode_error
+
+        if isinstance(error, BaseException):
+            return is_stem_decode_error(error)
+    except Exception:
+        pass
+    text = str(error or "").lower()
+    return any(term in text for term in STEM_DECODE_ERROR_TERMS)
 
 
 def _bpm_ok(bpm: Optional[float]) -> bool:
@@ -71,6 +93,7 @@ def _base_from_cues(cues: CueSummary, path_str: str) -> dict[str, Any]:
             "beatgrid_pos": None,
             "scan_phase": None,
             "grid_anchor": None,
+            "stems_skipped": False,
         }
 
     bpm = cues.bpm
@@ -144,6 +167,7 @@ def _base_from_cues(cues: CueSummary, path_str: str) -> dict[str, Any]:
         "beatgrid_pos": cues.beatgrid_pos,
         "scan_phase": cues.scan_phase,
         "grid_anchor": anchor,
+        "stems_skipped": False,
     }
 
 
@@ -182,6 +206,7 @@ def assess_grid_for_autocue(
                 "grid_anchor": None,
                 "alignment": None,
                 "deep": deep,
+                "stems_skipped": False,
             }
         cues = summarize_cues(path)
 
@@ -193,7 +218,18 @@ def assess_grid_for_autocue(
         return base
 
     alignment = _deep_verify_alignment(str(path.resolve()), float(base["bpm"]))
+    if alignment.get("error") and _is_stem_decode_failure(alignment["error"]):
+        mix_alignment = _deep_verify_alignment(
+            str(path.resolve()), float(base["bpm"]), mix_only=True
+        )
+        if not mix_alignment.get("error"):
+            alignment = mix_alignment
+            alignment["stems_skipped"] = True
+        else:
+            alignment = {**alignment, "stems_skipped": True}
+
     base["alignment"] = alignment
+    base["stems_skipped"] = bool(alignment.get("stems_skipped"))
 
     if alignment.get("error"):
         if base["status"] in {"ok", "warn"}:
@@ -203,6 +239,8 @@ def assess_grid_for_autocue(
             f"Could not deeply verify beatgrid: {alignment['error']}. "
             "Structural checks still apply; listen to the VDJ grid before trusting AutoCue."
         )
+        if base["stems_skipped"]:
+            base["warnings"].append(STEMS_SKIPPED_WARNING)
         return base
 
     if not alignment.get("verified"):
@@ -253,10 +291,15 @@ def assess_grid_for_autocue(
             f"({alignment.get('source', 'audio')})."
         )
 
+    if base["stems_skipped"]:
+        base["warnings"].append(STEMS_SKIPPED_WARNING)
+
     return base
 
 
-def _deep_verify_alignment(audio_path: str, bpm: float) -> dict[str, Any]:
+def _deep_verify_alignment(
+    audio_path: str, bpm: float, *, mix_only: bool = False
+) -> dict[str, Any]:
     """Run AutoCue's onset-based beatgrid verification."""
     try:
         ensure_autocue_on_path()
@@ -282,7 +325,11 @@ def _deep_verify_alignment(audio_path: str, bpm: float) -> dict[str, Any]:
             gemini_api_key=None,
             vdj_database_path=str(VDJ_DATABASE),
         )
-        result = cuer._verify_beatgrid_alignment(audio_path, bpm)
+        if mix_only:
+            cuer._beatgrid_mix_only = True
+        result = cuer._verify_beatgrid_alignment(
+            audio_path, bpm, mix_only=mix_only
+        )
         try:
             cuer._release_track_resources(audio_path)
         except Exception:
@@ -298,11 +345,15 @@ def _deep_verify_alignment(audio_path: str, bpm: float) -> dict[str, Any]:
             "beat_score": result.beat_score,
             "best_beat_score": result.best_beat_score,
             "error": None,
+            "stems_skipped": bool(
+                getattr(result, "stems_skipped", False) or mix_only
+            ),
         }
     except Exception as exc:
         return {
             "verified": False,
             "error": str(exc),
+            "stems_skipped": mix_only or _is_stem_decode_failure(exc),
         }
 
 
