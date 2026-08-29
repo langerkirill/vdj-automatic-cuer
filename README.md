@@ -11,11 +11,13 @@ This used to be “just” an AutoCue CLI. The station is the day-to-day product
 
 Both share the same surgical `database.xml` writer (`vdj_database_safety.py`) so FilePath moves and cue edits stay CRLF-safe on large libraries.
 
-## Video Walkthrough (CLI AutoCue)
+## Walkthrough
 
-[![Watch the walkthrough video](https://img.youtube.com/vi/8868lOUFJQA/maxresdefault.jpg)](https://youtu.be/8868lOUFJQA)
+Current **VDJ Station** (Add Cues → Set Overview → Recs → Assemble → Day). Click for the 24s cut:
 
-Click the image above to watch the full CLI walkthrough on YouTube.
+[![VDJ Station walkthrough](docs/walkthrough/poster.jpg)](docs/walkthrough/vdj-station.mp4)
+
+The older [CLI AutoCue YouTube](https://youtu.be/8868lOUFJQA) is the pre-station terminal flow. It is not the Music Sorter UI.
 
 ## Screenshots — Music Sorter UI
 
@@ -32,6 +34,24 @@ Review the `Cues/Add Cues` queue: beatgrid preflight, waveform + cues/loops, Aut
 ![Add Cues day](docs/screenshots/ui-add-cues-day.png)
 
 Same deck at noon — cream faceplate, espresso ink, hot-pink Sort CTA. Toggle Night / Day in the top bar.
+
+### Set Overview
+
+![Set Overview](docs/screenshots/ui-set-overview.png)
+
+Pajamathon / set copies vs the written library sibling: copy cues, approve, must-play, send back.
+
+### Recs
+
+![Recs](docs/screenshots/ui-recs.png)
+
+Next-track suggestions from live VirtualDJ (in-key, ±BPM, genre).
+
+### Assemble
+
+![Assemble](docs/screenshots/ui-assemble.png)
+
+Build a Pajamathon crate from scored Zouk, with lane mix and min-fit.
 
 ### Cue review + sort
 
@@ -237,6 +257,8 @@ VirtualDJ keys cues by `FilePath` in `database.xml`. Moving files in Finder leav
 
 ## CLI Usage
 
+The original [CLI AutoCue walkthrough on YouTube](https://youtu.be/8868lOUFJQA) covers this terminal flow (before the station UI).
+
 First, activate the virtual environment:
 
 ```bash
@@ -387,6 +409,7 @@ stem/name/color issues.
 - `ui/` - **Music Sorter** local web UI (Add Cues, Set Overview, Recs, Assemble); Flask + static frontend
 - `ui/run.sh` - launch the UI on `http://127.0.0.1:8787`
 - `docs/screenshots/` - UI screenshots used in this README
+- `docs/walkthrough/` - current station walkthrough (`vdj-station.mp4`)
 - `cue_visual_audit.py` - CLI and backwards-compatible imports for visual audit reports
 - `vdj_audit/` - database loading, audio envelopes, cue inspection, and report rendering
 - `vdj_cue_patch.py` - curated manual cue correction patches
