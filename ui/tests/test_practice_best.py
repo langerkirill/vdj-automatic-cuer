@@ -187,3 +187,78 @@ def test_update_priority_and_save_for_set(tmp_path: Path):
     assert len(items) == 1
     assert items[0]["priority"] == 4
     assert items[0]["overall"] == 7.8
+
+
+def test_excluded_mix_omitted_from_best_but_scores_remain(tmp_path: Path):
+    from sorter.transitions_db import (
+        is_practice_mix_excluded,
+        load_practice_scores,
+        set_practice_mix_exclude,
+    )
+
+    db = tmp_path / "exclude.db"
+    real_set = "/Users/kirilllanger/Music/Mixes/pj2026 real (1).wav"
+    practice = "/Users/kirilllanger/Music/Mixes/pj2026.wav"
+    _seed(
+        db,
+        [
+            {
+                "mix_path": real_set,
+                "from_track": "Changes Trimmed",
+                "to_track": "Say My Name",
+                "transition_index": 26,
+                "at_sec": 4311,
+                "overall": 8.0,
+                "save_for_set": 1,
+                "analyzed_at": "2026-08-28T20:00:00",
+            },
+            {
+                "mix_path": practice,
+                "from_track": "Practice A",
+                "to_track": "Practice B",
+                "transition_index": 0,
+                "at_sec": 12,
+                "overall": 7.5,
+                "save_for_set": 0,
+                "analyzed_at": "2026-08-28T21:00:00",
+            },
+        ],
+    )
+    before = list_best_practice_scores(prefix="pj", db_path=db)
+    assert {i["from_track"] for i in before} == {"Changes Trimmed", "Practice A"}
+
+    row = set_practice_mix_exclude(real_set, True, db_path=db)
+    assert row["exclude_from_best"] is True
+    assert is_practice_mix_excluded(real_set, db_path=db)
+    assert is_practice_mix_excluded(
+        "/tmp/copy/pj2026 real (1).wav", db_path=db
+    )
+
+    after = list_best_practice_scores(prefix="pj", db_path=db)
+    assert [i["from_track"] for i in after] == ["Practice A"]
+    assert load_practice_scores(real_set, db_path=db)
+    assert len(load_practice_scores(real_set, db_path=db)) == 1
+
+    set_practice_mix_exclude(real_set, False, db_path=db)
+    restored = list_best_practice_scores(prefix="pj", db_path=db)
+    assert {i["from_track"] for i in restored} == {"Changes Trimmed", "Practice A"}
+
+
+def test_annotate_mixes_marks_excluded(tmp_path: Path):
+    from sorter.transitions_db import (
+        annotate_mixes_exclude_from_best,
+        set_practice_mix_exclude,
+    )
+
+    db = tmp_path / "ann.db"
+    real_set = str(tmp_path / "pj2026 real (1).wav")
+    practice = str(tmp_path / "pj2026.wav")
+    set_practice_mix_exclude(real_set, True, db_path=db)
+    mixes = [
+        {"path": real_set, "name": "pj2026 real (1).wav"},
+        {"path": practice, "name": "pj2026.wav"},
+    ]
+    out = annotate_mixes_exclude_from_best(mixes, db_path=db)
+    assert out[0]["exclude_from_best"] is True
+    assert out[1]["exclude_from_best"] is False
+    assert mixes[0].get("exclude_from_best") is None

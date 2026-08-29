@@ -519,8 +519,9 @@ def apply_plan_to_content(
 def apply_lane_color_after_move(
     database_path: Path | str,
     dest_paths: Iterable[str | Path],
+    lane: Optional[str] = None,
 ) -> dict[str, object]:
-    """Paint just-sorted destinations from the folders they landed in."""
+    """Paint just-sorted destinations. Confirmed lane wins; never write white."""
     targets = [
         normalize_database_path(str(Path(path)))
         for path in dest_paths
@@ -528,7 +529,10 @@ def apply_lane_color_after_move(
     ]
     if not targets:
         return {"lane": None, "color": None, "updated": 0}
-    lane = classify_placements(targets)
+    resolved = lane if lane and lane in LANE_COLORS else classify_placements(targets)
+    if resolved == PENDING_LANE or resolved not in LANE_COLORS:
+        return {"lane": None, "color": None, "updated": 0}
+    lane = resolved
     color = color_for_lane(lane)
     wanted = set(targets)
     db_path = Path(database_path)

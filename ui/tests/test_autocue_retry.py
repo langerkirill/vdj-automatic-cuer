@@ -1,5 +1,6 @@
 """Path guards and write_scope helpers for AutoCue retry jobs."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -169,6 +170,7 @@ class AutoCueRetryPathTests(unittest.TestCase):
                     "assess_grid_for_autocue",
                     return_value={"can_autocue": True},
                 ),
+                patch.object(retry_mod, "persist_jobs", lambda *a, **k: None),
             ):
                 job = retry_mod.start_retry_cues(audio, require_grid=False)
             self.assertEqual(job.status, "skipped")
@@ -198,10 +200,284 @@ class AutoCueRetryPathTests(unittest.TestCase):
                     return_value={"can_autocue": True},
                 ),
                 patch.object(retry_mod.threading.Thread, "start", lambda self: None),
+                patch.object(retry_mod, "persist_jobs", lambda *a, **k: None),
             ):
                 job = retry_mod.start_retry_cues(audio, require_grid=False)
             self.assertEqual(job.status, "queued")
             self.assertTrue(job.preflight.get("has_stems"))
+
+    def test_persist_restore_jobs_without_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp) / "autocue_jobs.json"
+            retry_mod._jobs.clear()
+            retry_mod._batches.clear()
+            job = retry_mod.RetryJob(
+                id="persistjob01",
+                path="/tmp/song.mp3",
+                name="song.mp3",
+                status="queued",
+                created_at="2026-08-26T15:00:00",
+                model_name="gemini-3.7-flash",
+            )
+            retry_mod._jobs[job.id] = job
+            retry_mod.persist_jobs(store)
+            retry_mod._jobs.clear()
+            n = retry_mod.restore_jobs(store_path=store, resume=False)
+            self.assertEqual(n, 0)
+            restored = retry_mod._jobs["persistjob01"]
+            self.assertEqual(restored.status, "queued")
+            self.assertEqual(restored.model_name, "gemini-3.7-flash")
+            retry_mod._jobs.clear()
+
+    def test_restore_resumes_queued_jobs(self):
+        started = []
+
+        class FakeThread:
+            def __init__(self, *args, **kwargs):
+                self.kwargs = kwargs
+                started.append(kwargs.get("args") or args)
+
+            def start(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp) / "autocue_jobs.json"
+            audio = Path(tmp) / "song.flac"
+            audio.write_bytes(b"x")
+            retry_mod._jobs.clear()
+            retry_mod._batches.clear()
+            job = retry_mod.RetryJob(
+                id="resumejob001",
+                path=str(audio),
+                name=audio.name,
+                status="running",
+                dry_run=True,
+                created_at="2026-08-26T15:00:00",
+            )
+            retry_mod._jobs[job.id] = job
+            retry_mod.persist_jobs(store)
+            retry_mod._jobs.clear()
+            with (
+                patch.object(retry_mod.threading, "Thread", FakeThread),
+                patch.object(retry_mod, "persist_jobs", lambda *a, **k: None),
+            ):
+                n = retry_mod.restore_jobs(store_path=store, resume=True)
+            self.assertEqual(n, 1)
+            self.assertEqual(retry_mod._jobs["resumejob001"].status, "queued")
+            self.assertTrue(started)
+            retry_mod._jobs.clear()
+
+    def test_autocue_job_argv_is_isolated_module(self):
+        cmd = retry_mod.autocue_job_argv(
+            audio="/tmp/song.flac",
+            result_path="/tmp/out.json",
+            database="/tmp/database.xml",
+            write_scope="loops",
+            dry_run=True,
+            stems_skipped=True,
+            grid_confirmed=True,
+            model_name="gemini-pro",
+        )
+        self.assertEqual(cmd[1:3], ["-m", "vdj_cuer.autocue_job"])
+        self.assertIn("--dry-run", cmd)
+        self.assertIn("--stems-skipped", cmd)
+        self.assertIn("--grid-confirmed", cmd)
+        self.assertIn("loops", cmd)
+
+    def test_run_job_spawns_subprocess_and_marks_ok(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import patch as _patch
+
+        job = retry_mod.RetryJob(
+            id="j-iso",
+            path="/tmp/song.flac",
+            name="song.flac",
+            status="queued",
+            created_at="t",
+            write_scope="all",
+        )
+        with retry_mod._lock:
+            retry_mod._jobs[job.id] = job
+
+        class FakeProc:
+            def __init__(self, argv):
+                self.stdout = iter(["📋 Scope=all · analysis cues=5 loops=2\n"])
+                self._argv = argv
+                self.pid = 4242
+                self._code = None
+
+            def poll(self):
+                return self._code
+
+            def wait(self, timeout=None):
+                dest = self._argv[self._argv.index("--result") + 1]
+                Path(dest).write_text(
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "analysis_empty": False,
+                            "warn": "",
+                            "error": "",
+                            "analysis_cues": 5,
+                            "analysis_loops": 2,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                self._code = 0
+                return 0
+
+        try:
+            with (
+                _patch.object(
+                    retry_mod.subprocess,
+                    "Popen",
+                    side_effect=lambda argv, **_k: FakeProc(argv),
+                ),
+                _patch.object(
+                    retry_mod,
+                    "summarize_cues",
+                    return_value=SimpleNamespace(cue_count=5, loop_count=2),
+                ),
+                _patch.object(retry_mod, "maybe_ingest_after_autocue"),
+                _patch.object(retry_mod, "persist_jobs"),
+                _patch.object(
+                    retry_mod,
+                    "adjacent_vdj_stems",
+                    return_value=Path("/tmp/song.flac.vdjstems"),
+                ),
+                _patch.object(
+                    retry_mod,
+                    "ensure_autocue_on_path",
+                    return_value=Path("/tmp"),
+                ),
+            ):
+                retry_mod._run_job("j-iso", False, None)
+            live = retry_mod.get_job("j-iso")
+            self.assertIsNotNone(live)
+            self.assertEqual(live.status, "ok")
+            self.assertEqual(live.cue_count_after, 5)
+            self.assertEqual(live.loop_count_after, 2)
+            self.assertIn("AutoCue finished", live.message)
+            self.assertIsNone(live.worker_pid)
+        finally:
+            with retry_mod._lock:
+                retry_mod._jobs.pop("j-iso", None)
+
+    def test_run_job_marks_error_when_child_reports_failure(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import patch as _patch
+
+        job = retry_mod.RetryJob(
+            id="j-fail",
+            path="/tmp/song.flac",
+            name="song.flac",
+            status="queued",
+            created_at="t",
+            write_scope="all",
+        )
+        with retry_mod._lock:
+            retry_mod._jobs[job.id] = job
+
+        class FakeProc:
+            def __init__(self, argv):
+                self.stdout = iter(["❌ Analysis returned no data after retries\n"])
+                self._argv = argv
+                self.pid = 7
+                self._code = None
+
+            def poll(self):
+                return self._code
+
+            def wait(self, timeout=None):
+                dest = self._argv[self._argv.index("--result") + 1]
+                Path(dest).write_text(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "analysis_empty": True,
+                            "warn": "",
+                            "error": "no data",
+                            "analysis_cues": 0,
+                            "analysis_loops": 0,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                self._code = 1
+                return 1
+
+        try:
+            with (
+                _patch.object(
+                    retry_mod.subprocess,
+                    "Popen",
+                    side_effect=lambda argv, **_k: FakeProc(argv),
+                ),
+                _patch.object(
+                    retry_mod,
+                    "summarize_cues",
+                    return_value=SimpleNamespace(cue_count=0, loop_count=0),
+                ),
+                _patch.object(retry_mod, "persist_jobs"),
+                _patch.object(
+                    retry_mod,
+                    "adjacent_vdj_stems",
+                    return_value=Path("/tmp/song.flac.vdjstems"),
+                ),
+                _patch.object(
+                    retry_mod,
+                    "ensure_autocue_on_path",
+                    return_value=Path("/tmp"),
+                ),
+            ):
+                retry_mod._run_job("j-fail", False, None)
+            live = retry_mod.get_job("j-fail")
+            self.assertEqual(live.status, "error")
+            self.assertIsNone(live.worker_pid)
+        finally:
+            with retry_mod._lock:
+                retry_mod._jobs.pop("j-fail", None)
+
+    def test_resume_reattaches_live_worker_instead_of_spawning(self):
+        started = []
+
+        class FakeThread:
+            def __init__(self, *args, **kwargs):
+                started.append(kwargs.get("target") or args[0] if args else kwargs.get("target"))
+
+            def start(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp) / "autocue_jobs.json"
+            audio = Path(tmp) / "song.flac"
+            audio.write_bytes(b"x")
+            retry_mod._jobs.clear()
+            retry_mod._batches.clear()
+            job = retry_mod.RetryJob(
+                id="livepid001",
+                path=str(audio),
+                name=audio.name,
+                status="running",
+                created_at="2026-08-26T15:00:00",
+                worker_pid=os.getpid(),
+            )
+            retry_mod._jobs[job.id] = job
+            retry_mod.persist_jobs(store)
+            retry_mod._jobs.clear()
+            with (
+                patch.object(retry_mod.threading, "Thread", FakeThread),
+                patch.object(retry_mod, "persist_jobs", lambda *a, **k: None),
+                patch.object(retry_mod, "_pid_is_alive", return_value=True),
+            ):
+                n = retry_mod.restore_jobs(store_path=store, resume=True)
+            self.assertEqual(n, 1)
+            self.assertEqual(started, [retry_mod._reap_orphaned_worker])
+            self.assertEqual(retry_mod._jobs["livepid001"].status, "running")
+            retry_mod._jobs.clear()
 
 
 if __name__ == "__main__":

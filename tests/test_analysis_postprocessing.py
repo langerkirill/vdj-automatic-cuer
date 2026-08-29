@@ -33,6 +33,27 @@ class AnalysisPostprocessingTests(unittest.TestCase):
         self.assertNotIn("melody", cue["cue_name"].lower())
         self.assertEqual(cue["color"], "green")
 
+    def test_drums_plus_audible_vocal_is_yellow_even_if_elements_missed_it(self):
+        """NDULE Beat Entry: voice is in the mix so the marker cannot stay green."""
+        color = self.cuer.validate_color_assignment(
+            ["drums", "synth"],
+            "green",
+            stem_activity={"vocal": "medium", "kick": "medium", "instruments": "medium"},
+        )
+        self.assertEqual(color, "yellow")
+        quiet = self.cuer.validate_color_assignment(
+            ["drums", "synth"],
+            "green",
+            stem_activity={"vocal": "none", "kick": "high", "instruments": "medium"},
+        )
+        self.assertEqual(quiet, "green")
+        bleed = self.cuer.validate_color_assignment(
+            ["drums", "synth"],
+            "green",
+            stem_activity={"vocal": "low", "kick": "medium", "instruments": "medium"},
+        )
+        self.assertEqual(bleed, "green")
+
     def test_relabels_drum_loop_when_more_than_drums_are_present(self):
         analysis = {
             "measure_changes": [],

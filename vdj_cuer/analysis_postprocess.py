@@ -5,12 +5,23 @@ from .stem_evidence import StemProfile, energy_ratio
 
 
 class AnalysisPostprocessMixin:
-    def validate_color_assignment(self, elements: List[str], gemini_color: str) -> str:
+    def validate_color_assignment(
+        self,
+        elements: List[str],
+        gemini_color: str,
+        stem_activity: Optional[Dict] = None,
+    ) -> str:
         """Validate and correct color assignment based on elements"""
         # Separate drums from light percussion
         has_drums = "drums" in elements
         has_light_percussion = "percussion" in elements and not has_drums
         has_vocals = "vocals" in elements
+        if not has_vocals and isinstance(stem_activity, dict):
+            vocal_level = str(stem_activity.get("vocal") or "none").strip().lower()
+            # "low" is VDJ vocal-stem bleed on instrumentals (Memories).
+            # Only medium/high may paint yellow when elements missed the singer.
+            if vocal_level in {"medium", "high"}:
+                has_vocals = True
         has_melody = any(
             elem in elements for elem in ["piano", "synth", "strings", "guitar", "bass"]
         )
@@ -176,12 +187,14 @@ class AnalysisPostprocessMixin:
         if has_vocals:
             return "Vocal Break"
         if has_drums and not self._is_drum_only(elements):
-            return "Rhythm Section"
+            return "Groove"
         if self._is_drum_only(elements):
             return "Drums"
+        if "synth" in [e.lower() for e in elements]:
+            return "Synth Intro"
         if melodic_elements:
             return " ".join(elem.capitalize() for elem in melodic_elements[:2])
-        return "Section"
+        return "Beat Entry"
 
     @staticmethod
     def _preserved_position_prefix(name: str) -> str:
@@ -250,7 +263,9 @@ class AnalysisPostprocessMixin:
                 )
             cue_data["elements"] = elements
             color = cue_data.get("color", "green")
-            cue_data["color"] = self.validate_color_assignment(elements, color)
+            cue_data["color"] = self.validate_color_assignment(
+                elements, color, stem_activity
+            )
 
             cue_name = cue_data.get("cue_name", "")
             if self._name_conflicts_with_elements(cue_name, elements):
@@ -258,7 +273,9 @@ class AnalysisPostprocessMixin:
                     cue_name, elements, is_loop=False
                 )
             # Never keep & / &amp; in cue labels (shows as &amp;amp; in VDJ).
-            cue_data["cue_name"] = self.sanitize_marker_name(cue_name)
+            cue_data["cue_name"] = self._refuse_generic_section(
+                self.sanitize_marker_name(cue_name), elements
+            )
 
         for loop_data in analysis_data.get("loop_segments", []):
             stem_activity = self._stem_activity_dict(loop_data)
@@ -270,14 +287,18 @@ class AnalysisPostprocessMixin:
                 )
             loop_data["elements"] = elements
             color = loop_data.get("color", "green")
-            loop_data["color"] = self.validate_color_assignment(elements, color)
+            loop_data["color"] = self.validate_color_assignment(
+                elements, color, stem_activity
+            )
 
             loop_name = loop_data.get("loop_name", "")
             if self._name_conflicts_with_elements(loop_name, elements):
                 loop_name = self._replacement_name(
                     loop_name, elements, is_loop=True
                 )
-            loop_data["loop_name"] = self.sanitize_marker_name(loop_name)
+            loop_data["loop_name"] = self._refuse_generic_section(
+                self.sanitize_marker_name(loop_name), elements
+            )
 
         return analysis_data
 
@@ -405,7 +426,9 @@ class AnalysisPostprocessMixin:
                 replacement = f"Main {replacement}"
             elif lower_name.startswith("final "):
                 replacement = f"Final {replacement}"
-            cue_data["cue_name"] = replacement
+            cue_data["cue_name"] = self._refuse_generic_section(
+                replacement, cue_data.get("elements", [])
+            )
             cue_data["role"] = "section"
             cue_data["assertion_downgraded"] = True
             print(
@@ -414,6 +437,34 @@ class AnalysisPostprocessMixin:
             )
 
         return analysis_data
+
+    @staticmethod
+    def _refuse_generic_section(name: str, elements: List[str]) -> str:
+        """Kirill: 'Section' is not a cue name. Name the part."""
+        raw = (name or "").strip()
+        lowered = raw.lower()
+        generic = {
+            "section",
+            "the section",
+            "rhythm section",
+            "synth section",
+            "melodic section",
+            "vocal section",
+        }
+        if raw and lowered not in generic and "section" not in lowered:
+            return raw
+        items = [str(e).lower() for e in elements]
+        if "vocals" in items:
+            return "Vocal Break"
+        if "drums" in items and "bass" in items:
+            return "Groove"
+        if "drums" in items:
+            return "Beat Entry"
+        if "synth" in items:
+            return "Synth Intro"
+        if "bass" in items:
+            return "Bass"
+        return "Beat Entry"
 
     def create_cue_name(self, elements: List[str], measure: int) -> str:
         """Generate descriptive cue name based on detected elements"""
@@ -464,8 +515,7 @@ class AnalysisPostprocessMixin:
                 return f"mix{measure}"
 
     def create_loop_name(self, elements: List[str]) -> str:
-        """Generate loop name with 'l' suffix"""
-        base_name = self.create_cue_name(elements, 0)
-        if base_name.startswith("mix"):
-            return "loopl"
-        return f"{base_name}l"
+        """Part name only. Write path adds ' Loop' — never glue 'l'."""
+        return self._refuse_generic_section(
+            self._element_label(elements), elements
+        )

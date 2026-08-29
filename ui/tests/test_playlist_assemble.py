@@ -871,6 +871,92 @@ class PlaylistAssembleHelpersTests(unittest.TestCase):
             self.assertTrue(other.exists())
             self.assertEqual(out.get("removed_duplicates"), 0)
 
+    def test_materialize_keeps_different_remix_of_same_title(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src_root = Path(tmp) / "zouk"
+            dest_root = Path(tmp) / "Sets"
+            src_root.mkdir()
+            dest_root.mkdir()
+            src = src_root / "14 - Dj Kakah - Chantaje (Kizomba Remix).mp3"
+            src.write_bytes(b"kizomba")
+            folder = dest_root / "Pajamathon 2026"
+            folder.mkdir()
+            other = folder / "165. Dj Kakah - Chantaje (Shakira & Maluma).mp3"
+            other.write_bytes(b"shakira")
+            out = materialize_set_directory(
+                [
+                    {
+                        "path": str(src),
+                        "artist": "Dj Kakah",
+                        "title": "Chantaje (Kizomba Remix)",
+                        "name": src.name,
+                    }
+                ],
+                event_name="Pajamathon",
+                sets_root=dest_root,
+                clone_cues=False,
+            )
+            self.assertTrue(other.exists())
+            self.assertEqual(out.get("removed_duplicates"), 0)
+            names = [p.name for p in Path(out["folder"]).iterdir() if p.suffix == ".mp3"]
+            self.assertTrue(any("Kizomba Remix" in n for n in names))
+
+    def test_materialize_removes_leftover_vdj_song(self):
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src_root = Path(tmp) / "zouk"
+            dest_root = Path(tmp) / "Sets"
+            src_root.mkdir()
+            dest_root.mkdir()
+            src = src_root / "01 Dusk Till Dawn - Kizomba Remix.m4a"
+            src.write_bytes(b"dusk")
+            folder = dest_root / "Pajamathon 2026"
+            folder.mkdir()
+            leftover = folder / "405. 01 Dusk Till Dawn - Kizomba Remix.m4a"
+            leftover.write_bytes(b"old")
+            db = Path(tmp) / "database.xml"
+            db.write_text(
+                (
+                    "<VirtualDJ_Database>\r\n"
+                    f'<Song FilePath="{src.resolve()}">\r\n'
+                    '  <Poi Name="Intro" Pos="0.1" Num="1" Type="cue" />\r\n'
+                    "</Song>\r\n"
+                    f'<Song FilePath="{leftover.resolve()}">\r\n'
+                    '  <Poi Name="Old" Pos="0.2" Num="1" Type="cue" />\r\n'
+                    "</Song>\r\n"
+                    "</VirtualDJ_Database>\r\n"
+                ),
+                encoding="utf-8",
+            )
+            with patch(
+                "sorter.relocate.is_virtualdj_running", return_value=False
+            ), patch(
+                "vdj_database_safety.is_virtualdj_running", return_value=False
+            ):
+                out = materialize_set_directory(
+                    [
+                        {
+                            "path": str(src),
+                            "artist": "Vlad Ivan",
+                            "title": "Dusk Till Dawn - Kizomba Remix",
+                            "name": src.name,
+                        }
+                    ],
+                    event_name="Pajamathon",
+                    sets_root=dest_root,
+                    clone_cues=False,
+                    database_path=db,
+                )
+            self.assertFalse(leftover.exists())
+            self.assertGreaterEqual(out.get("removed_duplicate_db") or 0, 1)
+            text = db.read_text(encoding="utf-8")
+            self.assertNotIn(str(leftover.resolve()), text)
+            self.assertIn(str(src.resolve()), text)
+
     def test_clone_cues_skips_when_vdj_open(self):
         from unittest.mock import patch
 
@@ -989,6 +1075,40 @@ class PlaylistAssembleHelpersTests(unittest.TestCase):
             dest = dest[dest.find("Pajamathon") :]
             self.assertIn('User2="Tribal"', dest)
             self.assertNotIn('User2="Pajamathon 2026"', dest)
+
+    def test_clone_cues_preserves_crlf_and_uses_atomic_gate(self):
+        """Set-folder clone must not write_text the live database.xml."""
+        import inspect
+        from unittest.mock import patch
+
+        src = inspect.getsource(clone_cues_for_set_paths)
+        self.assertIn("atomic_replace_database", src)
+        self.assertNotIn("tmp.write_text(content", src)
+
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\r\n'
+            '<VirtualDJ_Database Version="2021">\r\n'
+            ' <Song FilePath="/lib/src.flac">\r\n'
+            '  <Tags Author="Azaleh" Title="Moonlight"/>\r\n'
+            '  <Poi Name="Intro" Pos="8.0" Type="cue" Num="1" />\r\n'
+            " </Song>\r\n"
+            "</VirtualDJ_Database>\r\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "database.xml"
+            db.write_bytes(xml.encode("utf-8"))
+            with patch("sorter.relocate.is_virtualdj_running", return_value=False), patch(
+                "vdj_database_safety.is_virtualdj_running", return_value=False
+            ):
+                out = clone_cues_for_set_paths(
+                    [("/lib/src.flac", "/Sets/Pajamathon 2026/001. Moonlight.flac")],
+                    database_path=db,
+                )
+            self.assertEqual(out["cloned"], 1)
+            raw = db.read_bytes()
+            self.assertGreater(raw.count(b"\r\n"), 4)
+            self.assertEqual(raw.count(b"\n") - raw.count(b"\r\n"), 0)
+            self.assertEqual(raw.count(b"<Song"), 2)
 
     def test_stage_uncued_playlist_tracks_copies_only_uncued(self):
         import tempfile

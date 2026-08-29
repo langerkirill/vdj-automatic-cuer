@@ -166,6 +166,24 @@ console.log(JSON.stringify({ fixed, oldBug }));
         self.assertNotIn("pick a folder", out["fixed"]["message"])
         self.assertIn("pick a folder", out["oldBug"]["message"])
 
+    def test_set_sort_toast_has_no_ready_count(self) -> None:
+        out = _node_handoff(
+            """
+const h = handoff.composeSetSortSuccessHandoff({
+  database_updated: true,
+  library_dests: [{ library: "Zouk", relative_folder: "Bassy" }],
+});
+console.log(JSON.stringify(h));
+"""
+        )
+        self.assertEqual(out["kind"], "success")
+        self.assertIn("Zouk/Bassy", out["message"])
+        self.assertIn("Cues Sorted", out["message"])
+        self.assertIn("cues kept", out["message"])
+        self.assertIn("set stayed", out["message"])
+        self.assertNotIn("Ready", out["message"])
+        self.assertIsNone(out["action"])
+
 
 if __name__ == "__main__":
     unittest.main()

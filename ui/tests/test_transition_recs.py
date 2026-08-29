@@ -12,8 +12,12 @@ from sorter.transition_recs import (
     Candidate,
     build_candidates,
     _fallback_buckets,
+    format_removed_recent_plays_label,
     is_same_track,
+    pajamathon_set_block_keys,
+    pick_has_pajamathon_set_filepath,
     sanitize_recommendation_buckets,
+    stamp_picks_in_set,
     track_block_keys,
     track_identity_key,
 )
@@ -297,7 +301,14 @@ class TransitionRecsTests(unittest.TestCase):
         with patch.object(tr, "_scan_library_songs_from_database", return_value=songs), patch.object(
             tr, "_history_counts_for", return_value={}
         ), patch.object(tr, "audio_file_exists", return_value=True), patch.object(
-            tr, "played_today_block_keys", return_value=blocked
+            tr,
+            "recent_play_windows",
+            return_value={
+                "today": blocked,
+                "yesterday": set(),
+                "earlier": set(),
+                "all": blocked,
+            },
         ):
             cands = build_candidates(
                 source_path="/now/seadoo.m4a",
@@ -310,6 +321,80 @@ class TransitionRecsTests(unittest.TestCase):
         titles = {c.title for c in cands}
         self.assertNotIn("Chasing Marrakech", titles)
         self.assertIn("Fresh", titles)
+
+    def test_removed_recent_plays_label_prefers_yesterday_wording(self):
+        self.assertEqual(
+            format_removed_recent_plays_label(today=0, yesterday=8, earlier=0),
+            "8 removed because played yesterday",
+        )
+        self.assertEqual(
+            format_removed_recent_plays_label(today=6, yesterday=8, earlier=0),
+            "14 removed because already played this event (6 today · 8 yesterday)",
+        )
+        self.assertEqual(
+            format_removed_recent_plays_label(today=2, yesterday=8, earlier=4),
+            "14 removed because already played this event (2 today · 8 yesterday · 4 earlier)",
+        )
+        self.assertEqual(format_removed_recent_plays_label(0, 0, 0), "")
+
+    def test_build_candidates_skips_event_window_plays_and_counts(self):
+        songs = [
+            {
+                "path": "/lib/Zouk/yest.flac",
+                "name": "yest.flac",
+                "artist": "Yest",
+                "title": "Yesterday",
+                "bpm": 77.0,
+                "key": "F",
+                "camelot": "7B",
+                "cue_count": 3,
+                "library": "Zouk",
+                "relative_path": "yest.flac",
+                "energy_hint": "same",
+            },
+            {
+                "path": "/lib/Zouk/fresh.flac",
+                "name": "fresh.flac",
+                "artist": "Other",
+                "title": "Fresh",
+                "bpm": 78.0,
+                "key": "F",
+                "camelot": "7B",
+                "cue_count": 3,
+                "library": "Zouk",
+                "relative_path": "fresh.flac",
+                "energy_hint": "same",
+            },
+        ]
+        yest = track_block_keys(artist="Yest", title="Yesterday", path="/lib/Zouk/yest.flac")
+        stats: dict = {}
+        with patch.object(tr, "_scan_library_songs_from_database", return_value=songs), patch.object(
+            tr, "_history_counts_for", return_value={}
+        ), patch.object(tr, "audio_file_exists", return_value=True), patch.object(
+            tr,
+            "recent_play_windows",
+            return_value={
+                "today": set(),
+                "yesterday": yest,
+                "earlier": set(),
+                "all": yest,
+            },
+        ):
+            cands = build_candidates(
+                source_path="/now/seadoo.m4a",
+                source_bpm=77.0,
+                source_key="F",
+                source_artist="X",
+                source_title="Now",
+                bpm_tolerance=5,
+                play_skip_stats=stats,
+            )
+        titles = {c.title for c in cands}
+        self.assertNotIn("Yesterday", titles)
+        self.assertIn("Fresh", titles)
+        self.assertEqual(stats.get("yesterday"), 1)
+        self.assertEqual(stats.get("today"), 0)
+        self.assertEqual(stats.get("earlier"), 0)
 
     def test_build_candidates_boosts_matching_genre_family(self):
         songs = [
@@ -540,6 +625,49 @@ class TransitionRecsTests(unittest.TestCase):
             out = tr._gemini_rank(source=source, candidates=[cand])
         self.assertEqual(out["same_energy"][0]["path"], cand.path)
         self.assertEqual(out["model"], tr.MODEL_FALLBACKS[0])
+
+    def test_cues_sorted_rec_is_in_set_when_pajamathon_filepath_exists(self):
+        """Soul Deep rec'd from Cues Sorted is in-set if Sets/Pajamathon FilePath exists."""
+        songs = [
+            {
+                "path": "/Music/Sets/Pajamathon 2026/188. Kakah - Soul Deep.flac",
+                "name": "188. Kakah - Soul Deep.flac",
+                "artist": "Kakah",
+                "title": "Soul Deep",
+                "library": "Pajamathon",
+            },
+            {
+                "path": "/Music/Zouk/Cues Sorted/Bassy/Kakah - Soul Deep.flac",
+                "name": "Kakah - Soul Deep.flac",
+                "artist": "Kakah",
+                "title": "Soul Deep",
+                "library": "Cues Sorted",
+            },
+        ]
+        set_keys = pajamathon_set_block_keys(songs)
+        cs = {
+            "path": "/Music/Zouk/Cues Sorted/Bassy/Kakah - Soul Deep.flac",
+            "artist": "Kakah",
+            "title": "Soul Deep",
+            "name": "Kakah - Soul Deep.flac",
+            "library": "Cues Sorted",
+        }
+        other = {
+            "path": "/Music/Zouk/Cues Sorted/Bassy/Someone Else.flac",
+            "artist": "Other",
+            "title": "Nope",
+            "name": "Someone Else.flac",
+            "library": "Cues Sorted",
+        }
+        self.assertTrue(pick_has_pajamathon_set_filepath(cs, set_keys))
+        self.assertFalse(pick_has_pajamathon_set_filepath(other, set_keys))
+        with patch.object(tr, "_scan_cache", {"ts": 1.0, "songs": songs}):
+            stamped = stamp_picks_in_set(
+                {"higher_energy": [], "same_energy": [cs, other], "lower_energy": []}
+            )
+        self.assertTrue(stamped["same_energy"][0]["in_set"])
+        self.assertFalse(stamped["same_energy"][1]["in_set"])
+
 
 
 if __name__ == "__main__":

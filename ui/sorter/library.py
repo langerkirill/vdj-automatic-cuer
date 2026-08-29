@@ -282,8 +282,31 @@ def placement_match_keys(filename: str) -> list[str]:
     return keys
 
 
+def is_must_play_folder_path(path: str | Path) -> bool:
+    """True when any path part is the Must Play folder."""
+    text = str(path or "").replace("\\", "/")
+    return any(part.lower() == "must play" for part in text.split("/") if part)
+
+
 def is_pajamathon_event(name: str) -> bool:
     return (name or "").strip().lower().startswith(_PAJAMATHON_EVENT_PREFIX)
+
+
+def is_pajamathon_set_audio(
+    path: str | Path,
+    *,
+    sets_root: Path | None = None,
+) -> bool:
+    """True when the file lives in Sets/Pajamathon* (the event crate)."""
+    audio = Path(path).expanduser().resolve()
+    root = Path(sets_root or SETS_ROOT).expanduser().resolve()
+    try:
+        rel = audio.relative_to(root)
+    except ValueError:
+        return False
+    if not rel.parts:
+        return False
+    return is_pajamathon_event(rel.parts[0])
 
 
 def _set_hit(path: Path, sets_root: Path) -> dict[str, str]:
@@ -412,6 +435,56 @@ def list_ready_tracks(source_dir: Path | None = None) -> list[TrackInfo]:
     return tracks
 
 
+def audio_inode_key(path: str | Path) -> tuple[int, int] | None:
+    """Device + inode for hard-link identity, or None if the file is gone."""
+    try:
+        st = Path(path).expanduser().stat()
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def inode_keys_for_paths(paths: Iterable[str | Path]) -> set[tuple[int, int]]:
+    keys: set[tuple[int, int]] = set()
+    for path in paths:
+        key = audio_inode_key(path)
+        if key is not None:
+            keys.add(key)
+    return keys
+
+
+def is_add_cues_vdj_ghost(
+    path: str | Path,
+    *,
+    in_database: bool,
+    set_inodes: set[tuple[int, int]],
+) -> bool:
+    """Add Cues leftover: no VDJ Song here, but the same bytes already live in Sets."""
+    if in_database:
+        return False
+    key = audio_inode_key(path)
+    return key is not None and key in set_inodes
+
+
+def drop_add_cues_vdj_ghosts(
+    tracks: list[TrackInfo],
+    *,
+    in_database_by_path: dict[str, bool],
+    set_inodes: set[tuple[int, int]],
+) -> list[TrackInfo]:
+    """Drop Add Cues rows whose only Song is the Sets hard-link."""
+    kept: list[TrackInfo] = []
+    for track in tracks:
+        if is_add_cues_vdj_ghost(
+            track.path,
+            in_database=bool(in_database_by_path.get(track.path, False)),
+            set_inodes=set_inodes,
+        ):
+            continue
+        kept.append(track)
+    return kept
+
+
 def add_cues_section(*, group: str = "", relative_path: str = "") -> str:
     """Split Add Cues into the Pajamathon crate vs the general inbox."""
     rel = (relative_path or "").replace("\\", "/").strip("/")
@@ -453,23 +526,44 @@ def list_pajamathon_set_tracks(sets_root: Path | None = None) -> list[TrackInfo]
     return tracks
 
 
+def list_all_set_tracks(sets_root: Path | None = None) -> list[TrackInfo]:
+    """Every audio file under Sets/, including Pajamathon subfolders like Must Play."""
+    root = Path(sets_root or SETS_ROOT)
+    if not root.is_dir():
+        return []
+    tracks: list[TrackInfo] = []
+    for path in sorted(root.rglob("*"), key=lambda p: str(p).lower()):
+        if not _is_audio_file(path):
+            continue
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            continue
+        if any(part.startswith(".") for part in rel.parts[:-1]):
+            continue
+        folder = "/".join(rel.parts[:-1]) or root.name
+        stems = Path(f"{path}.vdjstems")
+        tracks.append(
+            TrackInfo(
+                path=str(path),
+                name=path.name,
+                stems_path=str(stems) if stems.is_file() else None,
+                size_bytes=path.stat().st_size,
+                relative_path=rel.as_posix(),
+                group=folder,
+                section="set",
+            )
+        )
+    return tracks
+
+
 def merge_add_cues_and_pajamathon_set(
     add_tracks: list[TrackInfo],
     set_tracks: list[TrackInfo] | None = None,
 ) -> list[TrackInfo]:
-    """Inbox + event crate. Drop Add Cues/Pajamathon dupes that already live in Sets/."""
-    event = list(set_tracks if set_tracks is not None else list_pajamathon_set_tracks())
-    event_keys = {normalize_placement_key(t.name) for t in event}
-    merged: list[TrackInfo] = []
-    for track in add_tracks:
-        if (
-            track.section == "pajamathon"
-            and normalize_placement_key(track.name) in event_keys
-        ):
-            continue
-        merged.append(track)
-    merged.extend(event)
-    return merged
+    """Add Cues queue only. Sets/Pajamathon is the approved crate — not listed here."""
+    del set_tracks
+    return list(add_tracks)
 
 
 def add_cues_tracks_by_crate(
@@ -477,9 +571,7 @@ def add_cues_tracks_by_crate(
     source_dir: Path | None = None,
 ) -> list[TrackInfo]:
     """Add Cues tracks for one crate: all, pajamathon, or inbox."""
-    add_tracks = list_add_cues_tracks(source_dir)
-    set_tracks = [] if source_dir is not None else list_pajamathon_set_tracks()
-    tracks = merge_add_cues_and_pajamathon_set(add_tracks, set_tracks)
+    tracks = list_add_cues_tracks(source_dir)
     if crate == "pajamathon":
         return [t for t in tracks if t.section == "pajamathon"]
     if crate == "inbox":

@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import MIXES_ROOT, VDJ_DATABASE, AUDIO_EXTENSIONS
-from .transitions_db import lookup_options, load_practice_scores, normalize_key
+from .transitions_db import (
+    is_practice_mix_excluded,
+    lookup_options,
+    load_practice_scores,
+    normalize_key,
+)
 
 
 @dataclass
@@ -288,6 +293,7 @@ def get_practice_set_detail(
         "unique_tracks": unique,
         "transitions": [t.to_dict() for t in transitions],
         "transition_count": len(transitions),
+        "exclude_from_best": is_practice_mix_excluded(str(path)),
     }
 
 

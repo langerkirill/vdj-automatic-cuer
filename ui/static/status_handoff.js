@@ -4,10 +4,11 @@
  * Also required by Node unit tests (CommonJS) — keep free of DOM / fetch.
  */
 (function (root, factory) {
-  if (typeof module === "object" && module.exports) {
-    module.exports = factory();
+  const api = factory();
+  if (typeof module === "object" && module && module.exports) {
+    module.exports = api;
   } else {
-    root.MusicSorterStatusHandoff = factory();
+    /** @type {Record<string, unknown>} */ (root).MusicSorterStatusHandoff = api;
   }
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
@@ -40,6 +41,24 @@
    * @param {string[]} [archiveBits]
    * @returns {{ message: string, kind: string, action: { label: string, gotoMode: string } | null }}
    */
+  function composeSetSortSuccessHandoff(result) {
+    const dests = (result && result.library_dests) || [];
+    const dest = dests
+      .map((d) => `${d.library || "Zouk"}/${d.relative_folder || ""}`.replace(/\/$/, ""))
+      .filter((s) => s && s !== "Zouk/")
+      .join(" + ");
+    const bits = [];
+    if (dest) bits.push(dest);
+    bits.push("Cues Sorted");
+    if (result && result.database_updated) bits.push("cues kept");
+    bits.push("set stayed");
+    return {
+      message: `Sorted · ${bits.join(" · ")}`,
+      kind: "success",
+      action: null,
+    };
+  }
+
   function composeSortSuccessHandoff(result, remainingCount, archiveBits) {
     const remaining = Number(remainingCount);
     const left = Number.isFinite(remaining) ? Math.max(0, remaining) : 0;
@@ -95,6 +114,7 @@
   return {
     composePromoteSuccessHandoff,
     composeSortSuccessHandoff,
+    composeSetSortSuccessHandoff,
     applyStatusAfterLoad,
   };
 });

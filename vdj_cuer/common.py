@@ -5,6 +5,7 @@ import sys
 import json
 import math
 import re
+import errno
 import shutil
 import subprocess
 import struct
@@ -66,12 +67,12 @@ def load_gemini_api_key() -> str:
     return key
 
 
-DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
 # 3.5 Flash-Lite 503s / returns empty under load. 2.5 Flash 404s for new keys.
 GEMINI_PRO_FALLBACKS = (
+    "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
-    "gemini-3.1-flash-lite",
     "gemini-2.5-pro",
 )
 _DEAD_GEMINI_MODELS = {
@@ -148,20 +149,80 @@ def existing_downbeat_is_trusted(phase_scores: Optional[Dict[int, float]]) -> bo
 
 
 DOWNBEAT_HARD_FAIL_BEATS = 0.08
+# Bar-1 grid: a hit up to one beat early still belongs on this 1.
+DOWNBEAT_LOOKBACK_BEATS = 1.0
+# Yellow [1]s on the 8787 wave: every 4 bars (16 beats) from Cue 1 / Phase.
+PHRASE_BEATS = 16
+# Phrase grid: up to 1 bar early still this [1] (Come back 82.697 → 85.364).
+# Up to ~1 beat late stays so 85.364+1.05 beats does not jump a full phrase.
+PHRASE_LOOKBACK_BEATS = 4.0
+
+
+def quantize_to_grid(
+    time_sec: float,
+    bpm: float,
+    offset: float = 0.0,
+    grid_beats: int = 4,
+) -> float:
+    """Upcoming grid 1. Never snap back to the previous cell.
+
+    If the guess is up to one beat early, land on this 1. Otherwise jump
+    forward to the next 1. That keeps Vocal Break on the loud 1 instead of
+    the 1 before it.
+    """
+    if not bpm or bpm <= 0 or not math.isfinite(float(time_sec)):
+        return float(time_sec)
+    beat = 60.0 / float(bpm)
+    grid_beats_n = max(1, int(grid_beats))
+    cell = beat * float(grid_beats_n)
+    if cell <= 0:
+        return max(0.0, float(time_sec))
+    origin = float(offset)
+    lookback_beats = (
+        PHRASE_LOOKBACK_BEATS
+        if grid_beats_n >= PHRASE_BEATS
+        else DOWNBEAT_LOOKBACK_BEATS
+    )
+    lookback = beat * lookback_beats
+    steps = math.ceil(((float(time_sec) - lookback) - origin) / cell - 1e-12)
+    first = math.ceil(-origin / cell)
+    steps = max(int(steps), int(first))
+    return origin + steps * cell
 
 
 def quantize_to_downbeat(time_sec: float, bpm: float, offset: float = 0.0) -> float:
-    """Nearest nonnegative bar-1 (beat 1)."""
+    """Upcoming bar-1 (4 beats)."""
+    return quantize_to_grid(time_sec, bpm, offset, grid_beats=4)
+
+
+def quantize_to_phrase_one(
+    time_sec: float, bpm: float, offset: float = 0.0
+) -> float:
+    """Upcoming yellow [1] — every 4 bars from the disk 1."""
+    return quantize_to_grid(time_sec, bpm, offset, grid_beats=PHRASE_BEATS)
+
+
+def is_on_grid(
+    time_sec: float,
+    bpm: float,
+    offset: float = 0.0,
+    grid_beats: int = 4,
+    *,
+    tol_beats: float = DOWNBEAT_HARD_FAIL_BEATS,
+) -> bool:
+    """True when time sits on a grid 1 (bar or phrase)."""
     if not bpm or bpm <= 0 or not math.isfinite(float(time_sec)):
-        return float(time_sec)
-    bar = (60.0 / float(bpm)) * 4.0
-    if bar <= 0:
-        return max(0.0, float(time_sec))
-    steps = (float(time_sec) - float(offset)) / bar
-    nearest = math.floor(steps + 0.5)
-    first = math.ceil(-float(offset) / bar)
-    nearest = max(int(nearest), int(first))
-    return float(offset) + nearest * bar
+        return False
+    beat = 60.0 / float(bpm)
+    grid_beats_n = max(1, int(grid_beats))
+    cell = beat * float(grid_beats_n)
+    if cell <= 0:
+        return False
+    pos = (float(time_sec) - float(offset)) % cell
+    if pos < 0:
+        pos += cell
+    dist = min(pos, cell - pos)
+    return dist <= beat * max(0.0, float(tol_beats))
 
 
 def is_on_downbeat(
@@ -172,17 +233,24 @@ def is_on_downbeat(
     tol_beats: float = DOWNBEAT_HARD_FAIL_BEATS,
 ) -> bool:
     """True when time is on beat 1 of the bar (the DJ jump point)."""
-    if not bpm or bpm <= 0 or not math.isfinite(float(time_sec)):
-        return False
-    beat = 60.0 / float(bpm)
-    bar = beat * 4.0
-    if bar <= 0:
-        return False
-    pos = (float(time_sec) - float(offset)) % bar
-    if pos < 0:
-        pos += bar
-    dist = min(pos, bar - pos)
-    return dist <= beat * max(0.0, float(tol_beats))
+    return is_on_grid(
+        time_sec, bpm, offset, grid_beats=4, tol_beats=tol_beats
+    )
+
+
+def is_on_phrase_one(
+    time_sec: float,
+    bpm: float,
+    offset: float = 0.0,
+    *,
+    tol_beats: float = DOWNBEAT_HARD_FAIL_BEATS,
+) -> bool:
+    """True when time is a yellow phrase [1] (every 4 bars from the disk 1)."""
+    return is_on_grid(
+        time_sec, bpm, offset, grid_beats=PHRASE_BEATS, tol_beats=tol_beats
+    )
+
+
 BEATGRID_PHASE_SOURCE_RELATIVE_RATIO = 1.45
 BEATGRID_PHASE_NEAR_TIE_RATIO = 1.15
 BEATGRID_PHASE_CONSENSUS_MIN_SOURCES = 2
@@ -217,6 +285,36 @@ RETRYABLE_API_ERROR_TERMS = NETWORK_ERROR_TERMS + (
 )
 
 
+class StemDecodeError(RuntimeError):
+    """ffmpeg could not decode a VDJ stem stream (EPIPE, bad map, etc.)."""
+
+
+def is_stem_decode_error(error: BaseException) -> bool:
+    """True for EPIPE / ffmpeg stem-decode failures that should fail over to mix."""
+    if isinstance(error, StemDecodeError):
+        return True
+    if isinstance(error, BrokenPipeError):
+        return True
+    if isinstance(error, OSError) and getattr(error, "errno", None) == errno.EPIPE:
+        return True
+    if isinstance(error, subprocess.CalledProcessError):
+        if error.returncode in {141, -13}:  # SIGPIPE
+            return True
+        raw = error.stderr or error.stdout or b""
+        detail = (
+            raw.decode(errors="replace")
+            if isinstance(raw, (bytes, bytearray))
+            else str(raw)
+        )
+        if "broken pipe" in detail.lower():
+            return True
+    text = str(error).lower()
+    return any(
+        term in text
+        for term in ("broken pipe", "errno 32", "epipe", "stem decode")
+    )
+
+
 @dataclass
 class BeatgridAlignment:
     """Verified beatgrid offset and confidence metadata."""
@@ -230,6 +328,7 @@ class BeatgridAlignment:
     fine_shift_seconds: float = 0.0
     beat_score: float = 0.0
     best_beat_score: float = 0.0
+    stems_skipped: bool = False
 
 
 class StemActivity(BaseModel):

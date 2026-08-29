@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import gc
 import os
 import re
@@ -11,8 +12,9 @@ import tempfile
 import time
 import unicodedata
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
 
 VDJ_DATABASE_ROOT = "VirtualDJ_Database"
@@ -436,6 +438,13 @@ def normalize_database_path(file_path: str) -> str:
     return unicodedata.normalize("NFC", file_path)
 
 
+def sanitize_vdj_database_bytes(raw: bytes) -> bytes:
+    """Drop NUL bytes so ElementTree can parse (trailing 0x00 breaks color edits)."""
+    if not raw or b"\x00" not in raw:
+        return raw
+    return raw.replace(b"\x00", b"")
+
+
 def read_vdj_database_text(database_path: os.PathLike | str) -> str:
     """
     Read database.xml while preserving VirtualDJ's CRLF line endings.
@@ -443,14 +452,54 @@ def read_vdj_database_text(database_path: os.PathLike | str) -> str:
     Path.read_text() / open(..., encoding=utf-8) use universal newlines and
     strip \\r. VirtualDJ then treats the file as corrupted and resets the library.
     """
-    raw = Path(database_path).read_bytes()
+    raw = sanitize_vdj_database_bytes(Path(database_path).read_bytes())
     return raw.decode("utf-8")
 
 
+def vdj_database_lock_path(database_path: os.PathLike | str) -> Path:
+    """Sidecar lock file next to database.xml (cross-process exclusive writes)."""
+    path = Path(database_path).expanduser()
+    return path.parent / f"{path.name}.write.lock"
+
+
+@contextmanager
+def vdj_database_exclusive_lock(database_path: os.PathLike | str) -> Iterator[None]:
+    """
+    Exclusive flock for database.xml writers (UI + CLI + other processes).
+
+    Complements the in-process sorter.db_lock so two Music Sorter / AutoCue
+    processes cannot last-write-wins the same library.
+    """
+    lock_path = vdj_database_lock_path(database_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        handle.close()
+
+
+def _fsync_directory(directory: Path) -> None:
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
 def write_vdj_database_text(database_path: os.PathLike | str, content: str) -> None:
-    """Write database.xml as UTF-8 bytes without newline translation."""
-    assert_safe_to_write_vdj_database()
-    Path(database_path).write_bytes(content.encode("utf-8"))
+    """Write database.xml via the atomic gate (UTF-8 bytes, no newline translation)."""
+    atomic_replace_database(database_path, content, original_stats=None)
 
 
 def database_integrity_stats(database_path: os.PathLike | str) -> Dict[str, int]:
@@ -460,7 +509,10 @@ def database_integrity_stats(database_path: os.PathLike | str) -> Dict[str, int]
     cue_loop_count = 0
     root_tag = None
 
-    for event, element in ET.iterparse(path, events=("start", "end")):
+    import io
+
+    raw = sanitize_vdj_database_bytes(path.read_bytes())
+    for event, element in ET.iterparse(io.BytesIO(raw), events=("start", "end")):
         if event == "start" and root_tag is None:
             root_tag = element.tag
             if root_tag != VDJ_DATABASE_ROOT:
@@ -543,8 +595,28 @@ _COMMENT_RE = re.compile(
 )
 
 
+def _is_autocue_info_poi(poi_tag: str) -> bool:
+    """True for AutoCue info markers (Type=cue Num=0, Info name)."""
+    type_match = re.search(r'\bType\s*=\s*"([^"]*)"', poi_tag, re.IGNORECASE)
+    if type_match is None or type_match.group(1).lower() != "cue":
+        return False
+    num_match = re.search(r'\bNum\s*=\s*"([^"]*)"', poi_tag, re.IGNORECASE)
+    num = num_match.group(1) if num_match else "0"
+    if num != "0":
+        return False
+    name_match = re.search(r'\bName\s*=\s*"([^"]*)"', poi_tag, re.IGNORECASE)
+    name = (name_match.group(1) if name_match else "").lower()
+    return name.startswith("info")
+
+
 def _is_manual_cue_or_loop_poi(poi_tag: str) -> bool:
-    """True for user cue/loop markers (keep Num=0 hotcues and automix/beatgrid)."""
+    """True for user cue/loop markers (keep Num=0 hotcues and automix/beatgrid).
+
+    AutoCue info POIs (Num=0, name starts with Info) are treated as rewriteable
+    so they do not stack across AutoCue runs.
+    """
+    if _is_autocue_info_poi(poi_tag):
+        return True
     type_match = re.search(r'\bType\s*=\s*"([^"]*)"', poi_tag, re.IGNORECASE)
     if type_match is None:
         return False
@@ -803,12 +875,32 @@ def directory_sort_label(file_path: str) -> str:
     return f"{rel[-2]}/{rel[-1]}"
 
 
-def song_xml_with_directory_sort_user2(song_xml: str, file_path: str) -> str:
-    """Set Tags User2 to the Directory Sort label for ``file_path``."""
-    label = directory_sort_label(file_path)
-    if not label:
+def normalize_user2_dest(label: str) -> str:
+    """Genre dest only. Refuses Add Cues / Cues Sorted / Sets. Kizouk stays."""
+    text = (label or "").replace("&amp;", "&").strip()
+    if not text:
+        return ""
+    parts = [part for part in text.split("/") if part]
+    if not parts:
+        return ""
+    if parts[-1] == "Kizouk" and (len(parts) == 1 or parts[0] == "Sets"):
+        return "Kizouk"
+    head = parts[0]
+    if head in {"Add Cues", "Cues Sorted", "Sets"} or head.startswith("Cues Sorted"):
+        return ""
+    return text
+
+
+def is_allowed_user2_dest(label: str) -> bool:
+    return bool(normalize_user2_dest(label))
+
+
+def song_xml_with_user2_label(song_xml: str, label: str) -> str:
+    """Patch Tags User2 only. Empty or forbidden dest leaves the Song unchanged."""
+    allowed = normalize_user2_dest(label)
+    if not allowed:
         return song_xml
-    escaped = _escape_xml_attr(label)
+    escaped = _escape_xml_attr(allowed)
     # Prefer self-closing Tags; do not swallow the '/' into attrs.
     tags_m = re.search(r"(<Tags\b)(.*?)(\s*/>)", song_xml, flags=re.DOTALL)
     if tags_m is None:
@@ -834,6 +926,28 @@ def song_xml_with_directory_sort_user2(song_xml: str, file_path: str) -> str:
         new_attrs = attrs.rstrip() + f' User2="{escaped}"'
     new_tags = f"{tags_m.group(1)}{new_attrs}{tags_m.group(3)}"
     return song_xml[: tags_m.start()] + new_tags + song_xml[tags_m.end() :]
+
+
+def song_xml_with_directory_sort_user2(song_xml: str, file_path: str) -> str:
+    """Set Tags User2 from the path label. Refuses Add Cues / Cues Sorted / Sets."""
+    return song_xml_with_user2_label(song_xml, directory_sort_label(file_path))
+
+
+def patch_song_infos_and_user2(
+    song_xml: str,
+    *,
+    user_color: str | None = None,
+    user2: str | None = None,
+) -> str:
+    """Infos UserColor + Tags User2 only. Never replaces the Song block (POIs stay)."""
+    out = song_xml
+    if user_color is not None:
+        from song_lane_color import apply_user_color_to_infos
+
+        out = apply_user_color_to_infos(out, user_color)
+    if user2 is not None:
+        out = song_xml_with_user2_label(out, user2)
+    return out
 
 
 def song_xml_with_new_filepath(
@@ -998,43 +1112,49 @@ def rewrite_song_xml_in_database(
     *,
     validate: bool = True,
 ) -> Dict[str, int]:
-    """Replace one Song block with pre-built XML that keeps native VDJ formatting."""
+    """Replace one Song block with pre-built XML that keeps native VDJ formatting.
+
+    Re-read + splice happens inside ``vdj_database_exclusive_lock`` so a
+    concurrent AutoCue child / UI edit of a *different* song cannot be
+    last-write-wins reverted. The lock is not re-entrant — the replace
+    path must not take a second flock.
+    """
     path = Path(database_path)
-    content = read_vdj_database_text(path)
-    original_stats = _lightweight_rewrite_stats(content, path) if validate else None
-    span = _find_song_span(content, audio_file_path)
-    if span is None:
-        raise KeyError(f"Song not found in database: {audio_file_path}")
+    with vdj_database_exclusive_lock(path):
+        content = read_vdj_database_text(path)
+        original_stats = _lightweight_rewrite_stats(content, path) if validate else None
+        span = _find_song_span(content, audio_file_path)
+        if span is None:
+            raise KeyError(f"Song not found in database: {audio_file_path}")
 
-    start, end = span
-    newline = _detect_newline(content)
-    song_xml = new_song_xml
-    if newline == "\r\n":
-        # Force CRLF for any injected markup (Path.read_text would have stripped it).
-        song_xml = song_xml.replace("\r\n", "\n").replace("\n", "\r\n")
+        start, end = span
+        newline = _detect_newline(content)
+        song_xml = new_song_xml
+        if newline == "\r\n":
+            # Force CRLF for any injected markup (Path.read_text would have stripped it).
+            song_xml = song_xml.replace("\r\n", "\n").replace("\n", "\r\n")
 
-    # Guard: never allow a rewritten Song that lost most of its original bulk
-    # (Tags/Infos/Scan/automix markers), which indicates bad re-serialization.
-    original_song = content[start:end]
-    if len(original_song) >= 400 and len(song_xml) < int(len(original_song) * 0.5):
-        raise ValueError(
-            "Refusing song rewrite that shrinks the Song block by more than 50% "
-            f"({len(original_song)} -> {len(song_xml)} chars)"
+        # Guard: never allow a rewritten Song that lost most of its original bulk
+        # (Tags/Infos/Scan/automix markers), which indicates bad re-serialization.
+        original_song = content[start:end]
+        if len(original_song) >= 400 and len(song_xml) < int(len(original_song) * 0.5):
+            raise ValueError(
+                "Refusing song rewrite that shrinks the Song block by more than 50% "
+                f"({len(original_song)} -> {len(song_xml)} chars)"
+            )
+
+        # Also refuse converting a CRLF database into LF-only (VDJ resets the library).
+        if newline == "\r\n" and "\r\n" not in song_xml:
+            raise ValueError("Refusing song rewrite that would drop CRLF line endings")
+
+        prefix = content[:start]
+        suffix = content[end:]
+        return _replace_database_parts_locked(
+            path,
+            (prefix, song_xml, suffix),
+            original_stats,
+            stats_fn=_lightweight_content_stats if validate else None,
         )
-
-    # Also refuse converting a CRLF database into LF-only (VDJ resets the library).
-    if newline == "\r\n" and "\r\n" not in song_xml:
-        raise ValueError("Refusing song rewrite that would drop CRLF line endings")
-
-    prefix = content[:start]
-    suffix = content[end:]
-
-    return atomic_replace_database_parts(
-        path,
-        (prefix, song_xml, suffix),
-        original_stats,
-        stats_fn=_lightweight_content_stats if validate else None,
-    )
 
 
 def rewrite_song_in_database(
@@ -1072,20 +1192,17 @@ def _lightweight_content_stats(database_path: os.PathLike | str) -> Dict[str, in
     return _lightweight_rewrite_stats(content, path)
 
 
-def atomic_replace_database_parts(
-    database_path: os.PathLike | str,
+def _replace_database_parts_locked(
+    path: Path,
     parts: Sequence[str],
     original_stats: Optional[Dict[str, int]] = None,
     stats_fn: Optional[Callable[[os.PathLike | str], Dict[str, int]]] = None,
 ) -> Dict[str, int]:
-    """Write candidate XML parts to a temp file, validate, then replace atomically."""
-    # Central hard gate: every surgical write path ends here.
-    assert_safe_to_write_vdj_database()
-    # If a previous VDJ "fix" wiped the library, heal before we write one Song.
-    ensure_healthy_vdj_database(database_path)
-
-    path = Path(database_path)
+    """Tempfile + validate + os.replace. Caller must hold vdj_database_exclusive_lock."""
     directory = path.parent
+    assert_safe_to_write_vdj_database()
+    ensure_healthy_vdj_database(path)
+
     fd, temp_name = tempfile.mkstemp(
         prefix=f".{path.name}.",
         suffix=".tmp",
@@ -1094,17 +1211,14 @@ def atomic_replace_database_parts(
     temp_path = Path(temp_name)
     counter = stats_fn or database_integrity_stats
     try:
-        # Binary write preserves exact \\r\\n bytes (text mode can still mangle them).
         with os.fdopen(fd, "wb") as handle:
             for part in parts:
-                handle.write(part.encode("utf-8"))
+                handle.write(sanitize_vdj_database_bytes(part.encode("utf-8")))
             handle.flush()
             os.fsync(handle.fileno())
 
-        # Hard reject LF-only rewrites of a CRLF VirtualDJ database.
         candidate_raw = temp_path.read_bytes()
         if original_stats is not None:
-            # If original was large and CRLF-based, require CRLF in candidate.
             if path.exists():
                 original_raw_head = path.read_bytes()[:4096]
                 if b"\r\n" in original_raw_head and b"\r\n" not in candidate_raw[:8192]:
@@ -1112,18 +1226,15 @@ def atomic_replace_database_parts(
                         "Generated database dropped CRLF line endings; "
                         "VirtualDJ will treat this as corrupt and reset the library"
                     )
-
-        if original_stats is not None:
             stats = validate_database_replacement(
                 temp_path, original_stats, stats_fn=counter
             )
         else:
             stats = counter(temp_path)
 
-        # Re-check immediately before replace (user may open VDJ mid-write).
         assert_safe_to_write_vdj_database()
         os.replace(temp_path, path)
-        # Keep a rolling golden so the next wipe can self-heal without a human.
+        _fsync_directory(directory)
         try:
             snapshot_last_good_database(path)
         except Exception:
@@ -1133,6 +1244,20 @@ def atomic_replace_database_parts(
         if temp_path.exists():
             temp_path.unlink(missing_ok=True)
         raise
+
+
+def atomic_replace_database_parts(
+    database_path: os.PathLike | str,
+    parts: Sequence[str],
+    original_stats: Optional[Dict[str, int]] = None,
+    stats_fn: Optional[Callable[[os.PathLike | str], Dict[str, int]]] = None,
+) -> Dict[str, int]:
+    """Write candidate XML parts to a temp file, validate, then replace atomically."""
+    path = Path(database_path)
+    with vdj_database_exclusive_lock(path):
+        return _replace_database_parts_locked(
+            path, parts, original_stats, stats_fn=stats_fn
+        )
 
 
 def atomic_replace_database(

@@ -4,13 +4,17 @@ Pre-flight beatgrid checks before shipping a track to AutoCue.
 AutoCue requires a valid VDJ BPM and a usable downbeat ("1"). Misaligned grids
 produce cues that snap to the wrong bar. This module classifies:
 
-  - can_autocue: structural preconditions met (in DB + usable BPM + grid anchor)
-  - needs_align: evidence the grid "1" is off (fixable by AutoCue or VDJ)
+  - can_autocue: structural preconditions met AND the disk 1 is settled
+  - needs_align: evidence the grid "1" is off (Align or confirm; do not AutoCue)
   - manual_required: not safe/possible to AutoCue until fixed in VirtualDJ
 """
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -28,6 +32,28 @@ DOUBLE_TIME_HIGH = 155.0
 PHASE_POI_TOLERANCE = 0.02
 # Deep verify: require this confidence ratio to claim a clear misalignment.
 ALIGN_CONFIDENCE = 1.5
+STEM_DECODE_ERROR_TERMS = (
+    "broken pipe",
+    "errno 32",
+    "epipe",
+    "stem decode",
+)
+STEMS_SKIPPED_WARNING = (
+    "VDJ stems were skipped after a decode failure (broken pipe / ffmpeg). "
+    "AutoCue will use the mix only."
+)
+
+
+def _is_stem_decode_failure(error: object) -> bool:
+    try:
+        from vdj_cuer.common import is_stem_decode_error
+
+        if isinstance(error, BaseException):
+            return is_stem_decode_error(error)
+    except Exception:
+        pass
+    text = str(error or "").lower()
+    return any(term in text for term in STEM_DECODE_ERROR_TERMS)
 
 
 def _bpm_ok(bpm: Optional[float]) -> bool:
@@ -71,6 +97,7 @@ def _base_from_cues(cues: CueSummary, path_str: str) -> dict[str, Any]:
             "beatgrid_pos": None,
             "scan_phase": None,
             "grid_anchor": None,
+            "stems_skipped": False,
         }
 
     bpm = cues.bpm
@@ -144,6 +171,7 @@ def _base_from_cues(cues: CueSummary, path_str: str) -> dict[str, Any]:
         "beatgrid_pos": cues.beatgrid_pos,
         "scan_phase": cues.scan_phase,
         "grid_anchor": anchor,
+        "stems_skipped": False,
     }
 
 
@@ -182,6 +210,7 @@ def assess_grid_for_autocue(
                 "grid_anchor": None,
                 "alignment": None,
                 "deep": deep,
+                "stems_skipped": False,
             }
         cues = summarize_cues(path)
 
@@ -193,7 +222,18 @@ def assess_grid_for_autocue(
         return base
 
     alignment = _deep_verify_alignment(str(path.resolve()), float(base["bpm"]))
+    if alignment.get("error") and _is_stem_decode_failure(alignment["error"]):
+        mix_alignment = _deep_verify_alignment(
+            str(path.resolve()), float(base["bpm"]), mix_only=True
+        )
+        if not mix_alignment.get("error"):
+            alignment = mix_alignment
+            alignment["stems_skipped"] = True
+        else:
+            alignment = {**alignment, "stems_skipped": True}
+
     base["alignment"] = alignment
+    base["stems_skipped"] = bool(alignment.get("stems_skipped"))
 
     if alignment.get("error"):
         if base["status"] in {"ok", "warn"}:
@@ -203,6 +243,8 @@ def assess_grid_for_autocue(
             f"Could not deeply verify beatgrid: {alignment['error']}. "
             "Structural checks still apply; listen to the VDJ grid before trusting AutoCue."
         )
+        if base["stems_skipped"]:
+            base["warnings"].append(STEMS_SKIPPED_WARNING)
         return base
 
     if not alignment.get("verified"):
@@ -212,6 +254,9 @@ def assess_grid_for_autocue(
     corrected = bool(alignment.get("corrected"))
     if corrected and conf >= ALIGN_CONFIDENCE:
         base["needs_align"] = True
+        base["can_autocue"] = False
+        base["manual_required"] = True
+        base["manual_confirmable"] = True
         if base["status"] != "blocked":
             base["status"] = "fixable"
             base["label"] = "Grid likely misaligned"
@@ -220,16 +265,20 @@ def assess_grid_for_autocue(
             f"{alignment.get('shift_beats', 0)} beat(s) "
             f"({alignment.get('fine_shift_seconds', 0):+.3f}s fine), "
             f"confidence {conf:.1f}×. If the 1 already sounds right, leave it. "
-            "AutoCue will not move the grid. Auto-align is only a preview."
+            "AutoCue will not write cues until you Align or confirm "
+            "Grid is correct. Auto-align is only a preview."
         )
     elif corrected and conf < ALIGN_CONFIDENCE:
         base["needs_align"] = True
+        base["can_autocue"] = False
+        base["manual_required"] = True
+        base["manual_confirmable"] = True
         if base["status"] not in {"blocked", "fixable"}:
             base["status"] = "warn"
             base["label"] = "Ambiguous grid"
         base["warnings"].append(
-            "Weak evidence of grid misalignment — AutoCue will keep the "
-            "current VDJ grid. Use Align grid if the '1' sounds wrong."
+            "Weak evidence of grid misalignment — AutoCue will not write "
+            "cues until you Align or confirm Grid is correct."
         )
     elif conf < 1.05 and float(alignment.get("best_beat_score") or 0) < 0.02:
         # Structural grid exists (BPM + anchor); deep onset just cannot verify.
@@ -253,56 +302,64 @@ def assess_grid_for_autocue(
             f"({alignment.get('source', 'audio')})."
         )
 
+    if base["stems_skipped"]:
+        base["warnings"].append(STEMS_SKIPPED_WARNING)
+
     return base
 
 
-def _deep_verify_alignment(audio_path: str, bpm: float) -> dict[str, Any]:
-    """Run AutoCue's onset-based beatgrid verification."""
+def _deep_verify_alignment(
+    audio_path: str, bpm: float, *, mix_only: bool = False
+) -> dict[str, Any]:
+    """Run onset verify in a new session so uvicorn --reload cannot EPIPE ffmpeg."""
+    ui_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(repo_root), str(ui_root), env.get("PYTHONPATH", "")]
+    )
+    command = [
+        sys.executable,
+        "-m",
+        "sorter.grid_verify_worker",
+        "--path",
+        audio_path,
+        "--bpm",
+        str(bpm),
+        "--database",
+        str(VDJ_DATABASE),
+        "--repo-root",
+        str(repo_root),
+    ]
+    if mix_only:
+        command.append("--mix-only")
     try:
-        ensure_autocue_on_path()
-        from dotenv import load_dotenv
-
-        ui_root = Path(__file__).resolve().parents[1]  # ui/
-        repo_root = Path(__file__).resolve().parents[2]  # vdj-automatic-cuer/
-        load_dotenv(ui_root / ".env", override=False)
-        load_dotenv(repo_root / ".env", override=False)
-        load_dotenv(
-            Path.home() / "Desktop" / "vdj-automatic-cuer" / ".env", override=False
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            cwd=str(ui_root),
+            env=env,
         )
-        try:
-            from vdj_cuer.common import load_gemini_api_key  # type: ignore
-
-            load_gemini_api_key()
-        except Exception:
-            pass
-
-        from vdj_cuer import AutomaticMusicCuer  # type: ignore
-
-        cuer = AutomaticMusicCuer(
-            gemini_api_key=None,
-            vdj_database_path=str(VDJ_DATABASE),
-        )
-        result = cuer._verify_beatgrid_alignment(audio_path, bpm)
-        try:
-            cuer._release_track_resources(audio_path)
-        except Exception:
-            pass
-        return {
-            "verified": True,
-            "offset": result.offset,
-            "corrected": result.corrected,
-            "shift_beats": result.shift_beats,
-            "fine_shift_seconds": result.fine_shift_seconds,
-            "confidence_ratio": result.confidence_ratio,
-            "source": result.source,
-            "beat_score": result.beat_score,
-            "best_beat_score": result.best_beat_score,
-            "error": None,
-        }
+        payload = (proc.stdout or "").strip().splitlines()
+        data = json.loads(payload[-1]) if payload else {}
+        if proc.returncode != 0 and not data.get("verified"):
+            err = data.get("error") or (proc.stderr or "grid verify failed").strip()
+            return {
+                "verified": False,
+                "error": err,
+                "stems_skipped": mix_only or _is_stem_decode_failure(err),
+            }
+        data.setdefault("stems_skipped", mix_only)
+        return data
     except Exception as exc:
         return {
             "verified": False,
             "error": str(exc),
+            "stems_skipped": mix_only or _is_stem_decode_failure(exc),
         }
 
 

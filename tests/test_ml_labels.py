@@ -57,6 +57,22 @@ class LabelBarsTests(unittest.TestCase):
         neighbor = next(r for r in rows if abs(r["timestamp"] - 24.47) < 0.05)
         self.assertEqual(neighbor["is_cue"], 0)
 
+    def test_dilate_marks_only_adjacent_bars(self) -> None:
+        from vdj_cuer.ml.labels import dilate_binary_labels
+
+        rows = [
+            {"timestamp": 0.0, "is_cue": 0},
+            {"timestamp": 2.0, "is_cue": 1},
+            {"timestamp": 4.0, "is_cue": 0},
+            {"timestamp": 8.0, "is_cue": 0},
+        ]
+        self.assertEqual(dilate_binary_labels(rows), [1, 1, 1, 0])
+        same_time = [
+            {"timestamp": 0.0, "is_cue": 0},
+            {"timestamp": 0.0, "is_cue": 1},
+        ]
+        self.assertEqual(dilate_binary_labels(same_time), [0, 1])
+
 
 if __name__ == "__main__":
     unittest.main()

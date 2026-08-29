@@ -1,0 +1,11 @@
+{
+  "name": "music-sorter-ui",
+  "private": true,
+  "description": "Type-check only for Music Sorter classic-script modules. FastAPI still serves the UI.",
+  "scripts": {
+    "typecheck": "tsc --pretty false"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

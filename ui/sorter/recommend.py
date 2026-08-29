@@ -23,7 +23,10 @@ from pydantic import BaseModel, Field
 from .autocue_path import ensure_autocue_on_path
 from .config import LIBRARIES
 from .library import list_library_tree
-from .llm import models_to_try, resolve_sorter_model, should_try_next_model
+from vdj_cuer.gemini_call import generate_json
+
+from .llm import models_to_try, resolve_sorter_model
+from .lanes import ensure_sort_folder
 from .relocate import summarize_cues
 
 ensure_autocue_on_path()
@@ -151,12 +154,69 @@ def house_eligible_for_bpm(bpm: Optional[float], *, min_bpm: float = HOUSE_BPM_M
     return float(bpm) > float(min_bpm)
 
 
+
+def _deepen_pick_dict(pick: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if not pick:
+        return pick
+    path = str(pick.get("relative_path") or "").strip()
+    try:
+        path = ensure_sort_folder(path) if path else path
+    except ValueError:
+        pass
+    alts = []
+    for a in pick.get("alternatives") or []:
+        cleaned = str(a).strip()
+        try:
+            cleaned = ensure_sort_folder(cleaned) if cleaned else cleaned
+        except ValueError:
+            pass
+        if cleaned:
+            alts.append(cleaned)
+    return {**pick, "relative_path": path, "alternatives": alts}
+
+
+def _deepen_result(result: RecommendationResult) -> RecommendationResult:
+    data = result.to_dict()
+    data["zouk"] = _deepen_pick_dict(data.get("zouk"))
+    data["house"] = _deepen_pick_dict(data.get("house"))
+    primary = str(data.get("relative_path") or "").strip()
+    try:
+        if primary:
+            data["relative_path"] = ensure_sort_folder(primary)
+    except ValueError:
+        pass
+    alts = []
+    for a in data.get("alternatives") or []:
+        cleaned = str(a).strip()
+        try:
+            cleaned = ensure_sort_folder(cleaned) if cleaned else cleaned
+        except ValueError:
+            pass
+        if cleaned:
+            alts.append(cleaned)
+    data["alternatives"] = alts
+    return RecommendationResult(**data)
+
 def _pick_from_schema(pick: LibraryFolderPickSchema) -> LibraryPick:
+    path = pick.relative_path.strip().strip("/")
+    try:
+        path = ensure_sort_folder(path)
+    except ValueError:
+        pass
+    alts = []
+    for a in (pick.alternatives or [])[:3]:
+        cleaned = a.strip().strip("/")
+        try:
+            cleaned = ensure_sort_folder(cleaned)
+        except ValueError:
+            pass
+        if cleaned:
+            alts.append(cleaned)
     return LibraryPick(
-        relative_path=pick.relative_path.strip().strip("/"),
+        relative_path=path,
         confidence=float(pick.confidence),
         reasoning=(pick.reasoning or "").strip(),
-        alternatives=[a.strip().strip("/") for a in (pick.alternatives or [])][:3],
+        alternatives=alts,
     )
 
 
@@ -267,7 +327,7 @@ class FolderRecommender:
             with self._lock:
                 cached = self._cache.get(cache_key)
             if cached is not None and cached.error is None:
-                return RecommendationResult(**{**cached.to_dict(), "cached": True})
+                return _deepen_result(RecommendationResult(**{**cached.to_dict(), "cached": True}))
 
         catalog = self._get_catalog()
         if want_house:
@@ -306,6 +366,7 @@ would file it by *feeling* for:
 Rules:
 - Always provide both `zouk` and `house` picks
 - relative_path uses forward slashes, no leading slash
+- Never pick Chill or Energy as a leaf. Always a child (Chill/Lounge, Energy/Light, …)
 - For Zouk Chill/* and Energy/*, go as deep as the mood supports
 - confidence is 0-1 per library
 - alternatives: up to 3 real relative_path values from the SAME library
@@ -333,6 +394,7 @@ Listen to the full audio. Infer energy, mood, groove, and the best Zouk vibe cra
 
 Rules:
 - relative_path uses forward slashes, no leading slash
+- Never pick Chill or Energy as a leaf. Always a child (Chill/Lounge, Energy/Light, …)
 - Go as deep as the mood supports under Chill/Energy when nested crates fit
 - confidence is 0-1
 - alternatives: up to 3 real relative_path values from Zouk
@@ -375,38 +437,15 @@ Track filename: {path.name}
                 if getattr(uploaded, "name", None):
                     uploaded = self.client.files.get(name=uploaded.name)
 
-            config = types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_json_schema=schema.model_json_schema(),
-                http_options=types.HttpOptions(timeout=180_000),
+            data, used_model = generate_json(
+                self.client,
+                [prompt, uploaded],
+                schema,
+                models=models_to_try(self.model_name),
+                timeout_seconds=180,
+                thinking=False,
             )
-
-            response = None
-            last_error: Optional[Exception] = None
-            used_model = self.model_name
-            for model_name in models_to_try(self.model_name):
-                try:
-                    response = self.client.models.generate_content(
-                        model=model_name,
-                        contents=[prompt, uploaded],
-                        config=config,
-                    )
-                    used_model = model_name
-                    self.model_name = model_name
-                    break
-                except Exception as model_exc:
-                    last_error = model_exc
-                    if should_try_next_model(model_exc):
-                        continue
-                    raise
-
-            if response is None:
-                raise last_error or RuntimeError("No Gemini model available")
-
-            if not response or not response.text:
-                raise RuntimeError("Empty response from Gemini")
-
-            data = _parse_json_response(response.text)
+            self.model_name = used_model
             parsed = schema.model_validate(data)
 
             zouk_pick = _pick_from_schema(parsed.zouk)

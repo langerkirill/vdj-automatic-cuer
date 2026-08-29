@@ -37,7 +37,10 @@ class AnalysisCacheTests(unittest.TestCase):
             audio = _write_audio(root)
             analysis = {
                 "measure_changes": [{"timestamp": 0.47, "name": "Intro"}],
-                "loop_segments": [{"start": 0.47, "length": 8}],
+                "loop_segments": [
+                    {"start": 0.47, "length": 8},
+                    {"start": 16.0, "length": 8},
+                ],
             }
             saved = save_cached_analysis(
                 audio, analysis, model="gemini-3.5-flash-lite", cache_dir=root / "cache"
@@ -45,7 +48,7 @@ class AnalysisCacheTests(unittest.TestCase):
             self.assertIsNotNone(saved)
             hit = load_cached_analysis(audio, cache_dir=root / "cache")
             self.assertEqual(hit["measure_changes"][0]["name"], "Intro")
-            self.assertEqual(len(hit["loop_segments"]), 1)
+            self.assertEqual(len(hit["loop_segments"]), 2)
 
     def test_miss_when_audio_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -53,7 +56,10 @@ class AnalysisCacheTests(unittest.TestCase):
             audio = _write_audio(root)
             save_cached_analysis(
                 audio,
-                {"measure_changes": [{"timestamp": 1.0}]},
+                {
+                    "measure_changes": [{"timestamp": 1.0}],
+                    "loop_segments": [{"start": 1.0}, {"start": 9.0}],
+                },
                 cache_dir=root / "cache",
             )
             audio.write_bytes(b"changed-audio")
@@ -67,7 +73,10 @@ class AnalysisCacheTests(unittest.TestCase):
             stems.write_bytes(b"stems-v1")
             save_cached_analysis(
                 audio,
-                {"measure_changes": [{"timestamp": 1.0}]},
+                {
+                    "measure_changes": [{"timestamp": 1.0}],
+                    "loop_segments": [{"start": 1.0}, {"start": 9.0}],
+                },
                 cache_dir=root / "cache",
             )
             stems.write_bytes(b"stems-v2")
@@ -82,13 +91,28 @@ class AnalysisCacheTests(unittest.TestCase):
             )
             self.assertIsNone(load_cached_analysis(audio, cache_dir=root / "cache"))
 
+    def test_zero_loop_cache_is_not_reused(self) -> None:
+        """Stem-gate fixes must re-run; a 0-loop cache hid Make You Feel / Swimmers."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = _write_audio(root)
+            save_cached_analysis(
+                audio,
+                {"measure_changes": [{"timestamp": 2.4, "name": "Vocal Intro"}]},
+                cache_dir=root / "cache",
+            )
+            self.assertIsNone(load_cached_analysis(audio, cache_dir=root / "cache"))
+
     def test_refresh_flag_skips_hit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             audio = _write_audio(root)
             save_cached_analysis(
                 audio,
-                {"measure_changes": [{"timestamp": 2.0}]},
+                {
+                    "measure_changes": [{"timestamp": 2.0}],
+                    "loop_segments": [{"start": 2.0}, {"start": 18.0}],
+                },
                 cache_dir=root / "cache",
             )
             self.assertIsNone(
@@ -102,7 +126,13 @@ class AnalysisCacheTests(unittest.TestCase):
 
         def analyze(_path: str):
             calls["n"] += 1
-            return {"measure_changes": [{"timestamp": 9.0}]}
+            return {
+                "measure_changes": [{"timestamp": 9.0}],
+                "loop_segments": [
+                    {"start": 9.0, "length": 8},
+                    {"start": 25.0, "length": 8},
+                ],
+            }
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+import re
+
+from dataclasses import dataclass, replace
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .common import *
 from vdj_database_safety import (
@@ -29,6 +31,146 @@ class PreparedPoi:
     color_value: str
     elements: List[str]
     length_beats: Optional[float] = None
+    jumpable: bool = True
+
+
+_COLOR_RANK = {
+    "yellow": 4,  # drums + vocals
+    "orange": 3,  # vocals, no drums
+    "green": 2,  # drums + melody
+    "purple": 1,  # drums only
+    "blue": 0,  # melody only
+}
+
+
+def _share_frequency_colors(
+    cues: Sequence[PreparedPoi],
+    loops: Sequence[PreparedPoi],
+    *,
+    eps: float = 0.05,
+    disk_one: Optional[float] = None,
+) -> tuple[List[PreparedPoi], List[PreparedPoi]]:
+    """Co-located cue+loop keep the same frequency color (prefer vocals).
+
+    Cue 1 / disk 1 keeps its own color so an instrumental intro is not painted
+    yellow by a vocal loop cloned onto that slot.
+    """
+
+    def rank(item: PreparedPoi) -> int:
+        return _COLOR_RANK.get(item.color_name, 0)
+
+    def paint(item: PreparedPoi, donor: PreparedPoi) -> PreparedPoi:
+        if rank(donor) <= rank(item):
+            return item
+        return replace(
+            item,
+            color_name=donor.color_name,
+            color_value=donor.color_value,
+            elements=list(donor.elements) or list(item.elements),
+        )
+
+    def on_disk_one(pos: float) -> bool:
+        return disk_one is not None and abs(pos - float(disk_one)) <= eps
+
+    new_loops: List[PreparedPoi] = []
+    new_cues = list(cues)
+    for loop in loops:
+        match_i = next(
+            (
+                i
+                for i, cue in enumerate(new_cues)
+                if abs(cue.position - loop.position) <= eps
+            ),
+            None,
+        )
+        if match_i is None:
+            new_loops.append(loop)
+            continue
+        cue = new_cues[match_i]
+        if on_disk_one(cue.position):
+            new_loops.append(
+                replace(
+                    loop,
+                    color_name=cue.color_name,
+                    color_value=cue.color_value,
+                    elements=list(cue.elements) or list(loop.elements),
+                )
+            )
+            continue
+        if rank(loop) > rank(cue):
+            new_cues[match_i] = paint(cue, loop)
+            new_loops.append(loop)
+        else:
+            new_loops.append(paint(loop, cue))
+    return new_cues, new_loops
+
+
+def _tint_loops_from_cues(
+    cues: Sequence[PreparedPoi], loops: Sequence[PreparedPoi], *, eps: float = 0.05
+) -> List[PreparedPoi]:
+    """A loop on the same 1 as a cue takes that cue's frequency color."""
+    _, painted = _share_frequency_colors(cues, loops, eps=eps)
+    return painted
+
+
+_DISTINCT_PARTS = (
+    "Beat Entry",
+    "Build",
+    "Drop",
+    "Chorus",
+    "Groove",
+    "Verse",
+    "Synth Intro",
+    "Bass",
+    "Vocal Mix",
+    "Vocal Break",
+    "Breakdown",
+    "Bridge",
+    "Outro",
+    "Hook",
+)
+
+
+def _base_part_name(name: str) -> str:
+    """Strip loop suffix and ' 2' so Beat Entry 2 is still Beat Entry."""
+    raw = (name or "").strip()
+    raw = re.sub(r"\s+loop$", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\s+\d+$", "", raw)
+    if raw.lower().endswith("introl"):
+        raw = raw[:-1]
+    return raw
+
+
+def _with_loop_suffix(name: str) -> str:
+    """Always ' Loop'. Never glue 'l' (Introl / Groovel / synthl)."""
+    raw = (name or "").strip()
+    if not raw:
+        return "Loop"
+    if raw.lower().endswith("loop"):
+        return raw
+    return f"{raw} Loop"
+
+
+def _next_distinct_part(used: set) -> str:
+    for part in _DISTINCT_PARTS:
+        if part not in used:
+            return part
+    return "Groove"
+
+
+def _unique_poi_names(items: List[PreparedPoi]) -> List[PreparedPoi]:
+    """Cloned 1 / +32 loops and repeat cues get a different part, not ' 2'."""
+    used: set = set()
+    out: List[PreparedPoi] = []
+    for item in items:
+        name = _base_part_name(item.name or "")
+        if not name or name in used:
+            name = _next_distinct_part(used)
+        used.add(name)
+        if item.kind == "loop":
+            name = _with_loop_suffix(name)
+        out.append(item if name == item.name else replace(item, name=name))
+    return out
 
 
 @dataclass
@@ -54,12 +196,70 @@ class CueWriterMixin:
         analysis_data = self._postprocess_loop_segments(
             analysis_data, working_bpm, song_length
         )
+        analysis_data = self._reassert_stem_elements(analysis_data, audio_file_path)
         actual_bpm = self._actual_bpm(working_bpm)
         beatgrid_offset = float(self.get_beatgrid_offset(audio_file_path) or 0.0)
         analysis_data = apply_precision_gate(
             analysis_data, actual_bpm, beatgrid_offset
         )
         return analysis_data, working_bpm, song_length
+
+    def _reassert_stem_elements(
+        self, analysis_data: Dict, audio_file_path: str
+    ) -> Dict:
+        """Re-measure VDJ stems at apply so cached Gemini JSON cannot keep
+        yellow on an instrumental (vocal-stem bleed)."""
+        finder = getattr(self, "_find_vdj_stems_file", None)
+        extract = getattr(self, "_extract_vdj_stems", None)
+        if not callable(finder) or not callable(extract):
+            return analysis_data
+        vdj_stems = finder(audio_file_path)
+        if not vdj_stems:
+            return analysis_data
+        import shutil
+        import tempfile
+
+        from .stem_evidence import load_stem_profiles, measure_stem_evidence
+
+        tmp = tempfile.mkdtemp(prefix="vdj-stems-reassert-")
+        try:
+            stem_files = extract(vdj_stems, tmp)
+            if not stem_files:
+                return analysis_data
+            cache = getattr(self, "_track_audio_cache", None)
+            if cache is not None and hasattr(cache, "get_or_load_stem_profiles"):
+                profiles = cache.get_or_load_stem_profiles(list(stem_files))
+            else:
+                profiles = load_stem_profiles(stem_files)
+            items = list(analysis_data.get("measure_changes") or []) + list(
+                analysis_data.get("loop_segments") or []
+            )
+            for item in items:
+                if "timestamp" in item:
+                    timestamp = float(item.get("timestamp") or 0.0)
+                else:
+                    timestamp = float(item.get("start") or 0.0)
+                model_elements = item.get("elements") or [
+                    "drums",
+                    "vocals",
+                    "bass",
+                    "synth",
+                ]
+                evidence = measure_stem_evidence(
+                    profiles,
+                    timestamp=timestamp,
+                    duration_seconds=4.0,
+                    model_elements=model_elements,
+                    centered=True,
+                )
+                item["elements"] = list(evidence.elements)
+                item["stem_activity"] = dict(evidence.activity)
+                item["stem_scores"] = dict(evidence.scores)
+        except Exception as exc:
+            print(f"⚠️  Stem reassert skipped: {exc}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        return analysis_data
 
     def _loop_priority(self, loop_data: Dict) -> int:
         elements = loop_data.get("elements", [])
@@ -159,13 +359,13 @@ class CueWriterMixin:
                 if (
                     aligned_time is None
                     or actual is None
-                    or not is_on_downbeat(
+                    or not is_on_phrase_one(
                         aligned_time, actual, vdj_offset
                     )
                 ):
                     print(
                         f"🚫 Hard-fail cue '{cue_data.get('cue_name', 'cue')}' "
-                        f"at {cue_data.get('timestamp')}s — not on the 1"
+                        f"at {cue_data.get('timestamp')}s — not on a phrase 1"
                     )
                     continue
                 if song_length and aligned_time >= song_length:
@@ -174,21 +374,32 @@ class CueWriterMixin:
                 if not elements:
                     continue
                 gemini_color = cue_data.get("color", "green")
-                color_name = self.validate_color_assignment(elements, gemini_color)
+                color_name = self.validate_color_assignment(
+                    elements,
+                    gemini_color,
+                    cue_data.get("stem_activity"),
+                )
                 color_value = self.color_mappings.get(
                     color_name, self.color_mappings["green"]
                 )
                 cue_name = cue_data.get("cue_name") or self.create_cue_name(
                     elements, len(prepared_cues) + 1
                 )
+                jumpable = bool(cue_data.get("jumpable", True))
+                if not jumpable and not str(cue_name).lower().startswith("info"):
+                    cue_name = f"Info {cue_name}"
+                cue_name = self._refuse_generic_section(
+                    self.sanitize_marker_name(cue_name), elements
+                )
                 prepared_cues.append(
                     PreparedPoi(
                         kind="cue",
-                        name=self.sanitize_marker_name(cue_name),
+                        name=cue_name,
                         position=aligned_time,
                         color_name=color_name,
                         color_value=color_value,
                         elements=list(elements),
+                        jumpable=jumpable,
                     )
                 )
 
@@ -211,13 +422,13 @@ class CueWriterMixin:
                 if (
                     aligned_time is None
                     or actual is None
-                    or not is_on_downbeat(
+                    or not is_on_phrase_one(
                         aligned_time, actual, vdj_offset
                     )
                 ):
                     print(
                         f"🚫 Hard-fail loop '{loop_data.get('loop_name', 'loop')}' "
-                        f"at {loop_data.get('start')}s — not on the 1"
+                        f"at {loop_data.get('start')}s — not on a phrase 1"
                     )
                     continue
                 if song_length and aligned_time >= (song_length - 10):
@@ -226,17 +437,23 @@ class CueWriterMixin:
                 if not elements:
                     continue
                 loop_name = loop_data.get("loop_name") or self.create_loop_name(elements)
-                # Avoid "Loop" + "l" => "Loopl"
-                if loop_name.lower().endswith("loop"):
-                    pass
-                elif not loop_name.endswith("l"):
-                    loop_name = f"{loop_name}l"
-                loop_name = self.sanitize_marker_name(loop_name)
-                if loop_name in used_loop_names:
-                    continue
+                loop_name = _with_loop_suffix(
+                    self._refuse_generic_section(
+                        self.sanitize_marker_name(loop_name), elements
+                    )
+                )
+                base_part = _base_part_name(loop_name)
+                if base_part in {_base_part_name(n) for n in used_loop_names}:
+                    loop_name = _with_loop_suffix(_next_distinct_part(
+                        {_base_part_name(n) for n in used_loop_names}
+                    ))
                 used_loop_names.add(loop_name)
                 gemini_color = loop_data.get("color", "green")
-                color_name = self.validate_color_assignment(elements, gemini_color)
+                color_name = self.validate_color_assignment(
+                    elements,
+                    gemini_color,
+                    loop_data.get("stem_activity"),
+                )
                 color_value = self.color_mappings.get(
                     color_name, self.color_mappings["green"]
                 )
@@ -269,6 +486,75 @@ class CueWriterMixin:
                     f"cue(s), rewriting {len(prepared_loops)} loop(s)"
                 )
 
+        from .user_one import (
+            ensure_loops_on_user_one,
+            has_marker_on_user_one,
+            pin_markers_to_user_one,
+        )
+
+        prepared_cues = _unique_poi_names(
+            pin_markers_to_user_one(vdj_offset, prepared_cues)
+        )
+        actual_for_loops = self._actual_bpm(working_bpm) or working_bpm
+        if scope == WRITE_SCOPE_CUES:
+            prepared_loops = list(prepared_loops)
+        else:
+            parked = _unique_poi_names(
+                ensure_loops_on_user_one(
+                    vdj_offset,
+                    prepared_loops,
+                    bpm=float(actual_for_loops or 0),
+                    song_length=song_length,
+                )
+            )
+            prepared_cues, prepared_loops = _share_frequency_colors(
+                prepared_cues, parked, disk_one=vdj_offset
+            )
+        if scope != WRITE_SCOPE_LOOPS and not has_marker_on_user_one(
+            vdj_offset, prepared_cues
+        ):
+            color_name = "green"
+            color_value = self.color_mappings.get(
+                color_name, self.color_mappings["green"]
+            )
+            prepared_cues.insert(
+                0,
+                PreparedPoi(
+                    kind="cue",
+                    name="1",
+                    position=float(vdj_offset),
+                    color_name=color_name,
+                    color_value=color_value,
+                    elements=["downbeat"],
+                    jumpable=True,
+                ),
+            )
+            print(
+                f"🎯 Inserted cue 1 on the disk 1 at {vdj_offset:.3f}s "
+                f"(Gemini had no marker there)"
+            )
+        used_names: list[str] = []
+        unique_cues: List[PreparedPoi] = []
+        for index, cue in enumerate(prepared_cues):
+            name = _base_part_name(
+                self._refuse_generic_section(cue.name, cue.elements)
+            )
+            if index == 0 and (name in {"1", ""} or "section" in name.lower()):
+                name = "Beat Entry"
+            if name in used_names:
+                name = _next_distinct_part(set(used_names))
+            used_names.append(name)
+            if name != cue.name:
+                print(f"  🏷️  {cue.name} → {name}")
+                cue = replace(cue, name=name)
+            unique_cues.append(cue)
+        prepared_cues = unique_cues
+        print(
+            f"🎯 User 1 at {vdj_offset:.3f}s · "
+            f"{len(prepared_cues)} cue(s) / {len(prepared_loops)} loop(s) "
+            f"on or after that 1"
+        )
+
         used_colors = sorted(
             {poi.color_name for poi in prepared_cues + prepared_loops}
         )
@@ -285,7 +571,15 @@ class CueWriterMixin:
     ) -> List[str]:
         """Build VirtualDJ-native POI lines (never ElementTree-serialized)."""
         entries: List[Tuple[float, str, dict]] = []
-        for index, cue in enumerate(prepared.cues, start=1):
+        # Number jump cues in time order so Num 1 is the disk 1, not Gemini order.
+        timed_cues = sorted(prepared.cues, key=lambda c: c.position)
+        jump_num = 1
+        for cue in timed_cues:
+            if cue.jumpable:
+                num = str(jump_num)
+                jump_num += 1
+            else:
+                num = "0"
             entries.append(
                 (
                     cue.position,
@@ -293,7 +587,7 @@ class CueWriterMixin:
                     {
                         "pos": cue.position,
                         "poi_type": "cue",
-                        "num": str(index),
+                        "num": num,
                         "color": cue.color_value,
                         "name": cue.name,
                     },
@@ -338,6 +632,15 @@ class CueWriterMixin:
         # AutoCue never rewrites Scan Phase / beatgrid POI. Align grid is separate.
 
         poi_lines = self._build_native_poi_lines(prepared, newline=newline)
+        # Lock yellow 1s to the disk 1. Do not move Scan Phase — write the
+        # missing beatgrid POI on that same Phase so Ones and cues share it.
+        if prepared.beatgrid_offset is not None and not re.search(
+            r'Type\s*=\s*"beatgrid"', song_xml, flags=re.IGNORECASE
+        ):
+            poi_lines.insert(
+                0,
+                f'  <Poi Pos="{float(prepared.beatgrid_offset):.6f}" Type="beatgrid" />{newline}',
+            )
         return inject_pois_into_song_xml(
             song_xml, poi_lines, comment=prepared.comment or None
         )
@@ -386,10 +689,15 @@ class CueWriterMixin:
                 song_element.remove(poi)
 
         all_pois: List[Tuple[float, ET.Element]] = []
-        for index, cue in enumerate(prepared.cues, start=1):
+        jump_num = 1
+        for cue in prepared.cues:
             cue_poi = ET.Element("Poi")
             cue_poi.set("Pos", f"{cue.position:.6f}")
-            cue_poi.set("Num", str(index))
+            if cue.jumpable:
+                cue_poi.set("Num", str(jump_num))
+                jump_num += 1
+            else:
+                cue_poi.set("Num", "0")
             cue_poi.set("Color", cue.color_value)
             cue_poi.set("Type", "cue")
             cue_poi.set("Name", cue.name)
@@ -453,8 +761,13 @@ class CueWriterMixin:
 
             # Refuse if VirtualDJ opened during the long Gemini analysis.
             from vdj_database_safety import assert_safe_to_write_vdj_database
+            from .grid_gate import assert_user_one_settled
 
             assert_safe_to_write_vdj_database()
+            assert_user_one_settled(
+                getattr(self, "grid_preflight", None),
+                confirmed=bool(getattr(self, "grid_confirmed", False)),
+            )
 
             # Text-preserving rewrite: keep native Tags/Scan/automix markup and CRLF.
             database_text = read_vdj_database_text(self.vdj_database_path)

@@ -140,7 +140,10 @@ class AutomaticMusicCuer(
             "orange": "4294934272",  # Orange - vocal only (0xffff7f00)
         }
 
-        print(f"🎵 Automatic Music Cuer initialized with Gemini model: {self.model_name}")
+        try:
+            print(f"🎵 Automatic Music Cuer initialized with Gemini model: {self.model_name}")
+        except BrokenPipeError:
+            pass
         print(f"📁 VDJ Database: {self.vdj_database_path}")
 
     @staticmethod

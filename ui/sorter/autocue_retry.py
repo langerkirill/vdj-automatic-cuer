@@ -5,23 +5,24 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 import traceback
 import uuid
-from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from dotenv import load_dotenv
-
 from .autocue_path import ensure_autocue_on_path
-from .config import CUES_ROOT, LIBRARIES, SETS_ROOT, VDJ_DATABASE
+from .config import CUES_ROOT, DJ_NOTES_ROOT, LIBRARIES, SETS_ROOT, VDJ_DATABASE
 from .action_log import DEFAULT_LOG_PATH
 from .db_lock import get_db_write_lock
 from .grid_preflight import assess_grid_for_autocue
+from .ml_training import schedule_training_update
 from .relocate import is_virtualdj_running, summarize_cues, summarize_cues_for_paths
 
 
@@ -116,6 +117,25 @@ def autocue_fail_message(
     if warn_msg:
         return warn_msg
     return "AutoCue failed while writing cues (not a missing-beatgrid check)."
+
+
+def maybe_ingest_after_autocue(
+    audio_path: str | Path,
+    after: Any,
+    *,
+    dry_run: bool,
+    ok: bool,
+) -> None:
+    if not ok or dry_run or after is None:
+        return
+    if not (getattr(after, "cue_count", 0) or getattr(after, "loop_count", 0)):
+        return
+    try:
+        from vdj_cuer.ml.match import save_written_autocue_points
+        save_written_autocue_points(audio_path, after)
+    except Exception:
+        pass
+    schedule_training_update(audio_path, after)
 
 
 RETRY_HISTORY_ACTIONS = frozenset({"retry_cues", "retry_cues_complete"})
@@ -276,6 +296,8 @@ class RetryJob:
     preflight: Optional[dict[str, Any]] = None
     batch_id: Optional[str] = None
     write_scope: str = WRITE_SCOPE_ALL
+    model_name: Optional[str] = None
+    worker_pid: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -317,19 +339,197 @@ _lock = threading.RLock()
 # Shared with cue edit / sort / notes so concurrent RMW never clobber database.xml.
 _db_write_lock = get_db_write_lock()
 # How many AutoCue analyses may run in parallel (upload + Gemini).
-# Default 5; override with MUSIC_SORTER_AUTOCUE_CONCURRENCY. Hard cap 8.
-# database.xml applies still go through _db_write_lock one at a time.
+# Default 1 so the sorter UI stays responsive; override with
+# MUSIC_SORTER_AUTOCUE_CONCURRENCY. Hard cap 3 — 5× 100MB stems froze 8787.
+# database.xml applies in the AutoCue child go through vdj_database_exclusive_lock.
 def _parse_max_concurrent() -> int:
-    raw = (os.environ.get("MUSIC_SORTER_AUTOCUE_CONCURRENCY") or "5").strip()
+    raw = (os.environ.get("MUSIC_SORTER_AUTOCUE_CONCURRENCY") or "1").strip()
     try:
         n = int(raw)
     except ValueError:
-        n = 5
-    return max(1, min(n, 8))
+        n = 1
+    return max(1, min(n, 3))
 
 
 _MAX_CONCURRENT = _parse_max_concurrent()
 _active_sem = threading.Semaphore(_MAX_CONCURRENT)
+
+# Survives 8787 restart / UI refresh. Running jobs resume their worker.
+JOB_STORE_PATH = DJ_NOTES_ROOT / "autocue_jobs.json"
+_ACTIVE_JOB_STATUSES = frozenset({"queued", "running", "starting"})
+
+
+def persist_jobs(store_path: Path | None = None) -> None:
+    """Write the in-memory AutoCue job store to disk."""
+    store = Path(store_path or JOB_STORE_PATH)
+    with _lock:
+        payload = {
+            "version": 1,
+            "saved_at": _now(),
+            "jobs": [job.to_dict() for job in _jobs.values()],
+            "batches": [asdict(batch) for batch in _batches.values()],
+        }
+    try:
+        store.parent.mkdir(parents=True, exist_ok=True)
+        tmp = store.with_suffix(store.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(store)
+    except OSError as exc:
+        print(f"⚠️  AutoCue job persist failed: {exc}")
+
+
+def _job_from_dict(raw: dict[str, Any]) -> Optional[RetryJob]:
+    if not isinstance(raw, dict) or not raw.get("id"):
+        return None
+    known = {f.name for f in fields(RetryJob)}
+    return RetryJob(**{key: raw[key] for key in known if key in raw})
+
+
+def _batch_from_dict(raw: dict[str, Any]) -> Optional[BatchJob]:
+    if not isinstance(raw, dict) or not raw.get("id"):
+        return None
+    known = {f.name for f in fields(BatchJob)}
+    data = {key: raw[key] for key in known if key in raw}
+    return BatchJob(**data)
+
+
+def restore_jobs(
+    store_path: Path | None = None,
+    *,
+    resume: bool = True,
+) -> int:
+    """Load persisted jobs. Re-spawn workers for queued/running. Returns resume count."""
+    store = Path(store_path or JOB_STORE_PATH)
+    if not store.is_file():
+        return 0
+    try:
+        data = json.loads(store.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    loaded = 0
+    with _lock:
+        for raw in data.get("jobs") or []:
+            job = _job_from_dict(raw) if isinstance(raw, dict) else None
+            if job is None:
+                continue
+            _jobs[job.id] = job
+            loaded += 1
+        for raw in data.get("batches") or []:
+            batch = _batch_from_dict(raw) if isinstance(raw, dict) else None
+            if batch is None:
+                continue
+            _batches[batch.id] = batch
+    if loaded:
+        persist_jobs(store)
+    if not resume:
+        return 0
+    return resume_active_jobs()
+
+
+def resume_active_jobs() -> int:
+    """Start workers for persisted queued/running jobs. Does not create new job ids."""
+    with _lock:
+        ids = [
+            job.id
+            for job in _jobs.values()
+            if job.status in _ACTIVE_JOB_STATUSES
+        ]
+    resumed = 0
+    for job_id in ids:
+        job = get_job(job_id)
+        if job is None:
+            continue
+        if not Path(job.path).expanduser().is_file():
+            _update_job(
+                job_id,
+                status="error",
+                finished_at=_now(),
+                worker_pid=None,
+                message="Resumed job: audio file missing",
+            )
+            continue
+        live_pid = getattr(job, "worker_pid", None)
+        if isinstance(live_pid, int) and live_pid > 0 and _pid_is_alive(live_pid):
+            _update_job(
+                job_id,
+                status="running",
+                message=f"Reattached to AutoCue process {live_pid} after restart…",
+            )
+            threading.Thread(
+                target=_reap_orphaned_worker,
+                args=(job_id, live_pid),
+                name=f"autocue-reap-{job_id}",
+                daemon=True,
+            ).start()
+            resumed += 1
+            continue
+        _update_job(
+            job_id,
+            status="queued",
+            started_at=None,
+            finished_at=None,
+            worker_pid=None,
+            message="Resumed after restart — waiting for AutoCue slot…",
+        )
+        threading.Thread(
+            target=_run_job,
+            args=(job_id, job.dry_run, getattr(job, "model_name", None)),
+            name=f"autocue-retry-{job_id}",
+            daemon=True,
+        ).start()
+        resumed += 1
+    return resumed
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    except Exception:
+        return False
+    return True
+
+
+def _reap_orphaned_worker(job_id: str, pid: int) -> None:
+    """Wait for a child that outlived 8787 instead of starting a second AutoCue."""
+    _active_sem.acquire()
+    try:
+        while _pid_is_alive(pid):
+            time.sleep(1.5)
+        job = get_job(job_id)
+        if job is None:
+            return
+        after = summarize_cues(job.path)
+        cues = int(getattr(after, "cue_count", 0) or 0)
+        loops = int(getattr(after, "loop_count", 0) or 0)
+        if cues or loops:
+            _update_job(
+                job_id,
+                status="ok",
+                finished_at=_now(),
+                worker_pid=None,
+                cue_count_after=cues,
+                loop_count_after=loops,
+                message=(
+                    f"AutoCue process {pid} finished after restart · "
+                    f"{cues} cues, {loops} loops"
+                ),
+            )
+            maybe_ingest_after_autocue(job.path, after, dry_run=job.dry_run, ok=True)
+            return
+        _update_job(
+            job_id,
+            status="error",
+            finished_at=_now(),
+            worker_pid=None,
+            message=f"AutoCue process {pid} exited; cues not confirmed",
+        )
+    finally:
+        _active_sem.release()
+
 
 
 def max_concurrent_jobs() -> int:
@@ -389,6 +589,16 @@ STEMS_REQUIRED_MESSAGE = (
     "Blocked: analyze stems in VirtualDJ first "
     "(needs adjacent .vdjstems beside the audio)"
 )
+
+
+
+def apply_preflight_stem_failover(cuer, preflight):
+    """Honor preflight mix-only failover so AutoCue does not reuse a broken stem map."""
+    if preflight and preflight.get("stems_skipped"):
+        cuer._beatgrid_mix_only = True
+        print("⚠️  Preflight skipped VDJ stems; AutoCue using mix only")
+        return True
+    return False
 
 
 def adjacent_vdj_stems(audio: str | Path) -> Optional[Path]:
@@ -463,6 +673,7 @@ def start_retry_cues(
         )
         with _lock:
             _jobs[job.id] = job
+        persist_jobs()
         return job
     if require_grid and not preflight.get("can_autocue"):
         job = RetryJob(
@@ -482,6 +693,7 @@ def start_retry_cues(
         )
         with _lock:
             _jobs[job.id] = job
+        persist_jobs()
         return job
 
     scope_note = write_scope_label(scope)
@@ -504,9 +716,11 @@ def start_retry_cues(
         preflight=preflight,
         batch_id=batch_id,
         write_scope=scope,
+        model_name=model_name,
     )
     with _lock:
         _jobs[job.id] = job
+    persist_jobs()
 
     thread = threading.Thread(
         target=_run_job,
@@ -555,6 +769,7 @@ def start_batch_retry_cues(
     )
     with _lock:
         _batches[batch.id] = batch
+    persist_jobs()
 
     thread = threading.Thread(
         target=_run_batch,
@@ -687,6 +902,7 @@ def _run_batch(
             f"Batch done · {batch.done} ok · {batch.failed} failed · "
             f"{batch.skipped} skipped / {batch.total}"
         )
+    persist_jobs()
 
 
 def _update_batch(batch_id: str, **fields: Any) -> None:
@@ -696,24 +912,77 @@ def _update_batch(batch_id: str, **fields: Any) -> None:
             return
         for key, value in fields.items():
             setattr(batch, key, value)
+    persist_jobs()
 
 
-def _update_job(job_id: str, **fields: Any) -> None:
+def _update_job(job_id: str, persist: bool = True, **fields: Any) -> None:
     with _lock:
         job = _jobs.get(job_id)
         if not job:
             return
         for key, value in fields.items():
             setattr(job, key, value)
+    if persist:
+        persist_jobs()
+
+
+def autocue_job_argv(
+    *,
+    audio: str,
+    result_path: str,
+    database: str,
+    write_scope: str,
+    dry_run: bool = False,
+    model_name: Optional[str] = None,
+    stems_skipped: bool = False,
+    grid_confirmed: bool = False,
+) -> list[str]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "vdj_cuer.autocue_job",
+        "--audio",
+        audio,
+        "--database",
+        database,
+        "--write-scope",
+        write_scope,
+        "--result",
+        result_path,
+    ]
+    if dry_run:
+        cmd.append("--dry-run")
+    if model_name:
+        cmd.extend(["--model", model_name])
+    if stems_skipped:
+        cmd.append("--stems-skipped")
+    if grid_confirmed:
+        cmd.append("--grid-confirmed")
+    return cmd
+
+
+def autocue_subprocess_env() -> dict[str, str]:
+    root = str(ensure_autocue_on_path())
+    try:
+        from compute_thread_limits import env_with_compute_thread_limits
+
+        env = env_with_compute_thread_limits(os.environ)
+    except Exception:
+        env = os.environ.copy()
+        env.setdefault("OMP_NUM_THREADS", "1")
+        env["PYTHONUNBUFFERED"] = "1"
+    pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = root if not pythonpath else f"{root}{os.pathsep}{pythonpath}"
+    return env
 
 
 def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
     """
-    Run one AutoCue job.
+    Run one AutoCue job in an isolated subprocess.
 
-    Multiple jobs may be started at once from the UI. Only
-    ``process_audio_file`` is slot-limited (semaphore) so database.xml is not
-    multi-written. Waiting jobs stay status=queued with a clear message.
+    The UI process only waits on Popen (GIL released). Stem FFT / sklearn
+    stay in the child. ``_active_sem`` still limits how many children run.
+    Waiting jobs stay status=queued with a clear message.
     """
     log_buf = io.StringIO()
     job = get_job(job_id)
@@ -752,148 +1021,121 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
         )
 
         try:
-            autocue_root = ensure_autocue_on_path()
-            # Prefer shared helper that also checks Desktop/.env when src has none.
+            # Isolated child: stem FFT / sklearn / OpenMP must not enter 8787.
+            has_stems = Path(f"{audio_path}.vdjstems").is_file()
+            preflight = getattr(job, "preflight", None) or {}
+            label = str(preflight.get("label") or "")
+            result_file: Optional[Path] = None
+            proc: Optional[subprocess.Popen[str]] = None
+            analysis: Any = None
+            ok = False
+            warn_msg = ""
+            payload: dict[str, Any] = {}
             try:
-                from vdj_cuer.common import load_gemini_api_key  # type: ignore
-
-                load_gemini_api_key()
-            except Exception:
-                # Fall back to explicit paths if import path is incomplete.
-                ui_root = Path(__file__).resolve().parents[1]
-                repo_root = Path(__file__).resolve().parents[2]
-                for env_path in (
-                    autocue_root / ".env",
-                    ui_root / ".env",
-                    repo_root / ".env",
-                    Path.home() / "Desktop" / "vdj-automatic-cuer" / ".env",
-                ):
-                    load_dotenv(env_path, override=False)
-
-            from vdj_cuer import (  # type: ignore
-                AutomaticMusicCuer,
-                WRITE_SCOPE_ALL as AC_ALL,
-                WRITE_SCOPE_CUES as AC_CUES,
-                WRITE_SCOPE_LOOPS as AC_LOOPS,
-            )
-
-            scope_map = {
-                WRITE_SCOPE_ALL: AC_ALL,
-                WRITE_SCOPE_CUES: AC_CUES,
-                WRITE_SCOPE_LOOPS: AC_LOOPS,
-            }
-
-            cuer = AutomaticMusicCuer(
-                gemini_api_key=None,  # load from env
-                vdj_database_path=str(VDJ_DATABASE),
-                model_name=model_name,
-            )
-            # Keep sorter UI snappy; audits are optional elsewhere.
-            cuer.post_cue_audit_enabled = False
-            cuer.write_scope = scope_map.get(scope, AC_ALL)
-
-            # Prefer surgical analyze → apply path so write_scope (cues/loops/all)
-            # is honored. process_audio_file always strips + rewrites both kinds.
-            stems_path = Path(f"{audio_path}.vdjstems")
-            has_stems = stems_path.is_file()
-            _update_job(
-                job_id,
-                message=(
-                    f"Analyzing {Path(audio_path).name} "
-                    f"({write_scope_label(scope)}; up to {_MAX_CONCURRENT} concurrent)…"
-                ),
-                log_tail=f"write_scope: {scope}\nconcurrency: {_MAX_CONCURRENT}\n",
-            )
-            with redirect_stdout(log_buf), redirect_stderr(log_buf):
-                # Gemini upload/analysis can run for multiple tracks in parallel.
-                print(
-                    f"🎚️  AutoCue concurrency · max={_MAX_CONCURRENT} · scope={scope}"
+                fd, result_name = tempfile.mkstemp(
+                    prefix=f"autocue-{job_id}-", suffix=".json"
                 )
-                def _on_empty_retry(attempt: int, total: int) -> None:
-                    print(
-                        f"❌ Analysis returned no data "
-                        f"(attempt {attempt}/{total}) — retrying…"
-                    )
-                    _update_job(
-                        job_id,
-                        message=(
-                            f"Gemini returned no data — retry "
-                            f"{attempt}/{total - 1} on {Path(audio_path).name}…"
-                        ),
-                    )
-
-                from vdj_cuer.analysis_cache import analyze_with_cache
-
-                analysis = analyze_with_cache(
-                    lambda path: analyze_audio_until_data(
-                        cuer.analyze_audio_with_gemini,
-                        path,
-                        on_retry=_on_empty_retry,
+                os.close(fd)
+                result_file = Path(result_name)
+                argv = autocue_job_argv(
+                    audio=audio_path,
+                    result_path=str(result_file),
+                    database=str(VDJ_DATABASE),
+                    write_scope=scope,
+                    dry_run=dry_run,
+                    model_name=model_name or getattr(job, "model_name", None),
+                    stems_skipped=bool(preflight.get("stems_skipped")),
+                    grid_confirmed=label.startswith("Grid manually confirmed"),
+                )
+                _update_job(
+                    job_id,
+                    message=(
+                        f"Analyzing {Path(audio_path).name} "
+                        f"({write_scope_label(scope)}; isolated process)…"
                     ),
-                    audio_path,
-                    model=getattr(cuer, "model_name", None),
+                    log_tail=(
+                        f"write_scope: {scope}\n"
+                        f"concurrency: {_MAX_CONCURRENT}\n"
+                    ),
                 )
-                ok = False
-                warn_msg = ""
-                if not analysis:
-                    print("❌ Analysis returned no data after retries")
-                else:
-                    song_length = cuer.get_song_length(audio_path)
-                    database_bpm = cuer.get_song_bpm_from_database(audio_path)
-                    analysis_bpm = analysis.get("song_structure", {}).get(
-                        "bpm", database_bpm or 120
-                    )
-                    working_bpm = database_bpm or analysis_bpm
-                    if hasattr(cuer, "_postprocess_loop_segments"):
-                        analysis = cuer._postprocess_loop_segments(
-                            analysis, working_bpm, song_length
+                proc = subprocess.Popen(
+                    argv,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    env=autocue_subprocess_env(),
+                    cwd=str(ensure_autocue_on_path()),
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                )
+                _update_job(job_id, worker_pid=proc.pid)
+                last_persist = 0.0
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    log_buf.write(line)
+                    stripped = line.strip()
+                    now = time.monotonic()
+                    persist = (now - last_persist) >= 2.0
+                    fields: dict[str, Any] = {
+                        "log_tail": log_buf.getvalue()[-4000:]
+                    }
+                    if stripped.startswith(
+                        ("❌", "⚠️", "📋", "🎚️", "Writing ")
+                    ):
+                        fields["message"] = stripped[:240]
+                    _update_job(job_id, persist=persist, **fields)
+                    if persist:
+                        last_persist = now
+                proc.wait()
+                if result_file.is_file():
+                    try:
+                        loaded = json.loads(
+                            result_file.read_text(encoding="utf-8")
                         )
-                    loop_n = len(analysis.get("loop_segments") or [])
-                    cue_n = len(analysis.get("measure_changes") or [])
-                    print(
-                        f"📋 Scope={scope} · analysis cues={cue_n} "
-                        f"loops={loop_n} · stems={'yes' if has_stems else 'NO'}"
-                    )
-                    if scope in (WRITE_SCOPE_LOOPS, WRITE_SCOPE_ALL) and loop_n == 0:
-                        if not has_stems:
-                            warn_msg = (
-                                "No loops written — AutoCue needs adjacent "
-                                f"{Path(audio_path).name}.vdjstems (stems) to "
-                                "validate loop seams. Analyze stems in VirtualDJ first."
-                            )
-                            print(f"⚠️  {warn_msg}")
-                        else:
-                            warn_msg = (
-                                "No loops passed stem/seam validation "
-                                "(Gemini/stem gates rejected all candidates)."
-                            )
-                            print(f"⚠️  {warn_msg}")
-                    # Serialize DB backup + write so concurrent jobs never
-                    # clobber database.xml mid-rewrite.
-                    _update_job(
-                        job_id,
-                        message=(
-                            f"Writing cues to VirtualDJ · "
-                            f"{Path(audio_path).name}…"
-                        ),
-                    )
-                    with _db_write_lock:
-                        if not dry_run:
-                            try:
-                                backup = cuer.backup_database()
-                                print(f"backup: {backup}")
-                            except Exception as backup_exc:
-                                print(f"⚠️  Backup warning: {backup_exc}")
-                        ok = bool(
-                            cuer._apply_cues_to_database(
-                                audio_path, analysis, dry_run=dry_run
-                            )
-                        )
+                        if isinstance(loaded, dict):
+                            payload = loaded
+                    except (OSError, json.JSONDecodeError):
+                        payload = {}
+                warn_msg = str(payload.get("warn") or "")
+                analysis_empty = bool(
+                    payload.get("analysis_empty", not payload)
+                )
+                analysis = None if analysis_empty else payload
+                ok = bool(payload.get("ok"))
+                if payload.get("error") and not ok:
+                    log_buf.write(f"\n{payload.get('error')}\n")
+            finally:
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=8)
+                    except Exception:
+                        pass
+                if result_file is not None:
+                    try:
+                        result_file.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
             log_text = log_buf.getvalue()
             tail = log_text[-4000:] if log_text else ""
 
-            after = summarize_cues(audio_path)
+            try:
+                after = summarize_cues(audio_path)
+            except Exception as summarize_exc:
+                log_buf.write(
+                    f"\n⚠️  Could not re-read cues after write: {summarize_exc}\n"
+                )
+                tail = log_buf.getvalue()[-4000:]
+                after = type(
+                    "CueSummaryLite",
+                    (),
+                    {
+                        "cue_count": int(payload.get("analysis_cues") or 0),
+                        "loop_count": int(payload.get("analysis_loops") or 0),
+                    },
+                )()
             try:
                 from sorter.action_log import append_action
             except Exception:
@@ -935,11 +1177,19 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
                     job_id,
                     status="ok",
                     finished_at=_now(),
+                    worker_pid=None,
                     message=msg,
                     log_tail=tail,
                     cue_count_after=after.cue_count,
                     loop_count_after=after.loop_count,
                 )
+                if not dry_run:
+                    try:
+                        from .set_approval import revoke_set_approval
+
+                        revoke_set_approval(audio_path)
+                    except Exception:
+                        pass
                 if append_action and not dry_run:
                     append_action(
                         "retry_cues_complete",
@@ -955,11 +1205,15 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
                             "warn": warn_msg or None,
                         },
                     )
+                maybe_ingest_after_autocue(
+                    audio_path, after, dry_run=dry_run, ok=True
+                )
             else:
                 _update_job(
                     job_id,
                     status="error",
                     finished_at=_now(),
+                    worker_pid=None,
                     message=fail_message,
                     log_tail=tail,
                     cue_count_after=after.cue_count,
@@ -984,6 +1238,7 @@ def _run_job(job_id: str, dry_run: bool, model_name: Optional[str]) -> None:
                 job_id,
                 status="error",
                 finished_at=_now(),
+                worker_pid=None,
                 message=str(exc),
                 log_tail=(log_buf.getvalue() + "\n" + tb)[-4000:],
             )

@@ -8,11 +8,16 @@ them reachable; align zoom must center on the 1, not the playhead.
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
-UI_STATIC = Path(__file__).resolve().parents[1] / "static"
+try:
+    from tests.js_assets import UI_STATIC, read_shipped_js, read_static
+except ImportError:
+    from js_assets import UI_STATIC, read_shipped_js, read_static
 
 # Live VDJ points from Dido - Thank You (Skinny Remix).m4a
 SKINNY_DURATION = 200.44
@@ -165,15 +170,17 @@ class WaveformZoomCueAssetTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.html = (UI_STATIC / "index.html").read_text(encoding="utf-8")
         cls.css = (UI_STATIC / "styles.css").read_text(encoding="utf-8")
-        cls.js = (UI_STATIC / "app.js").read_text(encoding="utf-8")
+        cls.app_js = read_static("app.js")
+        cls.wave_js = read_static("waveform.js")
+        cls.js = read_shipped_js()
 
     def test_js_classifies_markers_against_the_zoom_window(self) -> None:
-        self.assertIn("function classifyWaveMarkers", self.js)
-        self.assertIn("function formatOffscreenCueLabel", self.js)
+        self.assertIn("function classifyWaveMarkers", self.wave_js)
+        self.assertIn("function formatOffscreenCueLabel", self.wave_js)
         self.assertIn("function drawOffscreenCueHints", self.js)
         self.assertIn("function drawWaveCueOverview", self.js)
-        self.assertIn("offLeft", self.js)
-        self.assertIn("offRight", self.js)
+        self.assertIn("offLeft", self.wave_js)
+        self.assertIn("offRight", self.wave_js)
 
     def test_draw_waveform_keeps_offscreen_cues_reachable(self) -> None:
         self.assertRegex(
@@ -214,8 +221,8 @@ class WaveformZoomCueAssetTests(unittest.TestCase):
 
     def test_playhead_follow_does_not_steal_align_or_pinned_view(self) -> None:
         self.assertRegex(
-            self.js,
-            r"function applyPlayheadFollow\([\s\S]*!state\.gridAlignMode[\s\S]*!state\.waveViewPinned",
+            self.wave_js,
+            r"function applyPlayheadFollow\([\s\S]*!appState\.gridAlignMode[\s\S]*!appState\.waveViewPinned",
         )
 
     def test_place_cue_keeps_align_zoom(self) -> None:
@@ -237,6 +244,71 @@ class WaveformZoomCueAssetTests(unittest.TestCase):
             self.js,
             r"function seekFromWaveformEvent\([\s\S]*hitTestWaveCueChrome\(",
         )
+
+
+def _node(script: str) -> dict:
+    proc = subprocess.run(
+        ["node", "-e", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(
+            f"node failed ({proc.returncode}): {proc.stderr or proc.stdout}"
+        )
+    return json.loads(proc.stdout.strip() or "{}")
+
+
+def _req(name: str) -> str:
+    return json.dumps(str(UI_STATIC / name))
+
+
+class ComeBackToMeCuePaintTests(unittest.TestCase):
+    """Cue 1 / Scan Phase 0.030522 must paint on the yellow 1, not file start."""
+
+    POS = 0.030522
+    DURATION = 198.067302
+    PAD_X = 8.0
+    PLOT_W = 900.0
+
+    def test_fmt_time_does_not_round_the_one_to_zero(self) -> None:
+        out = _node(
+            f"""
+const T = require({_req("transport.js")});
+const W = require({_req("waveform.js")});
+const pos = {self.POS};
+const view = W.visibleWaveWindow({self.DURATION}, 48, 0);
+const cueX = W.timeToWaveX(pos, {self.PAD_X}, {self.PLOT_W}, view);
+const oneX = W.timeToWaveX(pos, {self.PAD_X}, {self.PLOT_W}, view);
+const zeroX = W.timeToWaveX(0, {self.PAD_X}, {self.PLOT_W}, view);
+const clamped = W.timeToWaveX(Math.max(pos, view.start), {self.PAD_X}, {self.PLOT_W}, view);
+console.log(JSON.stringify({{
+  label: T.fmtTime(pos),
+  zoom1: T.fmtTime(pos),
+  cueX, oneX, zeroX, clamped,
+  viewStart: view.start,
+}}));
+"""
+        )
+        self.assertEqual(out["label"], "0:00.031")
+        self.assertNotEqual(out["label"], "0:00.0")
+        self.assertNotEqual(out["label"], "0:00.00")
+        self.assertAlmostEqual(out["cueX"], out["oneX"], places=6)
+        self.assertGreater(out["cueX"] - out["zeroX"], 5.0)
+        # view.start is 0, so clamp was a no-op here; still must not equal file start.
+        self.assertAlmostEqual(out["clamped"], out["cueX"], places=6)
+
+    def test_paint_uses_stored_pos_not_view_start(self) -> None:
+        js = read_static("app.js")
+        self.assertIn("const x = timeToWaveX(t, padX, plotW, view);", js)
+        self.assertNotIn(
+            "timeToWaveX(Math.max(t, view.start)",
+            js,
+            "clamping cue x to view.start paints Cue 1 at the left edge",
+        )
+        self.assertIn("${name} ${fmtTime(t)}", js)
+        self.assertIn("* 1000)", read_static("transport.js"))
 
 
 if __name__ == "__main__":

@@ -28,6 +28,26 @@ class CrlfPreservationTests(unittest.TestCase):
             self.assertIn("\r\n", text)
             self.assertEqual(text.encode("utf-8"), raw)
 
+    def test_read_strips_trailing_nul_so_color_edits_can_parse(self):
+        """VDJ/writers sometimes leave a 0x00 after </VirtualDJ_Database>."""
+        import xml.etree.ElementTree as ET
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "database.xml"
+            raw = (
+                b'<VirtualDJ_Database Version="2025">\r\n'
+                b'<Song FilePath="/music/a.flac">\r\n'
+                b'  <Poi Name="Intro" Pos="0.1" Num="1" Color="1" Type="cue" />\r\n'
+                b"</Song>\r\n"
+                b"</VirtualDJ_Database>\r\n"
+                b"\x00"
+            )
+            path.write_bytes(raw)
+            text = read_vdj_database_text(path)
+            self.assertNotIn("\x00", text)
+            self.assertTrue(text.rstrip().endswith("</VirtualDJ_Database>"))
+            ET.fromstring(text.replace("\r\n", "\n"))
+
     def test_rewrite_preserves_crlf_and_song_count(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "database.xml"

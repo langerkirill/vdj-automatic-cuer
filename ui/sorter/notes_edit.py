@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .autocue_path import ensure_autocue_on_path
-from .config import CUES_ROOT, LIBRARIES, VDJ_DATABASE
+from .config import CUES_ROOT, LIBRARIES, VDJ_DATABASE, assert_existing_audio
 from .relocate import is_virtualdj_running, summarize_cues
 from .db_lock import vdj_db_write
 
@@ -29,17 +29,7 @@ from vdj_database_safety import (  # noqa: E402
 
 
 def _assert_allowed(path: Path) -> Path:
-    audio = path.expanduser().resolve()
-    if not audio.is_file():
-        raise FileNotFoundError(f"Audio not found: {audio}")
-    roots = [CUES_ROOT.resolve(), *[p.resolve() for p in LIBRARIES.values()]]
-    for root in roots:
-        try:
-            audio.relative_to(root)
-            return audio
-        except ValueError:
-            continue
-    raise ValueError("Notes edit is only allowed under Cues/ or House/Zouk libraries")
+    return assert_existing_audio(path)
 
 
 def apply_comment_to_song_xml(song_xml: str, comment: str) -> str:

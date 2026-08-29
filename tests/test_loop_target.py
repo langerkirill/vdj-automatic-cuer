@@ -3,9 +3,10 @@
 import unittest
 from unittest.mock import patch
 
-from vdj_cuer.common import TARGET_MAX_LOOPS, TARGET_MIN_LOOPS
+from vdj_cuer.common import LOOP_BEAT_CHOICES, TARGET_MAX_LOOPS, TARGET_MIN_LOOPS
 from vdj_cuer.core import AutomaticMusicCuer
-from vdj_cuer.precision_gate import apply_precision_gate
+from vdj_cuer.precision_gate import ALLOWED_LOOP_BEATS, apply_precision_gate
+from vdj_cuer.stems import _cap_loop_length_beats
 from vdj_cuer.stem_evidence import StemProfile
 
 
@@ -22,9 +23,44 @@ def _loop(start, *, beats=16, confidence=0.9, name="Groove Loop"):
 
 
 class LoopTargetTests(unittest.TestCase):
+    def test_stem_loop_accept_threshold_matches_precision_gate(self) -> None:
+        import inspect
+
+        from vdj_cuer import stems as stems_mod
+        from vdj_cuer.precision_gate import MIN_LOOP_CONFIDENCE
+
+        source = inspect.getsource(stems_mod.StemMixin._validate_loop_candidate)
+        self.assertIn("MIN_LOOP_CONFIDENCE", source)
+        self.assertNotIn("0.75", source)
+        self.assertLessEqual(MIN_LOOP_CONFIDENCE, 0.62)
+
     def test_target_is_two_to_three_loops(self):
         self.assertEqual(TARGET_MIN_LOOPS, 2)
         self.assertEqual(TARGET_MAX_LOOPS, 3)
+        self.assertEqual(set(LOOP_BEAT_CHOICES), {4, 8, 16, 32})
+        self.assertEqual(set(ALLOWED_LOOP_BEATS), {4, 8, 16, 32})
+
+    def test_cap_loop_length_only_returns_allowed_beats(self) -> None:
+        for raw in (3, 4, 7, 8, 12, 16, 24, 32, 64):
+            capped = _cap_loop_length_beats(raw, beat_duration=0.5)
+            self.assertIn(capped, ALLOWED_LOOP_BEATS)
+        # 75 BPM (0.8s/beat): 32 beats is ~25.6s — cap below the DJ-usable max.
+        self.assertEqual(_cap_loop_length_beats(32, beat_duration=0.8), 16)
+
+    def test_gate_keeps_two_to_three_valid_loops_and_drops_the_rest(self) -> None:
+        analysis = {
+            "measure_changes": [],
+            "loop_segments": [
+                _loop(0.0, beats=8, confidence=0.80),
+                _loop(16.0, beats=16, confidence=0.88),
+                _loop(40.0, beats=16, confidence=0.90),
+                _loop(64.0, beats=32, confidence=0.70),
+            ],
+        }
+        result = apply_precision_gate(analysis, bpm=120.0)
+        self.assertEqual(len(result["loop_segments"]), 3)
+        for item in result["loop_segments"]:
+            self.assertIn(int(item["length_beats"]), ALLOWED_LOOP_BEATS)
 
     def test_precision_prompt_requires_two_to_three_loops(self):
         prompt = AutomaticMusicCuer._build_precision_prompt(
@@ -136,6 +172,36 @@ class LoopTargetTests(unittest.TestCase):
             )
         self.assertGreaterEqual(len(result["loop_segments"]), TARGET_MIN_LOOPS)
         self.assertLessEqual(len(result["loop_segments"]), TARGET_MAX_LOOPS)
+
+    def test_stem_scan_finds_two_loops_when_vocals_are_continuous(self):
+        """Vocal-on-the-1 must not zero out loops on an otherwise stable groove."""
+        from vdj_cuer.common import is_on_phrase_one
+
+        cuer = AutomaticMusicCuer.__new__(AutomaticMusicCuer)
+        n = 240
+        steady = [0.55, 0.6, 0.5, 0.58] * (n // 4)
+        profiles = {
+            "kick": StemProfile.from_frames(steady, frame_seconds=0.25),
+            "hihat": StemProfile.from_frames([0.25] * n, frame_seconds=0.25),
+            "instruments": StemProfile.from_frames(steady, frame_seconds=0.25),
+            "bass": StemProfile.from_frames(steady, frame_seconds=0.25),
+            "vocal": StemProfile.from_frames([0.7] * n, frame_seconds=0.25),
+        }
+        loops = cuer._discover_stem_validated_loops(
+            profiles,
+            beat_duration=0.5,
+            song_length=60.0,
+            transition_times=[0.0, 16.0, 32.0, 48.0],
+            max_loops=TARGET_MAX_LOOPS,
+            audio_file_path=None,
+            require_gemini_seam=False,
+        )
+        self.assertGreaterEqual(len(loops), TARGET_MIN_LOOPS)
+        for loop in loops:
+            self.assertTrue(
+                is_on_phrase_one(float(loop["start"]), 120.0, 0.0),
+                loop["start"],
+            )
 
 
 if __name__ == "__main__":

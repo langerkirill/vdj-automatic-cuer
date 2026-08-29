@@ -10,7 +10,10 @@ import re
 import unittest
 from pathlib import Path
 
-UI_STATIC = Path(__file__).resolve().parents[1] / "static"
+try:
+    from tests.js_assets import UI_STATIC, read_shipped_js, read_static
+except ImportError:
+    from js_assets import UI_STATIC, read_shipped_js, read_static
 
 
 class UiClarityAssetsTests(unittest.TestCase):
@@ -18,7 +21,9 @@ class UiClarityAssetsTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.html = (UI_STATIC / "index.html").read_text(encoding="utf-8")
         cls.css = (UI_STATIC / "styles.css").read_text(encoding="utf-8")
-        cls.js = (UI_STATIC / "app.js").read_text(encoding="utf-8")
+        cls.app_js = read_static("app.js")
+        cls.js = read_shipped_js()
+        cls.placements_js = read_static("placements.js")
 
     def test_add_cues_lower_tempo_options_visible(self) -> None:
         self.assertIn('id="speedPanel"', self.html)
@@ -39,10 +44,28 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn("function openGridAlignMode", self.js)
         self.assertIn("function attemptAutoGridAlign", self.js)
         self.assertIn("/api/grid-align/attempt", self.js)
-        self.assertIn("alignGridFromCardBtn", self.js)
-        self.assertIn("autoAlignGridFromCardBtn", self.js)
-        self.assertIn("wave-tools-inline", self.html)
+        self.assertIn('id="waveToolsInline"', self.html)
+        self.assertIn("wave-tools-inline", self.css)
         self.assertNotIn('id="waveToolsDrawer"', self.html)
+
+    def test_align_apply_stamps_saved_one_without_deep_refetch(self) -> None:
+        m = re.search(
+            r"async function applyGridAlign\(\) \{.*?\nasync function attemptAutoGridAlign",
+            self.app_js,
+            re.S,
+        )
+        self.assertIsNotNone(m)
+        body = m.group(0)
+        self.assertNotIn("loadDeepGridPreflight", body)
+        self.assertIn("scan_phase: anchor", body)
+        self.assertIn("drawWaveform()", body)
+
+    def test_best_set_pause_stop_uses_stage_transport(self) -> None:
+        self.assertIn('id="bestSetPauseBtn"', self.html)
+        self.assertIn('id="bestSetStopBtn"', self.html)
+        self.assertIn("toggleStagePlayback", self.app_js)
+        self.assertIn("stopStagePlayback", self.app_js)
+        self.assertIn("const RECS_NOW_STAMP_MS = 250;", self.app_js)
 
     def test_waveform_cue_drag_and_place(self) -> None:
         self.assertIn('id="placeCueBtn"', self.html)
@@ -63,19 +86,46 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn("place-cue-mode", self.css)
         self.assertIn("cue-hover", self.css)
 
-    def test_recs_auto_refresh_every_5s(self) -> None:
-        self.assertIn("RECS_NOW_POLL_MS = 5_000", self.js)
+    def test_waveform_cue_x_and_time_sit_on_the_one(self) -> None:
+        """Come back to me Cue 1 at 0.030522 must not paint/label as file start."""
+        self.assertIn("const x = timeToWaveX(t, padX, plotW, view);", self.app_js)
+        self.assertNotIn(
+            "timeToWaveX(Math.max(t, view.start)",
+            self.app_js,
+            "clamping cue x to view.start paints Cue 1 at the left edge",
+        )
+        self.assertIn("${name} ${fmtTime(t)}", self.app_js)
+        transport = read_static("transport.js")
+        self.assertIn("Math.round(Math.max(0, Number(seconds) || 0) * 1000)", transport)
+        self.assertNotIn("(rem - whole) * 10)", transport)
+
+    def test_recs_follows_now_playing_stamp(self) -> None:
+        self.assertIn("RECS_NOW_STAMP_MS = 250", self.js)
+        self.assertIn("function pollRecsNowStamp", self.js)
+        self.assertIn("/api/recs/now-playing/stamp", self.js)
         self.assertIn("function startRecsNowPlayingPoll", self.js)
         self.assertIn("function renderRecsPollCountdown", self.js)
         self.assertIn('id="recsPollCountdown"', self.html)
-        self.assertIn("Next check", self.js)
+        self.assertIn("Live", self.js)
         self.assertIn("startRecsNowPlayingPoll()", self.js)
 
+    def test_recs_shows_removed_because_played(self) -> None:
+        self.assertIn('id="recsRemovedPlays"', self.html)
+        self.assertIn("removed_recent_label", self.app_js)
+        self.assertIn("recsRemovedPlays", self.app_js)
+
     def test_three_modes_present(self) -> None:
-        for mode in ("add_cues", "sort", "practice", "recs", "assemble"):
+        for mode in (
+            "add_cues",
+            "set_overview",
+            "practice",
+            "best_set",
+            "recs",
+            "assemble",
+        ):
             self.assertIn(f'data-mode="{mode}"', self.html)
         self.assertIn("Add Cues", self.html)
-        self.assertIn("Sort", self.html)
+        self.assertIn("Set Overview", self.html)
         self.assertIn("Practice", self.html)
         self.assertIn("Assemble", self.html)
         self.assertIn("assemblePanel", self.html)
@@ -134,7 +184,7 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn("function applyExistingSetPlacement", self.js)
         self.assertIn("function mergeLoadedPlacements", self.js)
         self.assertIn("loadTrackPlacements(selected)", self.js)
-        self.assertIn("Looking up House / Zouk / Pajamathon", self.js)
+        self.assertIn("Looking up House / Zouk / Pajamathon", self.placements_js)
         self.assertIn("already_exists", self.js)
         self.assertIn("placementsLoaded", self.js)
         self.assertIn("/api/track-placements", self.js)
@@ -160,7 +210,37 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn('id="deleteAddCuesBtn"', self.html)
         self.assertIn("Delete from Add Cues", self.html)
         self.assertIn("function deleteAddCuesTrack", self.js)
+        self.assertIn("function isPajamathonSetQueueTrack", self.js)
+        self.assertIn("Delete from Pajamathon", self.js)
         self.assertIn("/api/delete-add-cues", self.js)
+        self.assertIn("kept_hardlinks", self.js)
+        self.assertIn("Cue in set · confirm a lane to sort", self.js)
+        self.assertIn("Sets/${track.relative_path", self.js)
+        self.assertIn("Sets/Pajamathon — Approve after you listen", self.js)
+        self.assertIn("Next Pajamathon track", self.js)
+        self.assertIn("Approve set cues", self.js)
+        self.assertIn("/api/approve-set-cues", self.js)
+        self.assertIn('data-filter="needs_sort"', self.html)
+        self.assertIn('data-filter="recently_cued"', self.html)
+        self.assertIn("Recently cued", self.html)
+        self.assertIn("isRecentlyCued", self.js)
+        self.assertIn('id="filterReadyBtn"', self.html)
+        self.assertIn("function syncReadinessFilterLabels", self.js)
+        self.assertIn('readyBtn.textContent = "Ready"', self.js)
+        self.assertIn('const UI_BUILD = "20260829-recs-event-plays"', self.js)
+        self.assertIn("20260829-recs-event-plays", self.html)
+        app_py = (Path(__file__).resolve().parents[1] / "app.py").read_text(
+            encoding="utf-8"
+        )
+        js_build = re.search(r'const UI_BUILD = "([^"]+)"', self.js)
+        py_build = re.search(r'^UI_BUILD = "([^"]+)"', app_py, re.M)
+        self.assertTrue(js_build and py_build)
+        self.assertEqual(
+            js_build.group(1),
+            py_build.group(1),
+            "app.js UI_BUILD must match app.py or /api/health reloads forever",
+        )
+        self.assertIn('http-equiv="Cache-Control"', self.html)
         delete_at = self.html.find('id="deleteAddCuesBtn"')
         drawer_at = self.html.find("review-section-secondary")
         self.assertGreater(delete_at, 0)
@@ -219,7 +299,6 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn("schedulePracticeWaveRedraw", self.js)
 
     def test_assemble_keeps_cached_lists_while_scoring(self) -> None:
-        self.assertIn("add-set", self.html)
         self.assertIn("previousResult", self.js)
         self.assertIn("state.assemblePreview?.result", self.js)
         self.assertIn("if (!latest.job.result && data.result)", self.js)
@@ -227,7 +306,6 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn("recoverAssembleJob", self.js)
         self.assertIn("function unstickAssembleJob", self.js)
         self.assertIn("function assembleJobBusy", self.js)
-        self.assertIn("add-set", self.html)
 
     def test_assemble_playlist_can_sort_by_fit(self) -> None:
         self.assertIn('id="assemblePlaylistSort"', self.html)
@@ -259,7 +337,6 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn('id="assembleMinFit"', self.html)
         self.assertIn("function readAssembleMinFit", self.js)
         self.assertIn("min_fit", self.js)
-        self.assertIn("add-set", self.html)
         self.assertIn("assemble-mix-pct", self.js)
         self.assertIn('getAttribute("data-pl-sort")', self.js)
 
@@ -309,6 +386,11 @@ class UiClarityAssetsTests(unittest.TestCase):
         # Cache-bust query may change; require the shipped asset paths.
         self.assertRegex(self.html, r"/static/styles\.css(\?[^\"']*)?")
         self.assertRegex(self.html, r"/static/app\.js(\?[^\"']*)?")
+        self.assertRegex(self.html, r"/static/state\.js(\?[^\"']*)?")
+        self.assertRegex(self.html, r"/static/transport\.js(\?[^\"']*)?")
+        self.assertRegex(self.html, r"/static/waveform\.js(\?[^\"']*)?")
+        self.assertRegex(self.html, r"/static/practice\.js(\?[^\"']*)?")
+        self.assertRegex(self.html, r"/static/assemble\.js(\?[^\"']*)?")
         self.assertRegex(self.html, r"/static/status_handoff\.js(\?[^\"']*)?")
         # not an empty shell
         self.assertGreater(len(self.html), 2000)
@@ -328,6 +410,14 @@ class UiClarityAssetsTests(unittest.TestCase):
             r"if\s*\(\s*!isPracticeMode\(\)\s*\)\s*\{\s*audio\.play\(\)\.catch\(\(\)\s*=>\s*\{\}\s*\)",
         )
 
+    def test_practice_mix_can_be_excluded_from_best(self) -> None:
+        self.assertIn('id="practiceExcludeBestBtn"', self.html)
+        self.assertIn("Exclude from Best", self.html)
+        self.assertIn("function togglePracticeExcludeFromBest", self.app_js)
+        self.assertIn("/api/practice/mix-settings", self.app_js)
+        self.assertIn("exclude_from_best", self.app_js)
+        self.assertIn("practice-exclude-best", self.css)
+
     def test_quiet_session_mutes_agent_checks(self) -> None:
         """?quiet=1 / ?mute=1 / webdriver must keep the sorter silent."""
         self.assertIn("function wantsQuietSession", self.js)
@@ -335,7 +425,7 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn("function syncQuietSessionUi", self.js)
         self.assertIn('params.get("quiet")', self.js)
         self.assertIn('params.get("mute")', self.js)
-        self.assertIn("navigator.webdriver", self.js)
+        self.assertIn("nav.webdriver", read_static("transport.js"))
         self.assertIn("state.quietSession", self.js)
         self.assertIn("applyQuietSession()", self.js)
         apply_at = self.js.find("applyQuietSession()")
@@ -345,6 +435,16 @@ class UiClarityAssetsTests(unittest.TestCase):
         self.assertIn('id="quietSessionChip"', self.html)
         self.assertIn("quiet-session-chip", self.css)
         self.assertIn("Sound off", self.html)
+
+    def test_fmt_time_milliseconds_not_file_start(self) -> None:
+        transport = read_static("transport.js")
+        self.assertIn("function fmtTime", transport)
+        self.assertIn("* 1000)", transport)
+        self.assertNotIn("(rem - whole) * 10", transport)
+        self.assertIn("MusicSorterTransport.fmtTime", self.app_js)
+        self.assertIn("timeToWaveX(t, padX, plotW, view", self.app_js)
+        self.assertIn("let t = Number(p.pos) || 0", self.app_js)
+
 
 
 if __name__ == "__main__":

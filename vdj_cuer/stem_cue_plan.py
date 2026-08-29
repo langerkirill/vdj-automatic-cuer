@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from typing import Dict, Iterable, List, Optional, Sequence
 
+from .common import PHRASE_BEATS, quantize_to_phrase_one
 from .stem_evidence import (
     StemProfile,
     is_clean_phrase_entry,
@@ -17,26 +18,13 @@ from .stem_evidence import (
 
 MAX_STEM_CUES = 6
 MIN_STEM_CUES = 2
-MIN_SPACING_BEATS = 12.0
+MIN_SPACING_BEATS = float(PHRASE_BEATS)
 HOLD_BARS = 1
 
 
 def snap_to_downbeat(time_sec: float, bpm: float, offset: float = 0.0) -> float:
-    """Nearest bar-1 at or before the event (never before 0)."""
-    if not bpm or bpm <= 0:
-        return max(0.0, float(time_sec))
-    bar = (60.0 / float(bpm)) * 4.0
-    t = float(time_sec)
-    origin = float(offset)
-    if bar <= 0:
-        return max(0.0, t)
-    k = math.floor(((t - origin) / bar) + 0.5)
-    snapped = origin + k * bar
-    while snapped > t + 1e-9:
-        snapped -= bar
-    while snapped < 0:
-        snapped += bar
-    return snapped
+    """Upcoming yellow [1] (4 bars). Never the previous phrase 1."""
+    return quantize_to_phrase_one(time_sec, bpm, offset)
 
 
 def _signature(elements: Iterable[str]) -> frozenset[str]:
@@ -58,7 +46,7 @@ def _default_name(elements: Sequence[str]) -> str:
     if "vocals" in items and "drums" in items:
         return "Vocal Mix"
     if "vocals" in items:
-        return "Vocal"
+        return "Vocal Break"
     if "drums" in items and "bass" in items:
         return "Groove"
     if "drums" in items:
@@ -67,7 +55,7 @@ def _default_name(elements: Sequence[str]) -> str:
         name in items for name in ("piano", "synth", "strings", "guitar")
     ):
         return "Melody"
-    return "Section"
+    return "Beat Entry"
 
 
 def _default_color(elements: Sequence[str]) -> str:
@@ -99,15 +87,12 @@ def plan_stem_cues(
     """Return 2–6 grid-snapped cues from measured stem change-points."""
     if not profiles or not bpm or bpm <= 0 or duration <= 0:
         return []
-    bar = (60.0 / float(bpm)) * 4.0
-    if bar <= 0:
+    beat = 60.0 / float(bpm)
+    phrase = beat * float(PHRASE_BEATS)
+    if phrase <= 0:
         return []
-    t = float(offset)
-    if t < 0:
-        t = 0.0
-    while t - bar >= -1e-9:
-        t -= bar
-    t = max(0.0, t)
+    origin = max(0.0, float(offset))
+    t = origin
 
     rows: List[dict] = []
     prev_sig: Optional[frozenset[str]] = None
@@ -115,20 +100,23 @@ def plan_stem_cues(
         evidence = measure_stem_evidence(
             profiles,
             timestamp=t,
-            duration_seconds=min(bar, 4.0),
+            duration_seconds=min(phrase, 4.0),
             model_elements=["drums", "vocals", "bass", "synth"],
             centered=True,
             strict_drums=False,
         )
         sig = _signature(evidence.elements)
-        changed = prev_sig is not None and sig != prev_sig and bool(sig)
-        hold_end = t + bar * HOLD_BARS
+        first_signature = prev_sig is None and bool(sig)
+        changed = first_signature or (
+            prev_sig is not None and sig != prev_sig and bool(sig)
+        )
+        hold_end = t + phrase * HOLD_BARS
         held = True
-        if changed:
+        if changed and not first_signature:
             later = measure_stem_evidence(
                 profiles,
                 timestamp=min(hold_end, duration - 0.1),
-                duration_seconds=min(bar, 4.0),
+                duration_seconds=min(phrase, 4.0),
                 model_elements=["drums", "vocals", "bass", "synth"],
                 centered=True,
                 strict_drums=False,
@@ -137,17 +125,17 @@ def plan_stem_cues(
         clean = is_clean_phrase_entry(
             profiles, timestamp=t, elements=evidence.elements
         )
-        if changed and held and clean:
+        if first_signature or (changed and held and clean):
             turned_on = sig - (prev_sig or frozenset())
             score = float(len(turned_on) + len(sig.symmetric_difference(prev_sig or set())))
             score += min(1.0, float(evidence.confidence or 0.0))
             rows.append(
                 {
-                    "timestamp": round(t, 6),
+                    "timestamp": round(quantize_to_phrase_one(t, bpm, origin), 6),
                     "elements": list(evidence.elements),
                     "cue_name": _default_name(evidence.elements),
                     "color": _default_color(evidence.elements),
-                    "role": "section",
+                    "role": "entry",
                     "confidence": max(0.72, min(0.98, 0.7 + score / 8.0)),
                     "assertion_source": "stem_cue_plan",
                     "stem_score": score,
@@ -156,7 +144,7 @@ def plan_stem_cues(
                 }
             )
         prev_sig = sig if sig else prev_sig
-        t += bar
+        t += phrase
 
     rows.sort(key=lambda item: (-float(item.get("stem_score", 0.0)), float(item["timestamp"])))
     selected: List[dict] = []

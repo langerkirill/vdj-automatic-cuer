@@ -73,59 +73,20 @@ class LoopSeamClientTests(unittest.TestCase):
 
 
 class LoopSeamRetryTests(unittest.TestCase):
-    def test_retry_placements_prefer_original_then_neighbor_beats(self):
+    def test_retry_placements_stay_on_the_phrase_one(self):
         placements = StemMixin._loop_retry_placements(
             10.0, 16, 0.5, max_attempts=LOOP_SEAM_MAX_ATTEMPTS
         )
         self.assertEqual(placements[0], (10.0, 16))
-        starts = [start for start, _ in placements[:3]]
-        self.assertIn(10.5, starts)  # +1 beat
-        self.assertIn(9.5, starts)  # -1 beat
+        starts = {start for start, _ in placements}
+        self.assertEqual(starts, {10.0})
+        beats = {beats for _, beats in placements}
+        self.assertTrue(beats <= {4, 8, 16, 32})
+        self.assertIn(8, beats)
         self.assertEqual(LOOP_SEAM_MAX_ATTEMPTS, 3)
 
-    def test_validate_retries_wrap_up_to_three_times(self):
-        """Failed wrap → nudge start; third attempt can pass."""
-        from vdj_cuer.stem_evidence import StemProfile
-        from automatic_music_cuer_gemini import AutomaticMusicCuer
-
-        cuer = AutomaticMusicCuer.__new__(AutomaticMusicCuer)
-        steady = [0.55, 0.6, 0.5, 0.58] * 80
-        profiles = {
-            "kick": StemProfile.from_frames(steady, frame_seconds=0.25),
-            "hihat": StemProfile.from_frames([0.2] * 320, frame_seconds=0.25),
-            "instruments": StemProfile.from_frames(steady, frame_seconds=0.25),
-            "bass": StemProfile.from_frames(steady, frame_seconds=0.25),
-            "vocal": StemProfile.from_frames([0.001] * 320, frame_seconds=0.25),
-        }
-
-        calls: list[float] = []
-
-        def fake_gemini(_path, start, duration, **kwargs):
-            calls.append(float(start))
-            # Fail first two starts, accept third.
-            return len(calls) >= 3
-
-        with patch.object(cuer, "validate_color_assignment", return_value="green"), patch.object(
-            cuer, "_evaluate_loop_seam_with_gemini", side_effect=fake_gemini
-        ):
-            accepted = cuer._validate_loop_candidate(
-                profiles=profiles,
-                start=0.0,
-                length_beats=16,
-                beat_duration=0.5,
-                model_elements=["drums", "bass", "synth"],
-                loop_name="Test",
-                audio_file_path="/tmp/does-not-need-to-exist-for-mock.m4a",
-                require_gemini_seam=True,
-            )
-
-        self.assertIsNotNone(accepted)
-        self.assertEqual(len(calls), 3)
-        self.assertEqual(calls[0], 0.0)
-        self.assertNotEqual(accepted["start"], 0.0)
-        self.assertTrue(accepted.get("gemini_seam"))
-
-    def test_validate_gives_up_after_three_failed_wraps(self):
+    def test_validate_keeps_stem_clean_loop_on_the_original_one(self):
+        """Gemini wrap is advisory; never nudge off the yellow [1]."""
         from vdj_cuer.stem_evidence import StemProfile
         from automatic_music_cuer_gemini import AutomaticMusicCuer
 
@@ -147,14 +108,44 @@ class LoopSeamRetryTests(unittest.TestCase):
                 start=0.0,
                 length_beats=16,
                 beat_duration=0.5,
-                model_elements=["drums", "bass"],
-                loop_name="Bad",
-                audio_file_path="/tmp/x.m4a",
+                model_elements=["drums", "bass", "synth"],
+                loop_name="Test",
+                audio_file_path="/tmp/does-not-need-to-exist-for-mock.m4a",
                 require_gemini_seam=True,
             )
 
-        self.assertIsNone(accepted)
-        self.assertEqual(gemini.call_count, LOOP_SEAM_MAX_ATTEMPTS)
+        self.assertIsNotNone(accepted)
+        self.assertEqual(accepted["start"], 0.0)
+        self.assertEqual(gemini.call_count, 1)
+
+    def test_validate_accepts_loop_when_vocals_are_already_on_the_one(self):
+        from vdj_cuer.stem_evidence import StemProfile
+        from automatic_music_cuer_gemini import AutomaticMusicCuer
+
+        cuer = AutomaticMusicCuer.__new__(AutomaticMusicCuer)
+        steady = [0.55, 0.6, 0.5, 0.58] * 80
+        profiles = {
+            "kick": StemProfile.from_frames(steady, frame_seconds=0.25),
+            "hihat": StemProfile.from_frames([0.2] * 320, frame_seconds=0.25),
+            "instruments": StemProfile.from_frames(steady, frame_seconds=0.25),
+            "bass": StemProfile.from_frames(steady, frame_seconds=0.25),
+            "vocal": StemProfile.from_frames([0.7] * 320, frame_seconds=0.25),
+        }
+
+        with patch.object(cuer, "validate_color_assignment", return_value="green"):
+            accepted = cuer._validate_loop_candidate(
+                profiles=profiles,
+                start=0.0,
+                length_beats=16,
+                beat_duration=0.5,
+                model_elements=["drums", "vocals", "bass", "synth"],
+                loop_name="Vocal Groove",
+                audio_file_path=None,
+                require_gemini_seam=False,
+            )
+
+        self.assertIsNotNone(accepted)
+        self.assertEqual(accepted["start"], 0.0)
 
     def test_zero_loops_ok_when_nothing_passes(self):
         """Song may correctly keep no loops after all retries fail."""

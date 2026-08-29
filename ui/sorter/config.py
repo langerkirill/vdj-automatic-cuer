@@ -62,6 +62,14 @@ LIBRARIES: dict[str, Path] = {
 # Event crates with real audio files (Moon, Silesian, Kizouk, …).
 SETS_ROOT = MUSIC_ROOT / "Sets"
 
+
+def assert_existing_audio(path: Path | str) -> Path:
+    """Resolve an audio path that exists. Cue/grid/notes edits are allowed anywhere."""
+    audio = Path(path).expanduser().resolve()
+    if not audio.is_file():
+        raise FileNotFoundError(f"Audio not found: {audio}")
+    return audio
+
 # DJ-utility folders — never candidates for assembled event mixes.
 ASSEMBLE_SKIP_DIR_NAMES = {
     "Transitions",
@@ -102,6 +110,7 @@ ZOUK_VIBE_FOLDERS = {
     "Jazzy",
     "JR&B",
     "Neo Soul",
+    "Neo Zouk",
     "Nostalgia",
     "Openers",
     "Pop",

@@ -7,6 +7,7 @@ from .analysis_cache import (
     save_cached_analysis,
 )
 from .common import *
+from .gemini_call import generate_json, generate_json_async
 from .precision_gate import apply_precision_gate
 
 
@@ -25,13 +26,13 @@ class GeminiAnalysisMixin:
             timestamp = float(cue.get("timestamp", 0.0))
             cue["model_timestamp"] = timestamp
             cue["timestamp"] = self._quantize_grid_time(
-                timestamp, actual_bpm, beatgrid_offset, grid_beats=4
+                timestamp, actual_bpm, beatgrid_offset, grid_beats=16
             )
         for loop in analysis_data.get("loop_segments", []):
             timestamp = float(loop.get("start", 0.0))
             loop["model_timestamp"] = timestamp
             loop["start"] = self._quantize_grid_time(
-                timestamp, actual_bpm, beatgrid_offset, grid_beats=4
+                timestamp, actual_bpm, beatgrid_offset, grid_beats=16
             )
         return analysis_data
 
@@ -47,16 +48,16 @@ class GeminiAnalysisMixin:
 
     @staticmethod
     def _round_analysis_timestamps(analysis_data: Dict) -> Dict:
-        """Normalize cue and loop timestamps to two decimal places."""
+        """Keep grid times at VDJ Pos precision (6 decimals), not 0.01s."""
         if "measure_changes" in analysis_data:
             for cue in analysis_data["measure_changes"]:
                 if "timestamp" in cue:
-                    cue["timestamp"] = round(float(cue["timestamp"]), 2)
+                    cue["timestamp"] = round(float(cue["timestamp"]), 6)
 
         if "loop_segments" in analysis_data:
             for loop in analysis_data["loop_segments"]:
                 if "start" in loop:
-                    loop["start"] = round(float(loop["start"]), 2)
+                    loop["start"] = round(float(loop["start"]), 6)
 
         return analysis_data
 
@@ -122,61 +123,18 @@ class GeminiAnalysisMixin:
         max_retries: int = DEFAULT_ANALYSIS_RETRIES,
     ) -> Dict:
         """Call Gemini with structured JSON output and retry temporary failures."""
-        last_error: Optional[Exception] = None
-        for model in self._model_candidates():
-            use_thinking = self._model_supports_thinking_level(model)
-            for analysis_retry in range(max_retries):
-                try:
-                    response = self.client.models.generate_content(
-                        model=model,
-                        contents=contents,
-                        config=self._generate_json_config(
-                            schema, timeout_seconds, thinking=use_thinking
-                        ),
-                    )
-                    if not response or not response.text:
-                        raise ValueError(
-                            "Empty response from Gemini"
-                            + self._empty_response_detail(response)
-                        )
-                    if model != self.model_name:
-                        print(f"↪️  Switched AutoCue model to {model}")
-                    self.model_name = model
-                    return self._parse_json_response(response.text)
-                except Exception as analysis_e:
-                    last_error = analysis_e
-                    if self._is_unsupported_thinking_error(analysis_e) and use_thinking:
-                        print(
-                            f"⚠️  {model} does not support thinking_level; retrying without it"
-                        )
-                        use_thinking = False
-                        continue
-                    if self._is_daily_quota_error(analysis_e):
-                        print(f"⚠️  Daily quota on {model}; trying another Pro…")
-                        break
-                    if self._should_switch_model(analysis_e, analysis_retry):
-                        print(
-                            f"⚠️  {model} returned no usable data; trying another model…"
-                        )
-                        break
-                    if self._is_retryable_error(analysis_e) and (
-                        analysis_retry < max_retries - 1
-                    ):
-                        wait_time = min((analysis_retry + 1) * 3, 30)
-                        print(
-                            f"⚠️  Analysis failed (attempt "
-                            f"{analysis_retry + 1}/{max_retries}): {analysis_e}"
-                        )
-                        print(f"🔄 Retrying analysis in {wait_time} seconds...")
-                        time.sleep(wait_time)
-                        continue
-
-                    print(f"⚠️  Gemini API error: {analysis_e}")
-                    raise
-
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("Failed to get analysis response after retries")
+        payload, used = generate_json(
+            self.client,
+            contents,
+            schema,
+            models=self._model_candidates(),
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )
+        if used != self.model_name:
+            print(f"↪️  Switched AutoCue model to {used}")
+        self.model_name = used
+        return payload
 
     async def _generate_json_content_async(
         self,
@@ -186,66 +144,18 @@ class GeminiAnalysisMixin:
         max_retries: int = DEFAULT_ANALYSIS_RETRIES,
     ) -> Dict:
         """Call Gemini without an executor thread so cancellation stays prompt."""
-        last_error: Optional[Exception] = None
-        for model in self._model_candidates():
-            use_thinking = self._model_supports_thinking_level(model)
-            for analysis_retry in range(max_retries):
-                try:
-                    response = await self.client.aio.models.generate_content(
-                        model=model,
-                        contents=contents,
-                        config=self._generate_json_config(
-                            schema, timeout_seconds, thinking=use_thinking
-                        ),
-                    )
-                    if not response or not response.text:
-                        raise ValueError(
-                            "Empty response from Gemini"
-                            + self._empty_response_detail(response)
-                        )
-                    if model != self.model_name:
-                        print(f"↪️  Switched AutoCue model to {model}")
-                    self.model_name = model
-                    return self._parse_json_response(response.text)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as analysis_error:
-                    last_error = analysis_error
-                    if (
-                        self._is_unsupported_thinking_error(analysis_error)
-                        and use_thinking
-                    ):
-                        print(
-                            f"⚠️  {model} does not support thinking_level; retrying without it"
-                        )
-                        use_thinking = False
-                        continue
-                    if self._is_daily_quota_error(analysis_error):
-                        print(f"⚠️  Daily quota on {model}; trying another Pro…")
-                        break
-                    if self._should_switch_model(analysis_error, analysis_retry):
-                        print(
-                            f"⚠️  {model} returned no usable data; trying another model…"
-                        )
-                        break
-                    if self._is_retryable_error(analysis_error) and (
-                        analysis_retry < max_retries - 1
-                    ):
-                        wait_time = min((analysis_retry + 1) * 3, 30)
-                        print(
-                            f"⚠️  Analysis failed (attempt "
-                            f"{analysis_retry + 1}/{max_retries}): {analysis_error}"
-                        )
-                        print(f"🔄 Retrying analysis in {wait_time} seconds...")
-                        await asyncio.sleep(wait_time)
-                        continue
-
-                    print(f"⚠️  Gemini API error: {analysis_error}")
-                    raise
-
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("Failed to get analysis response after retries")
+        payload, used = await generate_json_async(
+            self.client,
+            contents,
+            schema,
+            models=self._model_candidates(),
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )
+        if used != self.model_name:
+            print(f"↪️  Switched AutoCue model to {used}")
+        self.model_name = used
+        return payload
 
     def _finalize_music_analysis(
         self,
@@ -404,9 +314,9 @@ or outro) is preferred. Never invent a vocal, drum-only, or melodic-only
 *label* to satisfy a quota — pick real repeating phrases that wrap.
 
 For each cue:
-- timestamp is the first beat of the bar where the new section begins
-- role is one of intro, entry, groove, build, drop, breakdown, vocal, outro,
-  or section
+- timestamp is a yellow phrase [1]: every 16 beats (4 bars) from Cue 1 /
+  Scan Phase. Never beat 2/3/4, never a bar 1 that is not that phrase [1]
+- role is one of intro, entry, groove, build, drop, breakdown, vocal, outro
 - confidence is 0.0-1.0 and must reflect audible certainty
 - elements contains every clearly audible component from drums, vocals, bass,
   piano, synth, strings, and guitar
@@ -414,23 +324,22 @@ For each cue:
 - never use "&" in cue_name or loop_name — write "and" instead
   (e.g. "Bass and Snaps In", not "Bass & Snaps In")
 - A cue must be safe to jump to. At the exact press (the 1) the vocal
-  stem is either silent or starts on that beat. Do not place a cue where
-  a singer is already mid-word, holding a note, or making noise. Groove
-  and instrumental cues fail the same test if vocals are already sounding.
+  stem is either silent or already rolling. Do not place a cue where a
+  vocal *enters* on that 1 — jumping in would catch the word. Groove
+  and instrumental cues fail the same onset test.
 
 For each loop:
-- Prefer starting on beat 1 of a bar when it still wraps cleanly; starting on
-  beat 2/3/4 is allowed when that yields a better seamless wrap
+- start must be a yellow phrase [1] (every 16 beats from Cue 1). Never beat
+  2/3/4
 - start must be the beginning of the section you are looping (e.g. a Drop
   loop starts at the Drop cue, not at a Build cue two phrases earlier)
 - Prefer an early melodic intro loop when the first 8-16 beats are a stable
   instrument-only phrase (no drums/vocals) that wraps cleanly — these are
   high-value DJ loops even if the rest of the track is sparse
-- Never place a vocal cue or loop where a lyric line is already running
-  (pre-chorus words into a chorus). Markers must be phrase attacks that are
-  safe to cue-jump to; mid-line starts are invalid
-- Same rule at the loop start: if a vocal is already making noise on the
-  press, the loop is invalid even when the body is drums/instruments
+- Do not start a loop mid-line / mid-bar. The start is a phrase [1].
+- Vocals already rolling on that 1 are allowed when the phrase wraps
+  cleanly. Do not reject a chorus or vocal-mix loop because the singer
+  is on.
 - loop_name must match that section and the stem-supported components (use
   Melodic for instrument-only intro phrases)
 - the component makeup stays stable for the whole loop
@@ -454,8 +363,9 @@ Strict assertions:
   melody, or vocals are audible.
 - Drop requires a clear energy increase at the exact timestamp.
 - Breakdown requires a clear reduction of elements at the exact timestamp.
-- Use Groove, Rhythm Section, Vocal Mix, or Synth Section when a useful section
-  does not satisfy the stronger Drop/Breakdown/Drums/Melodic claim.
+- Use Groove, Vocal Mix, Synth Intro, Beat Entry, Build, Drop, Chorus, or
+  Verse when a useful part does not satisfy the stronger Drop/Breakdown claim.
+  Never name a cue "Section" or "Rhythm Section".
 
 Colors are deterministic categories:
 - blue: instruments/bass, no drums, no vocals
@@ -465,7 +375,8 @@ Colors are deterministic categories:
 - orange: vocals with no drums, with or without instruments/bass
 
 Use the full mix to locate structure. Use isolated stems only as supporting
-evidence. Do not infer from the filename. Round timestamps to 0.01 seconds.
+evidence. Do not infer from the filename. Place timestamps on phrase 1s
+(every 4 bars from Cue 1 / Scan Phase). Do not round them off that grid.
 """.strip()
 
     def analyze_audio_with_gemini(self, audio_file_path: str, uploaded_file=None) -> Dict:

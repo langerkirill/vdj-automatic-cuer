@@ -7,8 +7,8 @@ import automatic_music_cuer_gemini as cuer_module
 
 
 class GeminiModernizationTests(unittest.TestCase):
-    def test_default_model_is_gemini_3_6_flash(self):
-        self.assertEqual(cuer_module.DEFAULT_GEMINI_MODEL, "gemini-3.6-flash")
+    def test_default_model_is_gemini_3_7_flash(self):
+        self.assertEqual(cuer_module.DEFAULT_GEMINI_MODEL, "gemini-3.7-flash")
 
     def test_resolve_gemini_model_prefers_autocue_env(self):
         from vdj_cuer.common import resolve_gemini_model
@@ -72,7 +72,7 @@ class GeminiModernizationTests(unittest.TestCase):
 
         self.assertEqual(result, {"measure_changes": [], "loop_segments": []})
         call_kwargs = cuer.client.models.generate_content.call_args.kwargs
-        self.assertEqual(call_kwargs["model"], "gemini-3.6-flash")
+        self.assertEqual(call_kwargs["model"], "gemini-3.7-flash")
         self.assertEqual(call_kwargs["config"].response_mime_type, "application/json")
         self.assertIsNone(call_kwargs["config"].thinking_config)
         self.assertIn(
@@ -115,7 +115,7 @@ class GeminiModernizationTests(unittest.TestCase):
 
         self.assertIn("2-3", prompt)
         self.assertIn("Never invent", prompt)
-        self.assertIn("first beat of the bar", prompt)
+        self.assertIn("phrase [1]", prompt)
 
     def test_detects_virtualdj_running_from_process_list(self):
         result = Mock()
@@ -169,8 +169,8 @@ class GeminiModernizationTests(unittest.TestCase):
             for call in cuer.client.models.generate_content.call_args_list
         ]
         self.assertEqual(models[0], "gemini-3.1-pro-preview")
-        self.assertEqual(models[1], "gemini-3.6-flash")
-        self.assertEqual(cuer.model_name, "gemini-3.6-flash")
+        self.assertEqual(models[1], "gemini-3.7-flash")
+        self.assertEqual(cuer.model_name, "gemini-3.7-flash")
 
     def test_upload_uses_ascii_temp_path_for_unicode_filename(self):
         with patch("builtins.print"):
@@ -234,8 +234,8 @@ class GeminiModernizationTests(unittest.TestCase):
         ]
         self.assertEqual(models[0], "gemini-3.5-flash-lite")
         self.assertEqual(models[1], "gemini-3.5-flash-lite")
-        self.assertEqual(models[2], "gemini-3.6-flash")
-        self.assertEqual(cuer.model_name, "gemini-3.6-flash")
+        self.assertEqual(models[2], "gemini-3.7-flash")
+        self.assertEqual(cuer.model_name, "gemini-3.7-flash")
 
     def test_generate_music_analysis_uses_stem_plan_when_gemini_empty(self):
         with patch("builtins.print"):

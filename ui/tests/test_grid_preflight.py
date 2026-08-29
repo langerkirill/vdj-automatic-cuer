@@ -97,6 +97,28 @@ class GridPreflightTests(unittest.TestCase):
                 mock_sum.assert_not_called()
             self.assertTrue(result["can_autocue"])
 
+    def test_deep_corrected_blocks_autocue_until_confirm(self):
+        with tempfile.NamedTemporaryFile(suffix=".flac") as handle:
+            path = Path(handle.name)
+            path.write_bytes(b"x")
+            cues = _cues(bpm=95.0, has_beatgrid=True, beatgrid_pos=0.2, scan_phase=0.2)
+            fake = {
+                "verified": True,
+                "corrected": True,
+                "confidence_ratio": 2.0,
+                "shift_beats": 2,
+                "fine_shift_seconds": 0.05,
+                "best_beat_score": 0.4,
+                "offset": 0.6,
+            }
+            with patch.object(gp, "_deep_verify_alignment", return_value=fake):
+                result = gp.assess_grid_for_autocue(path, deep=True, cues=cues)
+        self.assertFalse(result["can_autocue"])
+        self.assertTrue(result["needs_align"])
+        self.assertTrue(result["manual_confirmable"])
+        self.assertEqual(result["status"], "fixable")
+
+
 
 if __name__ == "__main__":
     unittest.main()

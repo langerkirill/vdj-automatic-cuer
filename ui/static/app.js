@@ -1,103 +1,30 @@
-const state = {
-  mode: "add_cues", // sort | add_cues | practice
-  accentTheme: "lime",
-  tracks: [],
-  index: 0,
-  practiceMixes: [],
-  practiceDetail: null,
-  practiceDb: null,
-  practiceMixPath: "",
-  practiceTxSort: "order", // order | score | save
-  practiceView: "mix", // mix | best
-  practiceBestItems: [],
-  practiceBestLoading: false,
-  practiceAnalyzeJob: null,
-  practiceAnalyzeTimer: null,
-  practiceSummary: null,
-  library: "Both", // House | Zouk | Both (tree filter)
-  folders: [],
-  folderTrees: null,
-  // Multi-select destinations: { library, path, key }
-  selectedDests: [],
-  // Last clicked folder (parent for "create folder")
-  selectedPath: "",
-  selectedPathLibrary: "",
-  expanded: new Set(),
-  filter: "",
-  trackSearch: "",
-  readinessFilter: "all",
-  crateFilter: "all",
-  recommendation: null,
-  recommendAbort: null,
-  health: null,
-  activeCueKey: null,
-  waveform: null, // { path, duration, peaks, bins }
-  waveformLoading: false,
-  waveformError: null,
-  waveformAbort: null,
-  waveZoom: 1, // 1 = full track, higher = zoomed in
-  waveOffset: 0, // visible window start (seconds)
-  waveViewBeforeAlign: null, // { zoom, offset } restored if align is cancelled
-  waveViewPinned: false, // user/align window — don't page to the playhead
-  waveCueChromeHits: null, // { left, right, overview } click targets while zoomed
-  showBeatOnes: true, // bar “1” markers on waveform (toggleable)
-  // Beatgrid drag-align mode (optional panel)
-  gridAlignMode: false,
-  gridAlignAnchor: null, // working downbeat while aligning (seconds)
-  gridAlignOriginal: null, // anchor when mode opened
-  gridAlignDragging: false,
-  gridAlignDragOriginTime: 0,
-  gridAlignDragOriginAnchor: 0,
-  gridAlignPlan: null, // last auto-align proposal {action, reason, halve, ...}
-  // Marker drag on waveform: { kind, point, originPos, previewPos, pointerId, moved }
-  loopDrag: null,
-  placeCueMode: false,
-  placeCuePreview: null, // seconds while hovering in place mode
-  placeCueInFlight: false,
-  placeLoopMode: false,
-  placeLoopPreview: null,
-  placeLoopInFlight: false,
-  targetBpm: 75,
-  playbackRate: 1,
-  zoukSpeedOn: false,
-  halfBpm: false, // VDJ double-time fix: treat source BPM as half (140 → 70)
-  loopPlaybackOn: false, // re-enter VDJ loop regions to audition them
-  activeLoopKey: null, // cueKey of loop currently being auditioned
-  loopRaf: null,
-  cueListFilter: "all", // all | cues | loops
-  notesPath: null, // path notes textarea is bound to
-  notesSaveTimer: null,
-  notesSaveGen: 0, // ignore stale save responses
-  notesDirty: false,
-  // path -> { id, name, message, status, writeScope, pollTimer }
-  retryJobs: {},
-  batchId: null,
-  batchPollTimer: null,
-  gridPreflight: null, // deep preflight for current track
-  /** path -> true when user confirmed VDJ grid after weak-onset block */
-  gridManualConfirmed: {},
-  trackGen: 0, // bumped on each selection to ignore stale async results
-  tracksLoadGen: 0, // bumped on each list load / mode switch to drop stale /api/tracks responses
-  quietSession: false, // ?quiet=1 / ?mute=1 / webdriver — never start audible playback
-  allowAutoplay: false, // only continue playback after the user hits Play
-  waveformDebounce: null,
-  lastDrawMs: 0,
-  playheadRaf: null,
-  waveSeekTime: null,
-  trackMeta: null, // { bitrate_kbps, codec, sample_rate, ... } for current path
-  metaAbort: null,
-  sortInFlight: false,
-  promoteInFlight: false,
-  notesWarnedVdj: false,
-  batchPollInFlight: false,
-  gridFixPollTimer: null,
-  gridFixPollInFlight: false,
-  autocueJobChip: null, // { message, kind }
-};
+/* Domain homes (not this file): state.js, transport.js, waveform.js,
+   practice.js, assemble.js, placements.js, status_handoff.js */
+const MusicSorterState =
+  (typeof globalThis !== "undefined" && globalThis.MusicSorterState) ||
+  (typeof window !== "undefined" && window.MusicSorterState);
 
-const WAVE_PAD_X = 8;
-const WAVE_ZOOM_MIN = 1;
-const WAVE_ZOOM_MAX = 48;
+const MusicSorterTransport =
+  (typeof globalThis !== "undefined" && globalThis.MusicSorterTransport) ||
+  (typeof window !== "undefined" && window.MusicSorterTransport);
+
+const MusicSorterWaveform =
+  (typeof globalThis !== "undefined" && globalThis.MusicSorterWaveform) ||
+  (typeof window !== "undefined" && window.MusicSorterWaveform);
+
+const MusicSorterPractice =
+  (typeof globalThis !== "undefined" && globalThis.MusicSorterPractice) ||
+  (typeof window !== "undefined" && window.MusicSorterPractice);
+
+const MusicSorterAssemble =
+  (typeof globalThis !== "undefined" && globalThis.MusicSorterAssemble) ||
+  (typeof window !== "undefined" && window.MusicSorterAssemble);
+
+const state = MusicSorterState.state;
+
+const WAVE_PAD_X = MusicSorterWaveform.WAVE_PAD_X;
+const WAVE_ZOOM_MIN = MusicSorterWaveform.WAVE_ZOOM_MIN;
+const WAVE_ZOOM_MAX = MusicSorterWaveform.WAVE_ZOOM_MAX;
 
 const CUE_COLORS = {
   blue: "#3b82f6",
@@ -124,7 +51,7 @@ function sanitizeColorName(name) {
 }
 
 function stillOnTrack(path, gen) {
-  return Boolean(path) && currentTrack()?.path === path && state.trackGen === gen;
+  return MusicSorterState.stillOnTrack(path, gen);
 }
 
 const CUE_COLORS_RGB = {
@@ -152,51 +79,205 @@ function accentRgba(alpha) {
 
 /** VDJ loop Size is in beats → seconds via track BPM. */
 function loopDurationSeconds(point, bpm) {
-  const beats = Number(point?.size);
-  if (!Number.isFinite(beats) || beats <= 0) return 0;
-  if (bpm && bpm > 0) return (beats / bpm) * 60;
-  // Fallback: assume 120 BPM if VDJ BPM missing
-  return (beats / 120) * 60;
+  return MusicSorterTransport.loopDurationSeconds(point, bpm);
 }
 
 function isReviewMode() {
-  return state.mode === "add_cues";
+  return MusicSorterState.isReviewMode();
 }
 
 function isRecsMode() {
-  return state.mode === "recs";
+  return MusicSorterState.isRecsMode();
 }
 
 function isAssembleMode() {
-  return state.mode === "assemble";
+  return MusicSorterState.isAssembleMode();
 }
 
 function isPracticeMode() {
-  return state.mode === "practice";
+  return MusicSorterState.isPracticeMode();
+}
+
+function isBestSetMode() {
+  return typeof MusicSorterState.isBestSetMode === "function"
+    ? MusicSorterState.isBestSetMode()
+    : state.mode === "best_set";
+}
+
+function isSetOverviewMode() {
+  return typeof MusicSorterState.isSetOverviewMode === "function"
+    ? MusicSorterState.isSetOverviewMode()
+    : state.mode === "set_overview";
+}
+
+function setTrackDir(track) {
+  const rel = String(track?.relative_path || track?.group || "").replace(/\\/g, "/");
+  return rel.split("/").filter(Boolean)[0] || "";
+}
+
+function trackInMustPlayFolder(track) {
+  const rel = String((track && (track.relative_path || track.path)) || "").replace(/\\/g, "/");
+  return /(^|\/)Must Play(\/|$)/i.test(rel);
+}
+
+function isPajamathonSetDir(name) {
+  return /^pajamathon/i.test(String(name || ""));
+}
+
+function trackMatchesSetDir(track) {
+  const filter = state.setDirFilter || "pajamathon";
+  if (filter === "all") return true;
+  const dir = setTrackDir(track);
+  if (filter === "pajamathon") return isPajamathonSetDir(dir);
+  return dir === filter;
+}
+
+function uniqueSetDirs(tracks) {
+  const seen = [];
+  for (const tr of tracks || []) {
+    const dir = setTrackDir(tr);
+    if (/^must play$/i.test(dir)) continue;
+    if (dir && !seen.includes(dir)) seen.push(dir);
+  }
+  return seen.sort((a, b) => {
+    const ap = isPajamathonSetDir(a) ? 0 : 1;
+    const bp = isPajamathonSetDir(b) ? 0 : 1;
+    return ap - bp || a.localeCompare(b);
+  });
+}
+
+function renderSetDirFilter() {
+  const root = $("setDirFilter");
+  if (!root) return;
+  const current = state.setDirFilter || "pajamathon";
+  const extras = uniqueSetDirs(state.tracks).filter((d) => !isPajamathonSetDir(d));
+  const chips = [
+    ["pajamathon", "Pajamathon"],
+    ...extras.map((d) => [d, d]),
+    ["all", "All sets"],
+  ];
+  root.innerHTML = chips
+    .map(
+      ([value, label]) =>
+        `<button type="button" data-set-dir="${escapeHtml(value)}" class="${
+          value === current ? "active" : ""
+        }">${escapeHtml(label)}</button>`
+    )
+    .join("");
+  root.querySelectorAll("[data-set-dir]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.setDirFilter = btn.dataset.setDir || "pajamathon";
+      renderSetDirFilter();
+      const indexes = filteredTrackIndexes();
+      if (indexes.length && !indexes.includes(state.index)) {
+        state.index = indexes[0];
+        renderPlayer();
+      }
+      renderTrackList();
+      updatePipelineStrip();
+      renderSetOverviewRail();
+    });
+  });
+}
+
+function selectedQueueTrack() {
+  const cur = currentTrack();
+  if (cur) return cur;
+  const indexes =
+    typeof filteredTrackIndexes === "function" ? filteredTrackIndexes() : [];
+  if (indexes.length) return state.tracks[indexes[0]] || null;
+  return (state.tracks && state.tracks[0]) || null;
+}
+
+function mountSharedSortRail() {
+  const rail = $("sharedSortRail");
+  const home = $("sharedSortRailHome");
+  const mount = $("setOverviewSortMount");
+  if (!rail) return;
+  if (isSetOverviewMode() && mount) mount.appendChild(rail);
+  else if (home && rail.parentElement !== home) home.appendChild(rail);
+}
+
+function renderSetOverviewRail() {
+  const box = $("setOverviewMatch");
+  const btn = $("setOverviewCopyBtn");
+  const sendBtn = $("setOverviewSendBackBtn");
+  const removeBtn = $("setOverviewRemoveBtn");
+  const approveBtn = $("setOverviewApproveBtn");
+  if (!box || !btn) return;
+  const track = selectedQueueTrack();
+  if (!track) {
+    box.innerHTML = `<div class="subtitle">No set tracks in this crate</div>`;
+    btn.disabled = true;
+    btn.textContent = "Copy cues";
+    if (sendBtn) sendBtn.disabled = true;
+    if (removeBtn) removeBtn.disabled = true;
+    if (approveBtn) {
+      approveBtn.disabled = true;
+      approveBtn.textContent = "Kirill approved";
+      approveBtn.classList.remove("is-approved");
+    }
+    const mustNone = $("setOverviewMustPlayBtn");
+    if (mustNone) {
+      mustNone.disabled = true;
+      mustNone.classList.remove("is-approved");
+    }
+    return;
+  }
+  const sib = cuedSiblingHit(track);
+  const same = Boolean(sib) && trackMatchesWrittenCopy(track, sib);
+  const badge = writtenCopyBadge(track) || (same
+    ? `<span class="autocue-flag same">same</span>`
+    : `<span class="autocue-flag different">different</span>`);
+  const sibName = sib ? escapeHtml(sib.relative_path || sib.path || "sibling") : "no cued sibling";
+  const paj = isPajamathonSetQueueTrack(track);
+  const approved = trackIsKirillApproved(track);
+  const mustPlay = trackIsMustPlay(track);
+  box.innerHTML = `
+    <div class="readiness-summary">${escapeHtml(trackDisplayTitle(track))}</div>
+    <div class="meta-row">${badge}${
+      approved ? ` <span class="badge ok">Kirill approved</span>` : ""
+    }${
+      mustPlay ? ` <span class="badge ok set-ov-must-play">Must Play</span>` : ""
+    }</div>
+    <div class="subtitle">${sib ? `Sibling · ${sibName}` : "No cued sibling to copy from"}</div>
+  `;
+  btn.disabled = !(sib && !same);
+  btn.textContent = same ? "Same as copy" : sib ? "Copy cues" : "No sibling";
+  if (approveBtn) {
+    approveBtn.disabled = !track.is_cued;
+    approveBtn.textContent = "Kirill approved";
+    approveBtn.classList.toggle("is-approved", approved);
+    approveBtn.setAttribute("aria-pressed", approved ? "true" : "false");
+    approveBtn.title = approved
+      ? "Approved — stays on this track"
+      : "Stamp these cues. Stays on this row.";
+  }
+  if (sendBtn) {
+    sendBtn.disabled = false;
+    sendBtn.title = "Move this set copy to Add Cues / Pajamathon. Zouk / Cues Sorted stay.";
+  }
+  if (removeBtn) {
+    removeBtn.disabled = false;
+    removeBtn.title = "Delete this Sets/Pajamathon copy only. Zouk / Cues Sorted / Add Cues stay.";
+  }
+  const mustBtn = $("setOverviewMustPlayBtn");
+  if (mustBtn) {
+    mustBtn.disabled = false;
+    mustBtn.classList.toggle("is-approved", mustPlay);
+    mustBtn.setAttribute("aria-pressed", mustPlay ? "true" : "false");
+    mustBtn.title = mustPlay
+      ? "Must Play — stays on this track"
+      : "Stamp Must Play and copy into Sets/Pajamathon/Must Play.";
+  }
 }
 
 function wantsQuietSession() {
-  try {
-    const params = new URLSearchParams(window.location.search);
-    if (params.has("quiet") || params.has("mute")) {
-      const flag = params.get("quiet") || params.get("mute");
-      if (!flag || flag === "1" || flag === "true" || flag === "yes") return true;
-    }
-  } catch {
-    /* ignore */
-  }
-  try {
-    if (navigator.webdriver) return true;
-  } catch {
-    /* ignore */
-  }
-  return false;
+  return MusicSorterTransport.wantsQuietSession(window);
 }
 
 function shouldAutoplayOnSelect() {
-  if (state.quietSession) return false;
-  if (isPracticeMode()) return false;
-  return Boolean(state.allowAutoplay);
+  return MusicSorterTransport.shouldAutoplayOnSelect(state, isPracticeMode());
 }
 
 function playAudio(audio) {
@@ -281,10 +362,7 @@ function disableQuietSession() {
 }
 
 function formatClock(sec) {
-  const s = Math.max(0, Number(sec) || 0);
-  const m = Math.floor(s / 60);
-  const r = Math.floor(s % 60);
-  return `${m}:${String(r).padStart(2, "0")}`;
+  return MusicSorterTransport.formatClock(sec);
 }
 
 function setPracticeWaveStatus(text, kind = "") {
@@ -297,25 +375,16 @@ function setPracticeWaveStatus(text, kind = "") {
 }
 
 function practiceTransitions() {
-  return state.practiceDetail?.transitions || [];
+  return MusicSorterPractice.practiceTransitions(state);
 }
 
 function practiceDuration(track, audio) {
-  // Prefer mix metadata (available before <audio> finishes loading).
-  const fromDetail = Number(state.practiceDetail?.duration_sec) || 0;
-  if (fromDetail > 0) return fromDetail;
-  const fromMix = Number(track?.duration) || 0;
-  if (fromMix > 0) return fromMix;
-  const fromWave = Number(state.waveform?.duration) || 0;
-  if (fromWave > 0) return fromWave;
-  const fromAudio = Number(audio?.duration);
-  if (Number.isFinite(fromAudio) && fromAudio > 0) return fromAudio;
-  return trackDuration(track, audio) || 0;
+  return MusicSorterPractice.practiceDuration(track, audio, state, trackDuration);
 }
 
 /** Clamp helper for practice map layout math. */
 function practiceClamp(n, lo, hi) {
-  return Math.max(lo, Math.min(hi, n));
+  return MusicSorterPractice.practiceClamp(n, lo, hi);
 }
 
 /**
@@ -324,78 +393,20 @@ function practiceClamp(n, lo, hi) {
  * Returns null when tracks are missing (caller falls back to pure time mapping).
  */
 function practiceSongSlots(duration) {
-  const raw = state.practiceDetail?.tracks || [];
-  if (!raw.length || !(duration > 0)) return null;
-  const tracks = raw
-    .slice()
-    .sort((a, b) => (Number(a.pos_sec) || 0) - (Number(b.pos_sec) || 0));
-  const n = tracks.length;
-  return tracks.map((t, i) => {
-    let t0 = Number(t.pos_sec) || 0;
-    let t1 = i + 1 < n ? Number(tracks[i + 1].pos_sec) || duration : duration;
-    if (i === 0) t0 = 0;
-    if (i === n - 1) t1 = duration;
-    if (!(t1 > t0)) t1 = t0 + 1e-3;
-    const name = String(t.name || "").trim();
-    return {
-      index: i,
-      name,
-      label: name ? name.slice(0, 18) : String(i + 1),
-      t0,
-      t1,
-    };
-  });
+  return MusicSorterPractice.practiceSongSlots(duration, state.practiceDetail);
 }
 
 /** Viewport + scrollable content width; px/song clamped so few songs fill, many scroll. */
 function practiceMapLayout(wrap, duration) {
-  const viewportW = Math.max(
-    1,
-    wrap?.clientWidth || wrap?.parentElement?.clientWidth || 600
-  );
-  const slots = practiceSongSlots(duration);
-  const trackCount = slots?.length || 0;
-  let contentWidth = viewportW;
-  let pxPerSong = 0;
-  if (trackCount > 0) {
-    pxPerSong = practiceClamp(viewportW / trackCount, 120, 220);
-    contentWidth = Math.max(viewportW, Math.round(trackCount * pxPerSong));
-  }
-  return { viewportW, contentWidth, slots, padX: 10, pxPerSong, trackCount };
+  return MusicSorterPractice.practiceMapLayout(wrap, duration, state.practiceDetail);
 }
 
 function practiceTimeToX(t, slots, contentW, duration, padX = 10) {
-  const plotW = Math.max(1, contentW - padX * 2);
-  const time = Number(t) || 0;
-  if (!slots?.length || !(duration > 0)) {
-    return padX + practiceClamp(time / Math.max(duration, 1e-6), 0, 1) * plotW;
-  }
-  const n = slots.length;
-  const slotW = plotW / n;
-  if (time <= slots[0].t0) return padX;
-  for (let i = 0; i < n; i++) {
-    const s = slots[i];
-    const span = Math.max(1e-6, s.t1 - s.t0);
-    if (time < s.t1 || i === n - 1) {
-      const frac = practiceClamp((time - s.t0) / span, 0, 1);
-      return padX + i * slotW + frac * slotW;
-    }
-  }
-  return padX + plotW;
+  return MusicSorterPractice.practiceTimeToX(t, slots, contentW, duration, padX);
 }
 
 function practiceXToTime(x, slots, contentW, duration, padX = 10) {
-  const plotW = Math.max(1, contentW - padX * 2);
-  const local = practiceClamp(x - padX, 0, plotW);
-  if (!slots?.length || !(duration > 0)) {
-    return (local / plotW) * duration;
-  }
-  const n = slots.length;
-  const slotW = plotW / n;
-  const i = Math.min(n - 1, Math.max(0, Math.floor(local / Math.max(slotW, 1e-6))));
-  const frac = practiceClamp((local - i * slotW) / Math.max(slotW, 1e-6), 0, 1);
-  const s = slots[i];
-  return s.t0 + frac * (s.t1 - s.t0);
+  return MusicSorterPractice.practiceXToTime(x, slots, contentW, duration, padX);
 }
 
 let _practiceWaveScrollMix = null;
@@ -727,8 +738,10 @@ function seekPracticeTransition(atSec, { preRoll = 20, play = true, index = null
     setStatus("No mix loaded — click a practice mix first.", "error");
     return;
   }
-  // Jump the bottom description list to this transition as well.
-  focusPracticeTransitionCard(atSec, index);
+  // Mix-card focus lives on Practice. Best for set keeps its own list still.
+  if (!isBestSetMode()) {
+    focusPracticeTransitionCard(atSec, index);
+  }
   const target = Math.max(0, Number(atSec) - preRoll);
   const apply = () => {
     try {
@@ -747,14 +760,17 @@ function seekPracticeTransition(atSec, { preRoll = 20, play = true, index = null
         });
       }
     }
-    drawPracticeWaveform();
-    // Re-focus after list may have re-rendered with waveform redraw side effects.
-    focusPracticeTransitionCard(atSec, index);
+    if (isPracticeMode()) drawPracticeWaveform();
+    if (!isBestSetMode()) {
+      focusPracticeTransitionCard(atSec, index);
+    }
     const silent = isPracticeMixNearlySilent();
     setStatus(
       silent
         ? `Seek ${formatClock(atSec)} (−${preRoll}s) — recording is nearly silent`
-        : `Playing transition at ${formatClock(atSec)} (−${preRoll}s)`
+        : play
+          ? `Playing transition at ${formatClock(atSec)} (−${preRoll}s)`
+          : `Stopped at ${formatClock(atSec)} (−${preRoll}s)`
     );
   };
   // Wait for media if needed (common right after switching mixes)
@@ -871,6 +887,8 @@ const $ = (id) => document.getElementById(id);
 
 const ACCENT_THEME_KEY = "music-sorter-accent-theme";
 const ACCENT_THEMES = new Set(["lime", "cyan", "violet", "coral"]);
+const COLOR_SCHEME_KEY = "music-sorter-color-scheme";
+const COLOR_SCHEMES = new Set(["dark", "light"]);
 
 function storedAccentTheme() {
   try {
@@ -903,7 +921,58 @@ function applyAccentTheme(theme, { persist = true } = {}) {
   requestAnimationFrame(() => drawWaveform());
 }
 
-function showConfirmDialog({
+function storedColorScheme() {
+  try {
+    const stored = window.localStorage.getItem(COLOR_SCHEME_KEY);
+    return COLOR_SCHEMES.has(stored) ? stored : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
+function applyColorScheme(scheme, { persist = true } = {}) {
+  const nextScheme = COLOR_SCHEMES.has(scheme) ? scheme : "dark";
+  state.colorScheme = nextScheme;
+  document.documentElement.dataset.colorScheme = nextScheme;
+  document.documentElement.style.colorScheme = nextScheme;
+
+  document.querySelectorAll("#schemePicker [data-color-scheme]").forEach((button) => {
+    const isActive = button.dataset.colorScheme === nextScheme;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
+  });
+
+  if (persist) {
+    try {
+      window.localStorage.setItem(COLOR_SCHEME_KEY, nextScheme);
+    } catch {
+      /* Scheme still applies when storage is unavailable. */
+    }
+  }
+
+  requestAnimationFrame(() => drawWaveform());
+}
+
+let confirmTail = Promise.resolve();
+
+function showConfirmDialog(opts) {
+  const shown = confirmTail.then(() => showConfirmDialogUnlocked(opts));
+  confirmTail = shown.then(
+    () => undefined,
+    () => undefined
+  );
+  return shown;
+}
+
+function waitForConfirmDialogIdle() {
+  const dialog = $("confirmDialog");
+  if (!dialog || !dialog.open) return Promise.resolve();
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => resolve(), { once: true });
+  });
+}
+
+async function showConfirmDialogUnlocked({
   title,
   track = "",
   message,
@@ -916,13 +985,11 @@ function showConfirmDialog({
   if (!dialog || typeof dialog.showModal !== "function") {
     if (cancelOnly) {
       window.alert([title, track, message, note].filter(Boolean).join("\n\n"));
-      return Promise.resolve(false);
+      return false;
     }
-    return Promise.resolve(
-      window.confirm([title, track, message, note].filter(Boolean).join("\n\n"))
-    );
+    return window.confirm([title, track, message, note].filter(Boolean).join("\n\n"));
   }
-  if (dialog.open) return Promise.resolve(false);
+  if (dialog.open) await waitForConfirmDialogIdle();
 
   $("confirmTitle").textContent = title;
   $("confirmTrack").textContent = track;
@@ -962,36 +1029,23 @@ function resetWorkspaceScroll() {
 }
 
 function fmtBytes(n) {
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return MusicSorterTransport.fmtBytes(n);
 }
 
 function fmtTime(seconds) {
-  const s = Math.max(0, Number(seconds) || 0);
-  const m = Math.floor(s / 60);
-  const rem = s - m * 60;
-  const whole = Math.floor(rem);
-  const frac = Math.round((rem - whole) * 10);
-  return `${m}:${String(whole).padStart(2, "0")}.${frac}`;
+  return MusicSorterTransport.fmtTime(seconds);
 }
 
 function fmtTransportTime(seconds) {
-  const s = Math.max(0, Math.floor(Number(seconds) || 0));
-  const m = Math.floor(s / 60);
-  return `${m}:${String(s % 60).padStart(2, "0")}`;
+  return MusicSorterTransport.fmtTransportTime(seconds);
 }
 
 function trackDisplayTitle(track) {
-  return (
-    String(track?.cues?.title || "").trim() ||
-    String(track?.name || "Untitled track")
-      .replace(/\.[^.]+$/, "")
-      .replace(/^\d+[\s._-]+/, "")
-  );
+  return MusicSorterTransport.trackDisplayTitle(track);
 }
 
 function trackDisplayArtist(track) {
-  return String(track?.cues?.author || "").trim();
+  return MusicSorterTransport.trackDisplayArtist(track);
 }
 
 function renderNowPlayingTitle(track) {
@@ -1050,6 +1104,15 @@ function updateTransportUi() {
     playPause.disabled = !audio.src;
     playPause.setAttribute("aria-label", isPlaying ? "Pause" : "Play");
   }
+  const bestPause = $("bestSetPauseBtn");
+  if (bestPause) {
+    const isPlaying = Boolean(audio.src && !audio.paused);
+    bestPause.classList.toggle("is-playing", isPlaying);
+    bestPause.disabled = !audio.src;
+    bestPause.setAttribute("aria-label", isPlaying ? "Pause" : "Play");
+  }
+  const bestStop = $("bestSetStopBtn");
+  if (bestStop) bestStop.disabled = !audio.src;
 
   const indexes = filteredTrackIndexes();
   const position = indexes.indexOf(state.index);
@@ -1061,29 +1124,60 @@ function updateTransportUi() {
 }
 
 function cueKey(point) {
-  return `${point.kind}:${point.num}:${point.pos}`;
+  return MusicSorterTransport.cueKey(point);
 }
 
 function trackDuration(track, audio) {
-  const fromDb = Number(track?.cues?.song_length) || 0;
-  const fromAudio = Number(audio?.duration);
-  if (fromAudio && Number.isFinite(fromAudio) && fromAudio > 0) return fromAudio;
-  if (fromDb > 0) return fromDb;
-  return 0;
+  return MusicSorterTransport.trackDuration(track, audio);
 }
 
 function syncLoopPlayBtn() {
   const btn = $("loopPlayBtn");
   if (!btn) return;
+  if ("checked" in btn) btn.checked = Boolean(state.loopPlaybackOn);
   btn.classList.toggle("active", state.loopPlaybackOn);
   btn.setAttribute("aria-pressed", state.loopPlaybackOn ? "true" : "false");
+  const label = $("loopPlayToggleLabel");
+  if (label) label.classList.toggle("is-on", Boolean(state.loopPlaybackOn));
 }
 
-function jumpToCue(pos, point = null) {
+function wantsExactCueJump(event) {
+  const exact = Boolean(state.exactCueJump);
+  if (event && (event.altKey || event.metaKey)) return !exact;
+  return exact;
+}
+
+function syncExactCueJumpUi() {
+  const input = $("exactCueJump");
+  if (input) {
+    input.checked = Boolean(state.exactCueJump);
+    input.setAttribute("aria-checked", state.exactCueJump ? "true" : "false");
+  }
+  const label = $("prerollToggleLabel");
+  if (label) {
+    label.classList.toggle("is-exact", Boolean(state.exactCueJump));
+    label.title = state.exactCueJump
+      ? "Landing exactly on the marker. Uncheck (or hold Alt) to hear the approach."
+      : "Approach: play a bar (or ~2s) before the marker. Hold Alt to land exactly.";
+  }
+}
+
+function setExactCueJump(on) {
+  state.exactCueJump = Boolean(on);
+  syncExactCueJumpUi();
+}
+
+function jumpToCue(pos, point = null, event = null) {
   const audio = $("audio");
   if (!audio || !audio.src) return;
   state.waveViewPinned = false;
-  const t = Math.max(0, Number(pos) || 0);
+  const markerPos = Math.max(0, Number(pos) || 0);
+  const track = currentTrack();
+  const bpm = onesBpm(track) || trackBpm(track);
+  const exact = !point || wantsExactCueJump(event);
+  const t = exact
+    ? markerPos
+    : MusicSorterTransport.cuePrerollTime(markerPos, bpm);
   const seek = () => {
     try {
       audio.currentTime = t;
@@ -1099,11 +1193,17 @@ function jumpToCue(pos, point = null) {
         const prevKey = state.activeLoopKey;
         state.loopPlaybackOn = true;
         state.activeLoopKey = cueKey(point);
+        state.loopApproachUntil =
+          !exact && t < markerPos - 0.02 ? markerPos : null;
         syncLoopPlayBtn();
         const end =
-          t + loopDurationSeconds(point, trackBpm(currentTrack()));
+          markerPos + loopDurationSeconds(point, trackBpm(currentTrack()));
+        const approach =
+          !exact && t < markerPos - 0.02
+            ? ` · approach ${fmtTime(t)}`
+            : "";
         setStatus(
-          `Looping · ${point.name || "loop"} (${fmtTime(t)}–${fmtTime(end)})`
+          `Looping · ${point.name || "loop"} (${fmtTime(markerPos)}–${fmtTime(end)})${approach}`
         );
         if (!wasOn || prevKey !== state.activeLoopKey) {
           renderCues();
@@ -1114,13 +1214,18 @@ function jumpToCue(pos, point = null) {
         // Normal cue: stop wrapping so playback continues past loop ends.
         const wasLooping = state.loopPlaybackOn || state.activeLoopKey;
         state.activeLoopKey = null;
+        state.loopApproachUntil = null;
         if (state.loopPlaybackOn) {
           state.loopPlaybackOn = false;
           syncLoopPlayBtn();
           stopLoopWatch();
         }
+        const approach =
+          !exact && t < markerPos - 0.02
+            ? ` from ${fmtTime(t)}`
+            : "";
         setStatus(
-          `Jumped to ${fmtTime(t)}${point?.name ? ` · ${point.name}` : ""}`
+          `Jumped to ${fmtTime(markerPos)}${point?.name ? ` · ${point.name}` : ""}${approach}`
         );
         if (wasLooping) renderCues();
         else highlightActiveCue();
@@ -1135,6 +1240,46 @@ function jumpToCue(pos, point = null) {
 
   if (audio.readyState >= 1) seek();
   else audio.addEventListener("loadedmetadata", seek, { once: true });
+}
+
+function seekByBeat(direction, bar) {
+  const audio = $("audio");
+  if (!audio || !audio.src) return;
+  const track = currentTrack();
+  const bpm = onesBpm(track) || trackBpm(track);
+  const duration = trackDuration(track, audio) || Number(audio.duration) || 0;
+  const next = MusicSorterTransport.beatSeekTime(audio.currentTime, bpm, {
+    direction,
+    bar: Boolean(bar),
+    duration,
+  });
+  state.waveViewPinned = false;
+  try {
+    audio.currentTime = next;
+  } catch {
+    /* ignore seek race */
+  }
+  updatePlayhead();
+}
+
+function isKeyboardOverlayOpen() {
+  const overlay = $("keyboardOverlay");
+  return Boolean(overlay && !overlay.hidden);
+}
+
+function setKeyboardOverlayOpen(open) {
+  const overlay = $("keyboardOverlay");
+  if (!overlay) return;
+  overlay.hidden = !open;
+  overlay.setAttribute("aria-hidden", open ? "false" : "true");
+  document.body.classList.toggle("keyboard-overlay-open", Boolean(open));
+  const btn = $("shortcutsHelpBtn");
+  if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+function toggleKeyboardOverlay(force) {
+  const next = typeof force === "boolean" ? force : !isKeyboardOverlayOpen();
+  setKeyboardOverlayOpen(next);
 }
 
 /** Wall-clock windows for VDJ loop markers (start → end via size beats + BPM). */
@@ -1203,10 +1348,21 @@ function maybeLoopPlayback() {
     win = windows.find((w) => w.key === state.activeLoopKey) || null;
   }
 
-  // Drop active loop if user seeked well outside it.
-  if (win && (t < win.start - 0.25 || t > win.end + 0.35)) {
+  // Drop active loop if user seeked well outside it — keep it armed
+  // while a cue-review preroll is approaching the loop start.
+  const approaching =
+    win &&
+    state.loopApproachUntil != null &&
+    t < win.start &&
+    Math.abs(Number(state.loopApproachUntil) - win.start) < 0.05;
+  if (win && approaching) {
+    /* stay armed until the playhead reaches the loop */
+  } else if (win && (t < win.start - 0.25 || t > win.end + 0.35)) {
     win = null;
     state.activeLoopKey = null;
+    state.loopApproachUntil = null;
+  } else if (win && t >= win.start - 0.02) {
+    state.loopApproachUntil = null;
   }
 
   // Auto-engage a loop the playhead is currently inside.
@@ -1474,6 +1630,70 @@ function isAutocueJobActive(job) {
   return Boolean(job && AUTOCUE_ACTIVE_STATUSES.has(job.status));
 }
 
+const AUTOCUE_SESSION_KEY = "ms.autocue.activeJobs";
+
+function rememberActiveAutocueJobs() {
+  try {
+    const jobs = activeRetryJobs()
+      .filter((j) => j.id && j.path)
+      .map((j) => ({
+        id: j.id,
+        path: j.path,
+        name: j.name,
+        status: j.status,
+        message: j.message,
+        writeScope: j.writeScope,
+      }));
+    sessionStorage.setItem(AUTOCUE_SESSION_KEY, JSON.stringify(jobs));
+  } catch {
+    /* private mode */
+  }
+}
+
+function readRememberedAutocueJobs() {
+  try {
+    const raw = sessionStorage.getItem(AUTOCUE_SESSION_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function attachAutocueJob(job, { startPoll = true } = {}) {
+  if (!job?.path) return false;
+  const pathKey = job.path;
+  const existing = state.retryJobs[pathKey];
+  if (existing?.pollTimer && existing.id === job.id) {
+    existing.status = job.status || existing.status;
+    existing.message = job.message || existing.message;
+    return false;
+  }
+  if (existing?.pollTimer) stopRetryPollForPath(pathKey);
+  state.retryJobs[pathKey] = {
+    id: job.id,
+    path: pathKey,
+    name: job.name || existing?.name || pathKey,
+    message: job.message || "Running AutoCue…",
+    status: job.status || "running",
+    writeScope: job.write_scope || job.writeScope || existing?.writeScope,
+    pollTimer: null,
+  };
+  if (startPoll && job.id && isAutocueJobActive(job)) {
+    startRetryPoll(pathKey, job.id);
+  }
+  return true;
+}
+
+function restoreRememberedAutocueJobs() {
+  let n = 0;
+  for (const job of readRememberedAutocueJobs()) {
+    if (!isAutocueJobActive(job) || !job.path) continue;
+    if (attachAutocueJob(job, { startPoll: Boolean(job.id) })) n += 1;
+  }
+  return n;
+}
+
 function activeRetryJobs() {
   return Object.values(state.retryJobs || {}).filter(isAutocueJobActive);
 }
@@ -1501,7 +1721,8 @@ function cueingTrackIndexes() {
 
 function cueingListSignature() {
   const jobs = activeRetryJobs()
-    .map((j) => `${j.path}:${j.status}`)
+    .map((j) => j.path)
+    .filter(Boolean)
     .sort();
   const batch = (state.batchCueingPaths || []).slice().sort();
   return `${jobs.join("|")}::${batch.join("|")}`;
@@ -1524,9 +1745,10 @@ function updateCueingFilterUi() {
 
 /** True when the current track already has an AutoCue job in flight. */
 function isAutocueBusyForCurrentTrack() {
-  if (state.batchPollTimer) return true;
   const current = currentTrack()?.path;
-  return isAutocueJobActive(retryJobForPath(current));
+  if (!current) return false;
+  if (isAutocueJobActive(retryJobForPath(current))) return true;
+  return (state.batchCueingPaths || []).includes(current);
 }
 
 function startRetryPoll(pathKey, jobId) {
@@ -1548,6 +1770,7 @@ function startRetryPoll(pathKey, jobId) {
       if (j.status === "running" || j.status === "queued") {
         live.status = j.status;
         live.message = j.message || "Running AutoCue…";
+        rememberActiveAutocueJobs();
         syncAutocueUi();
         return;
       }
@@ -1555,6 +1778,7 @@ function startRetryPoll(pathKey, jobId) {
       stopRetryPollForPath(pathKey);
       const finishedName = live.name || j.name;
       delete state.retryJobs[pathKey];
+      rememberActiveAutocueJobs();
       syncAutocueUi();
 
       if (j.status === "ok") {
@@ -1582,8 +1806,14 @@ function startRetryPoll(pathKey, jobId) {
         );
       }
     } catch (err) {
+      const gone = /not found|404/i.test(String(err.message || ""));
+      if (!gone) {
+        // Keep Cueing across refresh / blip. Do not drop the job.
+        return;
+      }
       stopRetryPollForPath(pathKey);
       delete state.retryJobs[pathKey];
+      rememberActiveAutocueJobs();
       syncAutocueUi();
       if (currentTrack()?.path === pathKey) {
         setRetryStatus(err.message, "error");
@@ -1597,25 +1827,28 @@ function startRetryPoll(pathKey, jobId) {
 }
 
 async function hydrateAutocueJobs() {
-  const data = await api("/api/retry-cues", { timeoutMs: 5000 }).catch(() => null);
+  restoreRememberedAutocueJobs();
+  const remembered = readRememberedAutocueJobs();
+  const data = await api("/api/retry-cues", { timeoutMs: 8000 }).catch(() => null);
   const jobs = data?.jobs || [];
+  const byId = new Map(jobs.filter((j) => j && j.id).map((j) => [j.id, j]));
   let attached = 0;
   for (const job of jobs) {
     if (!isAutocueJobActive(job) || !job.path) continue;
-    const existing = state.retryJobs[job.path];
-    if (existing?.pollTimer && existing.id === job.id) continue;
-    if (existing?.pollTimer) stopRetryPollForPath(job.path);
-    state.retryJobs[job.path] = {
-      id: job.id,
-      path: job.path,
-      name: job.name || existing?.name || job.path,
-      message: job.message || "Running AutoCue…",
-      status: job.status || "running",
-      writeScope: job.write_scope || existing?.writeScope,
-      pollTimer: null,
-    };
-    startRetryPoll(job.path, job.id);
-    attached += 1;
+    if (attachAutocueJob(job)) attached += 1;
+  }
+  for (const mem of remembered) {
+    if (!mem.id || byId.has(mem.id)) continue;
+    const res = await api(`/api/retry-cues/${mem.id}`, { timeoutMs: 5000 }).catch(
+      () => null
+    );
+    const job = res?.job;
+    if (job && isAutocueJobActive(job)) {
+      if (attachAutocueJob(job)) attached += 1;
+    } else if (job && !isAutocueJobActive(job)) {
+      stopRetryPollForPath(mem.path);
+      delete state.retryJobs[mem.path];
+    }
   }
   const batchPaths = [];
   for (const batch of data?.batches || []) {
@@ -1625,7 +1858,9 @@ async function hydrateAutocueJobs() {
     }
   }
   state.batchCueingPaths = batchPaths;
-  if (attached || batchPaths.length) syncAutocueUi();
+  rememberActiveAutocueJobs();
+  syncAutocueUi();
+  return attached;
 }
 
 function stopRetryPollForPath(path) {
@@ -1732,15 +1967,20 @@ function syncAutocueUi() {
   if (busyHere && here?.message) {
     setRetryStatus(here.message, "running");
   } else if (others.length) {
-    const names = others
-      .slice(0, 2)
-      .map((j) => j.name || "track")
-      .join(", ");
-    const more = others.length > 2 ? ` +${others.length - 2} more` : "";
-    setRetryStatus(
-      `${others.length} AutoCue job${others.length === 1 ? "" : "s"} on other tracks: ${names}${more}`,
-      "running"
-    );
+    const strip = $("retryStatus");
+    const kind = strip?.className || "";
+    const keepFinal = /\b(ok|error)\b/.test(kind);
+    if (!keepFinal) {
+      const names = others
+        .slice(0, 2)
+        .map((j) => j.name || "track")
+        .join(", ");
+      const more = others.length > 2 ? ` +${others.length - 2} more` : "";
+      setRetryStatus(
+        `${others.length} AutoCue job${others.length === 1 ? "" : "s"} on other tracks: ${names}${more}`,
+        "running"
+      );
+    }
   }
   // If nothing running, leave last success/error message alone.
   updateCueingFilterUi();
@@ -1793,7 +2033,10 @@ function writeScopeMessage(scope, first) {
 }
 
 async function retryCuesForCurrentTrack(writeScope = "all") {
-  const track = currentTrack();
+  return retryCuesForTrack(currentTrack(), writeScope);
+}
+
+async function retryCuesForTrack(track, writeScope = "all", opts = {}) {
   if (!track) return;
   if (!isReviewMode()) {
     setStatus("Switch to Add Cues to run AutoCue.", "error");
@@ -1814,6 +2057,17 @@ async function retryCuesForCurrentTrack(writeScope = "all") {
   const scopeWord =
     scope === "cues" ? "cues only" : scope === "loops" ? "loops only" : "cues + loops";
   const actionWord = first ? `Add ${scopeWord}` : `Retry ${scopeWord}`;
+  const othersSubmitted = activeRetryJobs().some(
+    (j) =>
+      j.path &&
+      j.path !== pathKey &&
+      (j.status === "queued" || j.status === "running")
+  );
+  // Skip extra confirms only after another job is actually accepted.
+  const queueAlongside = othersSubmitted;
+  const applyIfCurrent = (fn) => {
+    if (currentTrack()?.path === pathKey) fn();
+  };
 
   // Mark starting *before* preflight so side buttons show loading immediately.
   stopRetryPollForPath(pathKey);
@@ -1832,9 +2086,11 @@ async function retryCuesForCurrentTrack(writeScope = "all") {
   let gridConfirmed = Boolean(
     state.gridManualConfirmed && state.gridManualConfirmed[pathKey]
   );
-  setRetryStatus(
-    gridConfirmed ? "Using confirmed beatgrid…" : "Checking beatgrid…",
-    "running"
+  applyIfCurrent(() =>
+    setRetryStatus(
+      gridConfirmed ? "Using confirmed beatgrid…" : "Checking beatgrid…",
+      "running"
+    )
   );
   let preflight = null;
   try {
@@ -1858,12 +2114,17 @@ async function retryCuesForCurrentTrack(writeScope = "all") {
             : "Grid manually confirmed",
       };
     }
-    state.gridPreflight = preflight;
-    renderGridPreflightCard(track);
+    applyIfCurrent(() => {
+      state.gridPreflight = preflight;
+      renderGridPreflightCard(track);
+    });
   } catch (err) {
     delete state.retryJobs[pathKey];
     syncAutocueUi();
-    setRetryStatus(`Grid check failed: ${err.message}`, "error");
+    applyIfCurrent(() =>
+      setRetryStatus(`Grid check failed: ${err.message}`, "error")
+    );
+    setStatus(`Grid check failed (${track.name}): ${err.message}`, "error");
     return;
   }
 
@@ -1878,7 +2139,10 @@ async function retryCuesForCurrentTrack(writeScope = "all") {
         /onset energy is too weak/i.test(reasons));
 
     if (confirmable) {
-      setRetryStatus(preflight.label || "Grid not auto-verified", "error");
+      applyIfCurrent(() =>
+        setRetryStatus(preflight.label || "Grid not auto-verified", "error")
+      );
+      await waitForConfirmDialogIdle();
       const proceed = await showConfirmDialog({
         title: "Beatgrid needs attention",
         track: trackDisplayTitle(track),
@@ -1892,7 +2156,7 @@ async function retryCuesForCurrentTrack(writeScope = "all") {
       if (!proceed) {
         delete state.retryJobs[pathKey];
         syncAutocueUi();
-        setRetryStatus("", "");
+        applyIfCurrent(() => setRetryStatus("", ""));
         return;
       }
       state.gridManualConfirmed[pathKey] = true;
@@ -1909,13 +2173,18 @@ async function retryCuesForCurrentTrack(writeScope = "all") {
           "User confirmed the VirtualDJ beatgrid after weak onset verification.",
         ],
       };
-      state.gridPreflight = preflight;
-      renderGridPreflightCard(track);
+      applyIfCurrent(() => {
+        state.gridPreflight = preflight;
+        renderGridPreflightCard(track);
+      });
     } else {
       delete state.retryJobs[pathKey];
       syncAutocueUi();
-      setRetryStatus(preflight.label || "Blocked — fix grid in VDJ", "error");
-      setStatus(`Cannot AutoCue: ${preflight.label}`, "error");
+      applyIfCurrent(() =>
+        setRetryStatus(preflight.label || "Blocked — fix grid in VDJ", "error")
+      );
+      setStatus(`Cannot AutoCue ${track.name}: ${preflight.label}`, "error");
+      await waitForConfirmDialogIdle();
       await showConfirmDialog({
         title: "Beatgrid needs attention",
         track: trackDisplayTitle(track),
@@ -1932,7 +2201,9 @@ async function retryCuesForCurrentTrack(writeScope = "all") {
   // Keep buttons locked while the confirm dialog is open.
   const liveStart = state.retryJobs[pathKey];
   if (liveStart) {
-    liveStart.message = `Waiting for confirm (${scopeWord})…`;
+    liveStart.message = queueAlongside
+      ? `Queuing AutoCue (${scopeWord})…`
+      : `Waiting for confirm (${scopeWord})…`;
     liveStart.status = "starting";
   }
   syncAutocueUi();
@@ -1940,36 +2211,46 @@ async function retryCuesForCurrentTrack(writeScope = "all") {
   const gridNote = preflight?.needs_align
     ? " The beatgrid may be misaligned. Align grid first — AutoCue will not move the '1'."
     : "";
-  const ok = await showConfirmDialog({
-    title: first ? `Add ${scopeWord}?` : `Retry ${scopeWord}?`,
-    track: trackDisplayTitle(track),
-    message: writeScopeMessage(scope, first),
-    note: `Keep VirtualDJ closed while AutoCue updates its database.${gridNote}`,
-    confirmLabel: first ? "Run AutoCue" : "Run AutoCue",
-    tone: first && scope === "all" ? "accent" : "warning",
-  });
-  if (!ok) {
-    delete state.retryJobs[pathKey];
-    syncAutocueUi();
-    setRetryStatus("", "");
-    return;
+  if (!queueAlongside) {
+    await waitForConfirmDialogIdle();
+    const ok = await showConfirmDialog({
+      title: first ? `Add ${scopeWord}?` : `Retry ${scopeWord}?`,
+      track: trackDisplayTitle(track),
+      message: writeScopeMessage(scope, first),
+      note: `Keep VirtualDJ closed while AutoCue updates its database.${gridNote}`,
+      confirmLabel: first ? "Run AutoCue" : "Run AutoCue",
+      tone: first && scope === "all" ? "accent" : "warning",
+    });
+    if (!ok) {
+      delete state.retryJobs[pathKey];
+      syncAutocueUi();
+      applyIfCurrent(() => setRetryStatus("", ""));
+      return;
+    }
   }
 
   let allowRunning = false;
   if (await isVdjRunningFresh()) {
-    allowRunning = await showConfirmDialog({
-      title: "VirtualDJ is still open",
-      track: trackDisplayTitle(track),
-      message:
-        "Cue changes may be overwritten when VirtualDJ quits. Close it before continuing whenever possible.",
-      confirmLabel: "Continue anyway",
-      tone: "warning",
-    });
-    if (!allowRunning) {
-      delete state.retryJobs[pathKey];
-      syncAutocueUi();
-      setStatus(`Close VirtualDJ, then ${actionWord.toLowerCase()}.`, "error");
-      return;
+    if (queueAlongside) {
+      // Another AutoCue job is already writing; don't block the queue on VDJ.
+      allowRunning = true;
+    } else {
+      await waitForConfirmDialogIdle();
+      allowRunning = await showConfirmDialog({
+        title: "VirtualDJ is still open",
+        track: trackDisplayTitle(track),
+        message:
+          "Cue changes may be overwritten when VirtualDJ quits. Close it before continuing whenever possible.",
+        confirmLabel: "Continue anyway",
+        tone: "warning",
+      });
+      if (!allowRunning) {
+        delete state.retryJobs[pathKey];
+        syncAutocueUi();
+        applyIfCurrent(() => setRetryStatus("", ""));
+        setStatus(`Close VirtualDJ, then ${actionWord.toLowerCase()}.`, "error");
+        return;
+      }
     }
   }
 
@@ -1983,7 +2264,11 @@ async function retryCuesForCurrentTrack(writeScope = "all") {
     pollTimer: null,
   };
   syncAutocueUi();
-  setStatus(`AutoCue (${scopeWord}): ${track.name}…`);
+  setStatus(
+    queueAlongside
+      ? `Queued AutoCue (${scopeWord}): ${track.name}`
+      : `AutoCue (${scopeWord}): ${track.name}…`
+  );
 
   try {
     const data = await api("/api/retry-cues", {
@@ -2010,8 +2295,15 @@ async function retryCuesForCurrentTrack(writeScope = "all") {
       stopRetryPollForPath(pathKey);
       delete state.retryJobs[pathKey];
       syncAutocueUi();
-      setRetryStatus(job.message || "Skipped — fix beatgrid first", "error");
-      setStatus(job.message || "AutoCue skipped", "error");
+      applyIfCurrent(() =>
+        setRetryStatus(job.message || "Skipped — fix beatgrid first", "error")
+      );
+      setStatus(
+        job.message
+          ? `${track.name}: ${job.message}`
+          : `AutoCue skipped: ${track.name}`,
+        "error"
+      );
       if (job.preflight && currentTrack()?.path === pathKey) {
         state.gridPreflight = job.preflight;
         renderGridPreflightCard(track);
@@ -2019,14 +2311,16 @@ async function retryCuesForCurrentTrack(writeScope = "all") {
       return;
     }
 
+    rememberActiveAutocueJobs();
     syncAutocueUi();
     startRetryPoll(pathKey, job.id);
   } catch (err) {
     stopRetryPollForPath(pathKey);
     delete state.retryJobs[pathKey];
+    rememberActiveAutocueJobs();
     syncAutocueUi();
-    setRetryStatus(err.message, "error");
-    setStatus(err.message, "error");
+    applyIfCurrent(() => setRetryStatus(err.message, "error"));
+    setStatus(`${track.name}: ${err.message}`, "error");
   }
 }
 
@@ -2437,18 +2731,7 @@ function renderGridPreflightCard(track) {
     <div class="grid-preflight-actions">
       ${
         g.bpm || g.grid_anchor != null
-          ? `<button type="button" class="btn ${
-              g.needs_align || g.status === "blocked" || g.status === "fixable"
-                ? "primary"
-                : "ghost"
-            }" id="alignGridFromCardBtn"
-               title="Drag the downbeat ones on the wave, then Apply to VirtualDJ">
-               Align grid
-             </button>
-             <button type="button" class="btn ghost" id="autoAlignGridFromCardBtn"
-               title="Preview a stem-based 1. Often wrong on syncopated tracks. Does not write until you Apply.">
-               Auto-align (preview)
-             </button>`
+          ? `<span class="subtitle">Grid · Align / Auto-align is in the wave toolbar.</span>`
           : ""
       }
       ${
@@ -2489,8 +2772,6 @@ function renderGridPreflightCard(track) {
   `;
 
   $("confirmGridBtn")?.addEventListener("click", () => confirmGridManually(track));
-  $("alignGridFromCardBtn")?.addEventListener("click", () => openGridAlignMode());
-  $("autoAlignGridFromCardBtn")?.addEventListener("click", () => attemptAutoGridAlign());
   $("halveBpmBtn")?.addEventListener("click", () => writeBpmFactor({ double: false }));
   $("doubleBpmBtn")?.addEventListener("click", () => writeBpmFactor({ double: true }));
   $("halfBpmPlaybackFromGridBtn")?.addEventListener("click", () => {
@@ -2805,7 +3086,7 @@ async function undoAction(actionId, name) {
       "success"
     );
     await loadTracks({ keepPath: currentTrack()?.path });
-    if (!isReviewMode()) await loadFolders();
+    await loadFolders();
     if ($("actionsLogPanel") && !$("actionsLogPanel").hidden) {
       await loadActionsLogPanel();
     }
@@ -2828,18 +3109,19 @@ function resetWaveZoom() {
 }
 
 function snapshotWaveView() {
-  state.waveViewBeforeAlign = {
-    zoom: state.waveZoom,
-    offset: state.waveOffset,
-  };
+  state.waveViewBeforeAlign = MusicSorterWaveform.snapshotWaveView(
+    state.waveZoom,
+    state.waveOffset
+  );
 }
 
 function restoreWaveView() {
   const prev = state.waveViewBeforeAlign;
   state.waveViewBeforeAlign = null;
-  if (!prev) return false;
-  state.waveZoom = clampWaveZoom(prev.zoom);
-  state.waveOffset = Number(prev.offset) || 0;
+  const next = MusicSorterWaveform.restoreWaveView(prev);
+  if (!next) return false;
+  state.waveZoom = next.zoom;
+  state.waveOffset = next.offset;
   return true;
 }
 
@@ -3009,19 +3291,12 @@ function waveformDuration(track, audio) {
 }
 
 function clampWaveZoom(zoom) {
-  return Math.min(WAVE_ZOOM_MAX, Math.max(WAVE_ZOOM_MIN, zoom));
+  return MusicSorterWaveform.clampWaveZoom(zoom);
 }
 
 /** Visible time window over the full track duration (no playhead follow). */
 function visibleWaveWindow(duration, zoom, offset) {
-  const z = clampWaveZoom(zoom || 1);
-  if (!duration || duration <= 0) {
-    return { start: 0, end: 0, span: 0, offset: 0, zoom: z };
-  }
-  const span = duration / z;
-  let start = Number(offset) || 0;
-  start = Math.max(0, Math.min(start, Math.max(0, duration - span)));
-  return { start, end: start + span, span, offset: start, zoom: z };
+  return MusicSorterWaveform.visibleWaveWindow(duration, zoom, offset);
 }
 
 /** Visible time window over the full track duration. */
@@ -3041,46 +3316,19 @@ function keepPlayheadInView(
   timeSec,
   { zoom, offset, playing, allowFollow, lead } = {}
 ) {
-  const view = visibleWaveWindow(
-    duration,
-    zoom ?? state.waveZoom,
-    offset ?? state.waveOffset
-  );
-  if (!duration || !Number.isFinite(timeSec)) return view;
-  if (!playing || allowFollow === false) return view;
-  if (timeSec >= view.start && timeSec <= view.end) return view;
-  const frac = Number.isFinite(lead) ? lead : 0.08;
-  return visibleWaveWindow(duration, view.zoom, timeSec - view.span * frac);
+  return MusicSorterWaveform.keepPlayheadInView(duration, timeSec, {
+    zoom: zoom ?? state.waveZoom,
+    offset: offset ?? state.waveOffset,
+    playing,
+    allowFollow,
+    lead,
+  });
 }
 
 function applyPlayheadFollow(duration, timeSec) {
   const audio = $("audio");
   const playing = Boolean(audio && !audio.paused && !audio.ended);
-  const view = visibleWaveWindow(duration, state.waveZoom, state.waveOffset);
-  if (
-    state.waveViewPinned &&
-    Number.isFinite(timeSec) &&
-    view.span > 0 &&
-    timeSec >= view.start &&
-    timeSec <= view.end
-  ) {
-    // Needle is back on-screen — resume paging.
-    state.waveViewPinned = false;
-  }
-  const allowFollow =
-    !state.gridAlignDragging &&
-    !state.loopDrag &&
-    !state.gridAlignMode &&
-    !state.waveViewPinned;
-  const next = keepPlayheadInView(duration, timeSec, {
-    zoom: state.waveZoom,
-    offset: state.waveOffset,
-    playing,
-    allowFollow,
-  });
-  state.waveZoom = next.zoom;
-  state.waveOffset = next.start;
-  return next;
+  return MusicSorterWaveform.applyPlayheadFollow(state, duration, timeSec, playing);
 }
 
 function wavePlotMetrics(cssW) {
@@ -3090,36 +3338,15 @@ function wavePlotMetrics(cssW) {
 }
 
 function timeToWaveX(timeSec, padX, plotW, view) {
-  if (!view.span) return padX;
-  return padX + ((timeSec - view.start) / view.span) * plotW;
+  return MusicSorterWaveform.timeToWaveX(timeSec, padX, plotW, view);
 }
 
 function classifyWaveMarkers(points, view, slack = 0.05) {
-  const inView = [];
-  const offLeft = [];
-  const offRight = [];
-  for (const p of points || []) {
-    const pos = Number(p.pos) || 0;
-    if (pos < view.start - slack) offLeft.push(p);
-    else if (pos > view.end + slack) offRight.push(p);
-    else inView.push(p);
-  }
-  return { inView, offLeft, offRight };
+  return MusicSorterWaveform.classifyWaveMarkers(points, view, slack);
 }
 
 function formatOffscreenCueLabel(points, side) {
-  let cues = 0;
-  let loops = 0;
-  for (const p of points || []) {
-    if (pointKind(p) === "loop") loops += 1;
-    else cues += 1;
-  }
-  const parts = [];
-  if (cues) parts.push(`${cues} cue${cues === 1 ? "" : "s"}`);
-  if (loops) parts.push(`${loops} loop${loops === 1 ? "" : "s"}`);
-  if (!parts.length) return "";
-  const body = parts.join(" · ");
-  return side === "left" ? `← ${body}` : `${body} →`;
+  return MusicSorterWaveform.formatOffscreenCueLabel(points, side);
 }
 
 function panWaveToTime(timeSec, { frac = 0.22 } = {}) {
@@ -3137,8 +3364,7 @@ function panWaveToTime(timeSec, { frac = 0.22 } = {}) {
 }
 
 function hitTestRect(rect, x, y) {
-  if (!rect) return false;
-  return x >= rect.x0 && x <= rect.x1 && y >= rect.y0 && y <= rect.y1;
+  return MusicSorterWaveform.hitTestRect(rect, x, y);
 }
 
 function hitTestWaveCueChrome(clientX, clientY) {
@@ -3551,7 +3777,7 @@ function syncGridAlignUi() {
   if (btn) {
     btn.classList.toggle("active", state.gridAlignMode);
     btn.setAttribute("aria-pressed", state.gridAlignMode ? "true" : "false");
-    btn.textContent = state.gridAlignMode ? "Aligning…" : "Align grid";
+    btn.textContent = state.gridAlignMode ? "Aligning…" : "Align";
   }
   const bar = $("gridAlignBar");
   if (bar) {
@@ -3748,34 +3974,29 @@ async function applyGridAlign() {
     const r = data.result || {};
     if (r.cues) {
       applyCueSummaryToTrack(track.path, r.cues);
-    } else {
-      const live = currentTrack();
-      if (live?.cues) {
-        applyCueSummaryToTrack(track.path, {
-          ...live.cues,
-          beatgrid_pos: anchor,
-          scan_phase: anchor,
-          has_beatgrid: true,
-        });
-      }
     }
-    // Keep preflight in sync for ones display
-    if (state.gridPreflight) {
-      state.gridPreflight = {
-        ...state.gridPreflight,
-        grid_anchor: anchor,
-        beatgrid_pos: anchor,
-        scan_phase: anchor,
-      };
-    }
-    if (track.grid) {
-      track.grid = {
-        ...track.grid,
-        grid_anchor: anchor,
-        beatgrid_pos: anchor,
-        scan_phase: anchor,
-      };
-    }
+    // Saved 1 is source of truth. Stamp it now. Do not refetch the old grid.
+    const live = currentTrack();
+    const cues = (live?.path === track.path && live.cues) ? live.cues : (track.cues || {});
+    applyCueSummaryToTrack(track.path, {
+      ...cues,
+      beatgrid_pos: anchor,
+      scan_phase: anchor,
+      has_beatgrid: true,
+    });
+    const stamped = {
+      ...(state.gridPreflight || track.grid || {}),
+      grid_anchor: anchor,
+      beatgrid_pos: anchor,
+      scan_phase: anchor,
+      needs_align: false,
+    };
+    state.gridPreflight = stamped;
+    const row = state.tracks.find((t) => t.path === track.path);
+    if (row) row.grid = { ...(row.grid || {}), ...stamped };
+    if (track.grid) track.grid = { ...track.grid, ...stamped };
+    if (!state.gridManualConfirmed) state.gridManualConfirmed = {};
+    state.gridManualConfirmed[track.path] = true;
 
     exitGridAlignMode({ restoreView: false });
     renderCues();
@@ -3789,8 +4010,6 @@ async function applyGridAlign() {
           : ""),
       "success"
     );
-    // Refresh deep preflight in background
-    loadDeepGridPreflight(currentTrack(), state.trackGen).catch(() => {});
   } catch (err) {
     setStatus(err.message, "error");
   }
@@ -4054,7 +4273,8 @@ function drawWaveform() {
       continue;
     }
 
-    const x = timeToWaveX(Math.max(t, view.start), padX, plotW, view);
+    // Use stored pos (not view.start) so Cue 1 at 0.030s sits on the yellow 1, not file start.
+    const x = timeToWaveX(t, padX, plotW, view);
     const color = CUE_COLORS[p.color_name] || CUE_COLORS.unknown;
     ctx.save();
     ctx.strokeStyle = color;
@@ -4081,10 +4301,11 @@ function drawWaveform() {
     ctx.setLineDash([]);
     ctx.restore();
 
-    const text =
+    const name =
       kind === "loop" && p.size
         ? `${(p.name || "Loop").slice(0, 14)} ${p.size}b`
         : (p.name || kind).slice(0, 16);
+    const text = `${name} ${fmtTime(t)}`;
     const textW = Math.ceil(ctx.measureText(text).width);
     labelCandidates.push({
       kind,
@@ -5217,7 +5438,7 @@ function renderCues() {
       btn.dataset.pos = String(p.pos);
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
-        jumpToCue(p.pos, p);
+        jumpToCue(p.pos, p, e);
       });
       return btn;
     })
@@ -5261,6 +5482,7 @@ function renderCues() {
           >×2</button>`
           : "";
       const currentColor = sanitizeColorName(p.color_name);
+      const colorMeaning = MusicSorterTransport.cueColorMeaning(currentColor);
       const colorOpts = CUE_COLOR_OPTIONS.map(
         (c) =>
           `<option value="${c.id}" ${
@@ -5288,6 +5510,9 @@ function renderCues() {
               title="Click to rename"
             >${escapeHtml(p.name || (kind === "loop" ? "Loop" : "Cue"))}</span>
             <span class="cue-kind">${escapeHtml(kindLabel)} ${hotkey}</span>
+            <span class="cue-color-meaning color-${currentColor}" title="${escapeHtml(
+              colorMeaning
+            )}">${escapeHtml(currentColor)} · ${escapeHtml(colorMeaning)}</span>
           </button>
           <div class="cue-row-actions">
             <label class="cue-color-label" title="Change marker color in VirtualDJ">
@@ -5320,7 +5545,7 @@ function renderCues() {
       if (e.target.closest(".cue-name")) return;
       const idx = Number(row.dataset.index);
       const point = points[idx];
-      jumpToCue(point?.pos ?? points[idx]?.pos, point);
+      jumpToCue(point?.pos ?? points[idx]?.pos, point, e);
     });
   });
   list.querySelectorAll(".cue-name").forEach((el) => {
@@ -5758,6 +5983,9 @@ function applyCueSummaryToTrack(path, cuesSummary) {
     };
   }
   state.tracks = state.tracks.map((t, i) => (i === idx ? next : t));
+  if (currentTrack()?.path === path) {
+    refreshPlacementMatchUi(next);
+  }
   return next;
 }
 
@@ -5935,7 +6163,7 @@ function updatePipelineStrip() {
     const np = state.recsNow;
     const n = state.recsResult?.candidates_considered;
     hint.textContent = np
-      ? `${np.artist ? np.artist + " — " : ""}${np.title || np.name || "Track"}${
+      ? `${np.artist ? np.artist + " – " : ""}${np.title || np.name || "Track"}${
           n != null ? ` · ${n} in-key ±5 BPM` : " · auto"
         }`
       : "Waiting for VirtualDJ · auto-poll + auto-recs";
@@ -5946,13 +6174,30 @@ function updatePipelineStrip() {
       : "Play a track in VDJ";
     return;
   }
+  if (isSetOverviewMode()) {
+    const dirs = uniqueSetDirs(state.tracks);
+    const filter = state.setDirFilter || "pajamathon";
+    const visible = state.tracks.filter((tr) => trackMatchesSetDir(tr));
+    const sameN = visible.filter((tr) => tr.written_matches).length;
+    const diffN = visible.length - sameN;
+    kicker.textContent = "Set Overview";
+    title.textContent = "Review cues vs the written copy";
+    hint.textContent = visible.length
+      ? `${visible.length} in ${filter === "all" ? "all sets" : filter} · ${sameN} same · ${diffN} different`
+      : "No tracks in this crate";
+    if (!track) next.textContent = visible.length ? "Select a track" : "Empty crate";
+    else if (cuedSiblingHit(track) && !trackMatchesWrittenCopy(track, cuedSiblingHit(track)))
+      next.textContent = "Right: Copy cues";
+    else next.textContent = "same / different";
+    return;
+  }
   if (isReviewMode()) {
-    kicker.textContent = "Step 1 · Add Cues";
-    title.textContent = "Listen, then promote when markers feel right";
+    kicker.textContent = "Add Cues";
+    title.textContent = "Listen, then confirm a lane";
     hint.textContent =
       n > 0
         ? `${n} in queue · ${readyN} ready · ${notCuedN} need cues`
-        : "Empty queue — use Open Sort if Ready already has tracks.";
+        : "Empty queue. Use Open Sort if Ready already has tracks.";
     const pajNeed = state.tracks.filter(
       (t) =>
         addCuesSection(t) === "pajamathon" &&
@@ -5963,20 +6208,24 @@ function updatePipelineStrip() {
       hint.textContent =
         n > 0
           ? `${n} in queue · Pajamathon ${pajNeed}/${pajN} need cues · ${readyN} ready`
-          : "Empty queue — use Open Sort if Ready already has tracks.";
+          : "Empty queue. Use Open Sort if Ready already has tracks.";
     }
     if (!track) next.textContent = n ? "Select a track" : "Queue empty";
+    else if (isPajamathonSetQueueTrack(track))
+      next.textContent = track.is_cued
+        ? "Cue in set · confirm a lane to sort"
+        : "Right: AutoCue in set";
     else if (!track.is_cued) next.textContent = "Right: AutoCue";
-    else next.textContent = "Right: Move to Ready";
+    else next.textContent = "Right: confirm a lane, then sort";
     return;
   }
   // Sort
-  kicker.textContent = "Step 2 · Sort";
+  kicker.textContent = "Sort";
   title.textContent = "Place cued tracks into House / Zouk";
   hint.textContent =
     n > 0
       ? `${n} ready · choose a folder on the right`
-      : "Nothing in Ready — promote from Add Cues first.";
+      : "Nothing in Ready. Promote from Add Cues first.";
   if (!track) next.textContent = n ? "Select a track" : "Queue empty";
   else if (!track.is_cued) next.textContent = "Send back to Add Cues";
   else if (destN) next.textContent = "Right: Sort";
@@ -6196,31 +6445,69 @@ async function api(path, options = {}) {
 }
 
 function currentTrack() {
-  return state.tracks[state.index] || null;
+  return MusicSorterState.currentTrack();
 }
 
 function trackReadinessStatus(track) {
-  // Never invent "not_cued" for missing readiness — that flooded the Not cued
-  // filter when a stale Sort-mode list (no readiness field) was still on screen.
-  const status = track?.readiness?.status;
-  return typeof status === "string" ? status : null;
+  return MusicSorterState.trackReadinessStatus(track);
+}
+
+function trackIsKirillApproved(track) {
+  return Boolean(track && track.set_approved);
+}
+
+function trackIsMustPlay(track) {
+  return Boolean(track && track.must_play);
+}
+
+function applyApprovedPaths(paths) {
+  const set = new Set((paths || []).map(String));
+  for (const t of state.tracks || []) {
+    if (t && t.path && set.has(String(t.path))) t.set_approved = true;
+  }
+}
+
+function applyMustPlayPaths(paths) {
+  const set = new Set((paths || []).map(String));
+  for (const t of state.tracks || []) {
+    if (t && t.path && set.has(String(t.path))) t.must_play = true;
+  }
+}
+
+function markTrackMustPlay(track) {
+  if (!track || !track.path) return;
+  for (const t of state.tracks || []) {
+    if (t && t.path === track.path) t.must_play = true;
+  }
+  track.must_play = true;
+}
+
+function markTrackKirillApproved(track) {
+  if (!track || !track.path) return;
+  for (const t of state.tracks || []) {
+    if (t && t.path === track.path) {
+      t.set_approved = true;
+      t.readiness = { ...(t.readiness || {}), status: "approved", label: "Approved", set_approved: true };
+    }
+  }
+  track.set_approved = true;
+  track.readiness = { ...(track.readiness || {}), status: "approved", label: "Approved", set_approved: true };
+}
+
+function showSetApprovedFilter() {
+  state.setApprovalFilter = "approved";
+  document.querySelectorAll("#setApprovalFilter button").forEach((b) => {
+    const val = b.getAttribute("data-set-approval") || b.dataset.setApproval;
+    b.classList.toggle("active", val === "approved");
+  });
 }
 
 function addCuesReadinessRank(track) {
-  const status = trackReadinessStatus(track);
-  if (status === "ready") return 0;
-  if (status === "partial") return 1;
-  if (status === "not_cued" || status === "missing") return 2;
-  return 3;
+  return MusicSorterState.addCuesReadinessRank(track);
 }
 
 function sortAddCuesIndexes(indexes) {
-  return indexes.slice().sort((a, b) => {
-    const rank =
-      addCuesReadinessRank(state.tracks[a]) - addCuesReadinessRank(state.tracks[b]);
-    if (rank !== 0) return rank;
-    return a - b;
-  });
+  return MusicSorterState.sortAddCuesIndexes(indexes);
 }
 
 function trackMatchesSearch(track, query) {
@@ -6275,9 +6562,22 @@ function syncCrateFilterUi() {
   });
 }
 
+function syncReadinessFilterLabels() {
+  const readyBtn = $("filterReadyBtn");
+  if (readyBtn) {
+    readyBtn.textContent = "Ready";
+    readyBtn.title = "Looks ready to Move to Ready for Sort";
+  }
+  document.querySelectorAll('#readinessFilter [data-filter="needs_review"]').forEach((btn) => {
+    btn.hidden = inSet;
+    btn.title = "Has cues, not ready to promote yet";
+  });
+}
+
 function setCrateFilter(value) {
   persistCrateFilter(value);
   syncCrateFilterUi();
+  syncReadinessFilterLabels();
   applyModeUi();
   const indexes = filteredTrackIndexes();
   if (indexes.length && !indexes.includes(state.index)) {
@@ -6290,17 +6590,19 @@ function setCrateFilter(value) {
 }
 
 function addCuesSection(track) {
-  if (track?.section === "pajamathon" || track?.section === "inbox") {
-    return track.section;
+  return MusicSorterState.addCuesSection(track);
+}
+
+function isPajamathonSetQueueTrack(track) {
+  const placements =
+    (typeof globalThis !== "undefined" && globalThis.MusicSorterPlacements) ||
+    (typeof window !== "undefined" && window.MusicSorterPlacements) ||
+    {};
+  if (typeof placements.trackIsPajamathonSetFile === "function") {
+    return placements.trackIsPajamathonSetFile(track);
   }
-  const group = String(track?.group || "").toLowerCase();
-  const rel = String(track?.relative_path || "")
-    .replace(/\\/g, "/")
-    .toLowerCase();
-  if (group.startsWith("pajamathon") || rel.startsWith("pajamathon/") || rel.startsWith("pajamathon ")) {
-    return "pajamathon";
-  }
-  return "inbox";
+  const path = String((track && track.path) || "").replace(/\\/g, "/");
+  return /\/sets\/pajamathon/i.test(path);
 }
 
 function filteredTrackIndexes() {
@@ -6310,6 +6612,19 @@ function filteredTrackIndexes() {
     .filter((i) => {
       const track = state.tracks[i];
       if (!trackMatchesSearch(track, q)) return false;
+      if (isSetOverviewMode()) {
+        if (trackInMustPlayFolder(track)) return false;
+        if (!trackMatchesSetDir(track)) return false;
+        const approval = state.setApprovalFilter || "all";
+        if (approval === "all") return true;
+        if (approval === "needs_sort") {
+          return Boolean(track.is_cued) && !track.lane;
+        }
+        const approved = trackIsKirillApproved(track);
+        if (approval === "approved") return approved;
+        if (approval === "not_approved") return !approved;
+        return true;
+      }
       if (isReviewMode() && state.crateFilter && state.crateFilter !== "all") {
         if (state.crateFilter === "cueing") {
           if (!isTrackCueing(track)) return false;
@@ -6317,7 +6632,24 @@ function filteredTrackIndexes() {
           return false;
         }
       }
+      if (
+        isReviewMode() &&
+        (!state.crateFilter || state.crateFilter === "all") &&
+        addCuesSection(track) === "in_set"
+      ) {
+        return false;
+      }
       if (!isReviewMode() || state.readinessFilter === "all") return true;
+      if (state.readinessFilter === "needs_sort") {
+        // Cued VDJ-white only: no proper lane/genre yet. Do not relocate to fill this.
+        return Boolean(track.is_cued) && !track.lane;
+      }
+      if (state.readinessFilter === "recently_cued") {
+        return MusicSorterState.isRecentlyCued(
+          track,
+          retryJobForPath(track?.path)
+        );
+      }
       if (
         state.readinessFilter === "retried_cues" ||
         state.readinessFilter === "retried_loops" ||
@@ -6328,39 +6660,150 @@ function filteredTrackIndexes() {
       }
       const status = trackReadinessStatus(track);
       if (!status) return false;
-      if (state.readinessFilter === "ready") return status === "ready";
+      if (state.readinessFilter === "ready" || state.readinessFilter === "approved") {
+        return status === "ready";
+      }
+      if (state.readinessFilter === "needs_review") {
+        return (
+          status === "needs_review" ||
+          status === "partial" ||
+          (Boolean(track.is_cued) && status !== "ready" && status !== "approved")
+        );
+      }
       if (state.readinessFilter === "partial") return status === "partial";
       if (state.readinessFilter === "not_cued") {
         return status === "not_cued" || status === "missing";
       }
       return true;
     });
+  if (isReviewMode() && state.readinessFilter === "recently_cued") {
+    return indexes.slice().sort((a, b) => {
+      const tb = MusicSorterState.trackLastCuedMs(
+        state.tracks[b],
+        retryJobForPath(state.tracks[b]?.path)
+      );
+      const ta = MusicSorterState.trackLastCuedMs(
+        state.tracks[a],
+        retryJobForPath(state.tracks[a]?.path)
+      );
+      return tb - ta;
+    });
+  }
   return isReviewMode() ? sortAddCuesIndexes(indexes) : indexes;
 }
 
 function trackRetryKind(track) {
-  const hist = track?.retry_history || {};
-  let cues = Boolean(hist.tried_cues);
-  let loops = Boolean(hist.tried_loops);
-  if (hist.kind === "both" || hist.tried_both) {
-    cues = true;
-    loops = true;
-  } else if (hist.kind === "cues") {
-    cues = true;
-  } else if (hist.kind === "loops") {
-    loops = true;
+  return MusicSorterState.trackRetryKind(track, retryJobForPath(track?.path));
+}
+
+function pointTimesForMatch(points, kind) {
+  return (points || [])
+    .filter((p) => pointKind(p) === kind)
+    .map((p) => Number(p.pos) || 0)
+    .filter((n) => Number.isFinite(n))
+    .sort((a, b) => a - b);
+}
+
+function pairCueTimes(a, b, window) {
+  const used = new Set();
+  let hits = 0;
+  let maxDelta = 0;
+  for (const t of a) {
+    let best = -1;
+    let bestD = Infinity;
+    for (let i = 0; i < b.length; i++) {
+      if (used.has(i)) continue;
+      const d = Math.abs(t - b[i]);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    if (best >= 0 && bestD <= window) {
+      used.add(best);
+      hits += 1;
+      maxDelta = Math.max(maxDelta, bestD);
+    }
   }
-  const job = retryJobForPath(track?.path);
-  const scope = String(job?.writeScope || job?.write_scope || "").toLowerCase();
-  const finished = ["ok", "error", "skipped"].includes(String(job?.status || ""));
-  if (job && finished && scope) {
-    if (scope === "cues" || scope === "all" || scope === "both") cues = true;
-    if (scope === "loops" || scope === "all" || scope === "both") loops = true;
+  return { hits, maxDelta };
+}
+
+function placementMatchBadge(track, hit) {
+  const actual = track?.cues?.points || [];
+  const written = hit?.points;
+  if (!actual.length) return "";
+  if (!Array.isArray(written)) return "";
+  const bpm = Number(track?.cues?.bpm || hit?.bpm || 0);
+  const bar = bpm > 0 ? (60 / bpm) * 4 : 2;
+  const actC = pointTimesForMatch(actual, "cue");
+  const wrC = pointTimesForMatch(written, "cue");
+  const actL = pointTimesForMatch(actual, "loop");
+  const wrL = pointTimesForMatch(written, "loop");
+  if (!wrC.length && !wrL.length) {
+    return `<span class="autocue-flag different" title="This copy has no cues">different</span>`;
   }
-  if (cues && loops) return "both";
-  if (cues) return "cues";
-  if (loops) return "loops";
-  return null;
+  const c = pairCueTimes(actC, wrC, bar);
+  const l = pairCueTimes(actL, wrL, bar);
+  const counts = actC.length === wrC.length && actL.length === wrL.length;
+  const paired = c.hits === actC.length && l.hits === actL.length;
+  const maxD = Math.max(c.maxDelta, l.maxDelta);
+  if (counts && paired && maxD <= 0.08) {
+    return `<span class="autocue-flag same" title="Matches this copy">same</span>`;
+  }
+  if (counts && paired) {
+    return `<span class="autocue-flag same" title="Same cues, within a bar">same</span>`;
+  }
+  return `<span class="autocue-flag different" title="Does not match this copy">different</span>`;
+}
+
+function syncPlacementHitFromTrack(track, destPath) {
+  if (!track?.placements || !destPath) return;
+  const points = (track.cues?.points || []).map((p) => ({ ...p }));
+  const cueN =
+    Number(track.cues?.cue_count) ||
+    points.filter((p) => pointKind(p) === "cue").length;
+  const loopN =
+    Number(track.cues?.loop_count) ||
+    points.filter((p) => pointKind(p) === "loop").length;
+  for (const key of ["library", "cues_sorted", "sets"]) {
+    const list = track.placements[key];
+    if (!Array.isArray(list)) continue;
+    const hit = list.find((h) => h.path === destPath);
+    if (!hit) continue;
+    hit.points = points;
+    hit.cue_count = cueN;
+    hit.loop_count = loopN;
+    hit.is_cued = Boolean(track.is_cued || cueN > 0);
+    hit.in_database = true;
+  }
+}
+
+function refreshPlacementMatchUi(track) {
+  const current = track || currentTrack();
+  if (!current) return;
+  if (typeof renderPlacementCard === "function") {
+    try {
+      renderPlacementCard(current);
+    } catch {
+      /* ignore during boot */
+    }
+  }
+}
+
+function autocueMatchBadge(track) {
+  const m = track?.autocue_match;
+  const matched = Boolean(track?.autocue_matches ?? m?.matches);
+  if (!m || !m.status || m.status === "not_cued" || m.status === "unknown") {
+    return "";
+  }
+  const title = escapeHtml(m.reason || "");
+  if (matched) {
+    return `<span class="autocue-flag same" title="${title}">same</span>`;
+  }
+  if (m.status === "no_proposal" && !track?.is_cued) {
+    return "";
+  }
+  return `<span class="autocue-flag different" title="${title}">different</span>`;
 }
 
 function retryHistoryBadge(track) {
@@ -6414,6 +6857,8 @@ function readinessBadge(track) {
     }
     return "";
   }
+  if (r.status === "approved") return `<span class="badge ok">${escapeHtml(r.label)}</span>`;
+  if (r.status === "needs_review") return `<span class="badge warn">${escapeHtml(r.label)}</span>`;
   if (r.status === "ready") return `<span class="badge ok">${escapeHtml(r.label)}</span>`;
   if (r.status === "partial") return `<span class="badge warn">${escapeHtml(r.label)}</span>`;
   if (r.status === "missing") return `<span class="badge bad">${escapeHtml(r.label)}</span>`;
@@ -6462,6 +6907,10 @@ function renderTrackList() {
     return;
   }
   const indexes = filteredTrackIndexes();
+  if (isSetOverviewMode()) {
+    renderSetOverviewList(indexes);
+    return;
+  }
   if (!state.tracks.length) {
     if (root.classList.contains("list-loading") || state.tracksLoadTimer) {
       root.innerHTML = `<div class="empty">Loading tracks…</div>`;
@@ -6473,7 +6922,7 @@ function renderTrackList() {
         title: "Add Cues is empty",
         copy:
           state.crateFilter === "pajamathon"
-            ? "No Pajamathon event-crate tracks loaded. Refresh — this tab lists Sets/Pajamathon, not only Add Cues."
+            ? "Add Cues/Pajamathon is empty. Drop tracks here to cue, then Move to Ready and copy into Sets/Pajamathon."
             : "Drop audio into the Add Cues folder, or jump to Sort if Ready already has tracks.",
         ctaLabel: "Open Sort",
         ctaMode: "sort",
@@ -6512,108 +6961,378 @@ function renderTrackList() {
     return;
   }
 
+  const listScrollTop = root.scrollTop;
   root.innerHTML = isReviewMode()
     ? renderAddCuesTrackSections(indexes)
     : indexes.map((i) => renderQueueTrackRow(i)).join("");
+  root.scrollTop = listScrollTop;
 
   root.querySelectorAll(".track").forEach((btn) => {
     btn.addEventListener("click", () => selectTrack(Number(btn.dataset.index)));
   });
+  root.querySelectorAll(".track-autocue-btn").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const track = state.tracks[Number(btn.dataset.index)];
+      if (!track) return;
+      retryCuesForTrack(track, "all", { fromQueue: true });
+    });
+  });
+}
+
+function writtenCopyBadge(track) {
+  const hit = (() => {
+    const p = track?.placements || {};
+    const src = track?.path;
+    const hits = [...(p.add_cues || []), ...(p.cues_sorted || []), ...(p.library || [])].filter(
+      (h) => h && h.path && h.path !== src
+    );
+    return hits.find((h) => h.is_cued) || hits[0] || null;
+  })();
+  if (hit && typeof placementMatchBadge === "function") {
+    const live = placementMatchBadge(track, hit);
+    if (live) return live;
+  }
+  const m = track?.written_match;
+  if (!m || !m.status || m.status === "unknown") return "";
+  const title = escapeHtml(m.reason || "");
+  if (m.matches || m.status === "match" || m.status === "near") {
+    return `<span class="autocue-flag same" title="${title}">same</span>`;
+  }
+  if (m.status === "no_copy") {
+    return `<span class="autocue-flag different" title="${title}">no copy</span>`;
+  }
+  return `<span class="autocue-flag different" title="${title}">different</span>`;
+}
+
+function destFolderFromPlacementRel(relOrPath) {
+  const raw = String(relOrPath || "").replace(/\\/g, "/");
+  if (!raw) return "";
+  let rest = raw;
+  const markers = ["/Zouk/", "/Cues Sorted/", "/Cues/Cues Sorted/"];
+  const low = rest.toLowerCase();
+  for (const marker of markers) {
+    const i = low.lastIndexOf(marker.toLowerCase());
+    if (i >= 0) {
+      rest = rest.slice(i + marker.length);
+      break;
+    }
+  }
+  const parts = rest.split("/").filter(Boolean);
+  if (!parts.length) return "";
+  const last = parts[parts.length - 1];
+  if (/\.(flac|mp3|wav|aiff|aif|m4a|ogg)$/i.test(last)) parts.pop();
+  return parts.join("/");
+}
+
+function setOverviewDestLeaves(track) {
+  const p = track?.placements || {};
+  const folders = [];
+  const seen = new Set();
+  const add = (rel) => {
+    const raw = String(rel || "");
+    if (/low_quality_backups/i.test(raw)) return;
+    const folder = destFolderFromPlacementRel(raw);
+    if (!folder) return;
+    const key = folder.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    folders.push(folder);
+  };
+  for (const h of p.cues_sorted || []) {
+    if (!h || !h.path) continue;
+    add(h.relative_path || h.path);
+  }
+  for (const h of p.library || []) {
+    const path = String(h.path || "");
+    if (path && !/\/Zouk\//i.test(path)) continue;
+    if (/low_quality_backups/i.test(path)) continue;
+    add(h.relative_path || path);
+  }
+  const bassy = folders.find((f) => String(f).split("/")[0].toLowerCase() === "bassy");
+  if (bassy) return [bassy];
+  return folders;
+}
+
+function renderSetOverviewList(indexes) {
+  const root = $("trackList");
+  if (!root) return;
+  if (typeof renderSetOverviewRail === "function") {
+    // Bind rail to the same queue pick this list is about to paint.
+    try { renderSetOverviewRail(); } catch (e) { /* rail optional during first paint */ }
+  }
+  if (!state.tracks.length) {
+    root.innerHTML = `<div class="empty">No audio under Sets/Pajamathon.</div>`;
+    return;
+  }
+  if (!indexes.length) {
+    root.innerHTML = `<div class="empty">${
+      state.trackSearch.trim() ? "No tracks match this search." : "No tracks in this set."
+    }</div>`;
+    return;
+  }
+  const listScrollTop = root.scrollTop;
+  root.innerHTML = indexes
+    .map((i) => {
+      const t = state.tracks[i];
+      const folder = t.group || t.relative_path || "";
+      const destLeaves = setOverviewDestLeaves(t);
+      const destCol = destLeaves.length
+        ? `<div class="track-sort-dir">Dest · ${escapeHtml(destLeaves.join(" · "))}</div>`
+        : "";
+      const cueN = Number(t.cues?.cue_count) || 0;
+      const loopN = Number(t.cues?.loop_count) || 0;
+      const counts = t.is_cued
+        ? `<span class="badge ok">${cueN} cues${loopN ? ` · ${loopN} loops` : ""}</span>`
+        : `<span class="badge uncued">Not cued</span>`;
+      const sib = cuedSiblingHit(t);
+      const needsCopy = Boolean(sib) && !trackMatchesWrittenCopy(t, sib);
+      const copyBtn = needsCopy
+        ? `<button type="button" class="btn ghost set-copy-cues-btn" data-index="${i}" title="Copy cues from the cued sibling onto this set file">Copy cues</button>`
+        : "";
+      const approved = trackIsKirillApproved(t);
+      const mustPlay = trackIsMustPlay(t);
+      const selected = i === state.index;
+      return `<div class="track-row${selected ? " is-selected" : ""}">
+      <button class="track set-overview-row ${
+        selected ? "active" : ""
+      }" data-index="${i}" type="button" title="${escapeHtml(t.name || "")}">
+        <div class="track-title">${escapeHtml(trackDisplayTitle(t))}</div>
+        <div class="track-path">${escapeHtml(folder)}</div>
+        ${destCol}
+        <div class="track-meta">${counts} ${writtenCopyBadge(t)}${
+          approved ? ` <span class="badge ok set-ov-approved">Approved</span>` : ""
+        }${mustPlay ? ` <span class="badge ok set-ov-must-play">Must Play</span>` : ""}</div>
+      </button>
+      ${copyBtn}
+      </div>`;
+    })
+    .join("");
+  root.scrollTop = listScrollTop;
+  root.querySelectorAll(".track").forEach((btn) => {
+    btn.addEventListener("click", () => selectTrack(Number(btn.dataset.index)));
+  });
+  root.querySelectorAll(".set-copy-cues-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      copySetOverviewCues(Number(btn.dataset.index));
+    });
+  });
+}
+
+function cuedSiblingHit(track) {
+  const p = track?.placements || {};
+  const src = track?.path;
+  const hits = [...(p.cues_sorted || []), ...(p.library || [])].filter(
+    (h) => h && h.path && h.path !== src && (h.is_cued || Number(h.cue_count) > 0)
+  );
+  return hits[0] || null;
+}
+
+function trackMatchesWrittenCopy(track, hit) {
+  if (!hit) return false;
+  const html = typeof placementMatchBadge === "function" ? placementMatchBadge(track, hit) : "";
+  return html.includes("same");
+}
+
+async function copySetOverviewCues(index) {
+  const track = state.tracks[index];
+  if (!track) return;
+  const sib = cuedSiblingHit(track);
+  if (!sib) {
+    setStatus("No cued sibling to copy from.", "error");
+    return;
+  }
+  try {
+    setStatus(`Copying cues onto ${trackDisplayTitle(track)}…`);
+    await api("/api/copy-cues", {
+      method: "POST",
+      body: JSON.stringify({
+        source: sib.path,
+        dest: track.path,
+        overwrite: Boolean(track.is_cued),
+        allow_vdj_running: false,
+      }),
+    });
+    syncPlacementHitFromTrack({ ...track, cues: track.cues, is_cued: true, placements: { cues_sorted: [sib], library: [], sets: [] } }, track.path);
+    setStatus(`Copied cues onto ${trackDisplayTitle(track)}`, "success");
+    await loadTracks({ keepPath: track.path, skipStatus: true });
+  } catch (err) {
+    setStatus(err.message, "error");
+  }
+}
+
+
+function dropSetOverviewRow(track, message, kind = "success") {
+  const path = track?.path;
+  if (path) {
+    const prev = state.tracks || [];
+    const gone = prev.findIndex((t) => t.path === path);
+    state.tracks = prev.filter((t) => t.path !== path);
+    if (!state.tracks.length) state.index = 0;
+    else if (gone >= 0 && state.index >= gone) {
+      state.index = Math.min(state.index, state.tracks.length - 1);
+      if (gone === state.index || state.index >= state.tracks.length) {
+        state.index = Math.min(gone, state.tracks.length - 1);
+      }
+    }
+  }
+  if (message) setStatus(message, kind);
+  renderTrackList();
+  if (typeof renderSetOverviewRail === "function") renderSetOverviewRail();
+  if (typeof updatePipelineStrip === "function") updatePipelineStrip();
+  if (typeof renderPlayer === "function") renderPlayer();
+}
+
+function isGoneSetFileError(err) {
+  const msg = String(err?.message || err || "").toLowerCase();
+  return msg.includes("set file not found") || msg.includes("not found");
+}
+
+async function sendBackSetOverview() {
+  const track = selectedQueueTrack() || currentTrack();
+  if (!track) return;
+  if (!isPajamathonSetQueueTrack(track)) {
+    setStatus("Send-back is only for Sets/Pajamathon copies.", "error");
+    return;
+  }
+  const ok = await showConfirmDialog({
+    title: "Send back to Add Cues?",
+    track: trackDisplayTitle(track),
+    message:
+      "This Sets/Pajamathon copy moves to Add Cues / Pajamathon for new cues.",
+    note: "Zouk / Cues Sorted / other siblings stay. No re-AutoCue. Close VirtualDJ first if it is open.",
+    confirmLabel: "Send back",
+    tone: "warning",
+  });
+  if (!ok) return;
+  let allowRunning = false;
+  if (await isVdjRunningFresh()) {
+    allowRunning = await showConfirmDialog({
+      title: "VirtualDJ is still open",
+      track: trackDisplayTitle(track),
+      message: "Path changes may be overwritten when VirtualDJ quits. Close it first when possible.",
+      confirmLabel: "Continue anyway",
+      tone: "warning",
+    });
+    if (!allowRunning) {
+      setStatus("Close VirtualDJ, then send back.", "error");
+      return;
+    }
+  }
+  try {
+    setStatus(`Sending ${trackDisplayTitle(track)} to Add Cues / Pajamathon…`);
+    const data = await api("/api/send-back-set", {
+      method: "POST",
+      body: JSON.stringify({
+        path: track.path,
+        allow_vdj_running: Boolean(allowRunning),
+      }),
+    });
+    const r = data.result || {};
+    const dest = (r.dest_path || "").split("/").slice(-3).join("/");
+    const toast = r.already_in_inbox
+        ? `Already in Add Cues / Pajamathon · dropped set name · ${dest || track.name}`
+        : `Sent back · ${dest || "Add Cues / Pajamathon"}`;
+    dropSetOverviewRow(track, toast);
+    loadTracks({ keepPath: state.tracks[state.index]?.path, skipStatus: true }).catch(() => {});
+  } catch (err) {
+    if (isGoneSetFileError(err)) {
+      dropSetOverviewRow(track, `Already gone from the set · ${trackDisplayTitle(track)}`);
+      return;
+    }
+    setStatus(err.message, "error");
+  }
+}
+
+async function removeSetOverviewCopy() {
+  const track = selectedQueueTrack() || currentTrack();
+  if (!track) return;
+  const cueN = track.cues?.cue_count ?? 0;
+  const loopN = track.cues?.loop_count ?? 0;
+  const ok = await showConfirmDialog({
+    title: "Remove this set copy?",
+    track: trackDisplayTitle(track),
+    message:
+      "Deletes this Sets/Pajamathon file only (and its VDJ entry for that path).",
+    note: `Zouk / Cues Sorted / Add Cues siblings stay. ${cueN} cues, ${loopN} loops on this path. Close VirtualDJ first if it is open.`,
+    confirmLabel: "Remove copy",
+    tone: "danger",
+  });
+  if (!ok) return;
+  let allowRunning = false;
+  if (await isVdjRunningFresh()) {
+    allowRunning = await showConfirmDialog({
+      title: "VirtualDJ is still open",
+      track: trackDisplayTitle(track),
+      message: "Deleting the database entry while VirtualDJ is open can be overwritten on quit.",
+      confirmLabel: "Remove anyway",
+      tone: "warning",
+    });
+    if (!allowRunning) {
+      setStatus("Close VirtualDJ, then remove.", "error");
+      return;
+    }
+  }
+  try {
+    setStatus(`Removing ${trackDisplayTitle(track)}…`);
+    const data = await api("/api/remove-set-copy", {
+      method: "POST",
+      body: JSON.stringify({
+        path: track.path,
+        to_trash: true,
+        allow_vdj_running: Boolean(allowRunning),
+      }),
+    });
+    const r = data.result || {};
+    const linkPart =
+      r.kept_hardlinks > 0
+        ? ` · kept ${r.kept_hardlinks} sibling${r.kept_hardlinks === 1 ? "" : "s"}`
+        : "";
+    dropSetOverviewRow(
+      track,
+      `Removed set copy · ${r.name || track.name}${r.unlink_only ? " (unlinked)" : ""}${linkPart}`
+    );
+    loadTracks({ keepPath: state.tracks[state.index]?.path, skipStatus: true }).catch(() => {});
+  } catch (err) {
+    if (isGoneSetFileError(err)) {
+      dropSetOverviewRow(track, `Already gone from the set · ${trackDisplayTitle(track)}`);
+      return;
+    }
+    setStatus(err.message, "error");
+  }
 }
 
 function renderQueueTrackRow(i) {
   const t = state.tracks[i];
   const cued = t.is_cued;
-  const badge = isReviewMode()
-    ? readinessBadge(t)
-    : cued
-      ? `<span class="badge ok">${t.cues.cue_count} cues</span>`
-      : `<span class="badge uncued">Not cued</span>`;
-  const grid = isReviewMode() ? gridBadge(t) : "";
-  const loops =
-    t.cues?.loop_count > 0
-      ? `<span class="badge neutral">${t.cues.loop_count} loops</span>`
+  const loops = t.cues?.loop_count || 0;
+  const badge = cued
+    ? `<span class="badge ok">${t.cues.cue_count || 0} cues${
+        loops ? ` · ${loops} loops` : ""
+      }</span>`
+    : `<span class="badge uncued">Not cued</span>`;
+  const g = t.grid || t.grid_preflight || {};
+  const gridBlocked =
+    isReviewMode() &&
+    (g.can_autocue === false || g.manual_required || g.status === "blocked")
+      ? gridBadge(t)
       : "";
-  const stems = t.stems_path ? `<span class="badge neutral">stems</span>` : "";
   const cueingBadge = isTrackCueing(t) ? `<span class="badge warn">Cueing</span>` : "";
-  const section = addCuesSection(t);
-  const group =
-    isReviewMode() && t.group && section !== "pajamathon"
-      ? `<span class="badge neutral">${escapeHtml(t.group)}</span>`
-      : "";
-  const br = formatBitrate(t.bitrate_kbps);
-  const brBadge = br
-    ? `<span class="badge ${bitrateBadgeClass(t.bitrate_kbps)}">${escapeHtml(br)}</span>`
-    : "";
   const placements = t.placements || {};
-  const libCued = (placements.library || []).some((p) => p.is_cued);
-  const archCued = (placements.cues_sorted || []).some((p) => p.is_cued);
-  const setCued = (placements.sets || []).some((p) => p.is_cued);
-  const libHits = placements.library || [];
   const archHits = placements.cues_sorted || [];
-  const setHits = placements.sets || [];
-  const zoukLibHits = libHits.filter((p) => p.root_name === "Zouk");
-  const houseLibHits = libHits.filter((p) => p.root_name === "House");
-  const zoukLibCued = zoukLibHits.some((p) => p.is_cued);
-  const houseLibCued = houseLibHits.some((p) => p.is_cued);
-  const placementBadges = [
-    zoukLibHits.length
-      ? `<span class="badge ${zoukLibCued ? "ok" : "warn"}" title="${escapeHtml(
-          zoukLibHits
-            .map(
-              (p) =>
-                `${p.root_name}/${p.relative_path}` +
-                (p.is_cued ? ` (${p.cue_count} cues)` : " (no cues)")
-            )
-            .join(", ")
-        )}">${zoukLibCued ? "Zouk cued" : "In Zouk"}</span>`
-      : "",
-    houseLibHits.length
-      ? `<span class="badge ${houseLibCued ? "ok" : "warn"}" title="${escapeHtml(
-          houseLibHits
-            .map(
-              (p) =>
-                `${p.root_name}/${p.relative_path}` +
-                (p.is_cued ? ` (${p.cue_count} cues)` : " (no cues)")
-            )
-            .join(", ")
-        )}">${houseLibCued ? "House cued" : "In House"}</span>`
-      : "",
-    placements.in_library && !zoukLibHits.length && !houseLibHits.length
-      ? `<span class="badge ${libCued ? "ok" : "warn"}" title="${escapeHtml(
-          libHits
-            .map(
-              (p) =>
-                `${p.root_name}/${p.relative_path}` +
-                (p.is_cued ? ` (${p.cue_count} cues)` : " (no cues)")
-            )
-            .join(", ")
-        )}">${libCued ? "Lib cued" : "In library"}</span>`
-      : "",
-    placements.in_cues_sorted
-      ? `<span class="badge ${archCued ? "ok" : "warn"}" title="${escapeHtml(
-          archHits
-            .map(
-              (p) =>
-                `Cues Sorted/${p.relative_path}` +
-                (p.is_cued ? ` (${p.cue_count} cues)` : " (no cues)")
-            )
-            .join(", ")
-        )}">${archCued ? "Archive cued" : "In archive"}</span>`
-      : "",
-    placements.in_sets
-      ? `<span class="badge ${setCued ? "ok" : "warn"}" title="${escapeHtml(
-          setHits
-            .map(
-              (p) =>
-                `Sets/${p.relative_path}` +
-                (p.is_cued ? ` (${p.cue_count} cues)` : " (no cues)")
-            )
-            .join(", ")
-        )}">${setCued ? "Pajamathon cued" : "In Pajamathon"}</span>`
-      : "",
-  ].join("");
+  const cueing = isTrackCueing(t);
+  const othersLive = activeRetryJobs().some((j) => j.path && j.path !== t.path);
+  const queueAutocue =
+    isReviewMode() && !cueing
+      ? `<button type="button" class="btn ghost track-autocue-btn" data-index="${i}" title="Queue AutoCue — other jobs keep running">${
+          othersLive ? "Queue" : "AutoCue"
+        }</button>`
+      : "";
   return `
+        <div class="track-row">
         <button class="track ${i === state.index ? "active" : ""} ${cued ? "" : "uncued-row"} ${
           placements.already_sorted ? "already-sorted-row" : ""
         }"
@@ -6624,19 +7343,21 @@ function renderQueueTrackRow(i) {
               ? `<div class="track-artist">${escapeHtml(trackDisplayArtist(t))}</div>`
               : ""
           }
+          ${
+            archHits.length
+              ? `<div class="track-path">${archHits
+                  .map((hit) => escapeHtml(`Cues Sorted/${hit.relative_path}`))
+                  .join("<br>")}</div>`
+              : ""
+          }
           <div class="track-meta">
             ${badge}
             ${cueingBadge}
-            ${isReviewMode() ? retryHistoryBadge(t) : ""}
-            ${grid}
-            ${brBadge}
-            ${placementBadges}
-            ${group}
-            ${loops}
-            ${stems}
-            <span class="badge neutral">${fmtBytes(t.size_bytes)}</span>
+            ${gridBlocked}
           </div>
-        </button>`;
+        </button>
+        ${queueAutocue}
+        </div>`;
 }
 
 function renderAddCuesTrackSections(indexes) {
@@ -6646,7 +7367,10 @@ function renderAddCuesTrackSections(indexes) {
     rest.filter((i) => addCuesSection(state.tracks[i]) === "pajamathon")
   );
   const inbox = sortAddCuesIndexes(
-    rest.filter((i) => addCuesSection(state.tracks[i]) !== "pajamathon")
+    rest.filter((i) => {
+      const section = addCuesSection(state.tracks[i]);
+      return section !== "pajamathon" && section !== "in_set";
+    })
   );
   const parts = [];
   const sectionBlock = (id, label, rows) => {
@@ -6671,7 +7395,7 @@ function renderAddCuesTrackSections(indexes) {
     return parts.join("");
   }
   sectionBlock("cueing", "Currently cueing", cueing);
-  sectionBlock("pajamathon", "Pajamathon", paj);
+  sectionBlock("pajamathon", "Add Cues / Pajamathon", paj);
   sectionBlock("inbox", "Inbox", inbox);
   return parts.join("");
 }
@@ -6914,6 +7638,7 @@ function renderPlayer() {
     }
     audio.dataset.path = track.path;
     audio.src = src;
+    if (isRecsMode()) refreshRecsNowPlaying({ quiet: true, loadAudio: false });
     state.activeCueKey = null;
     // Always load waveform (practice uses it for transition map).
     scheduleWaveformLoad(track, gen);
@@ -6958,7 +7683,7 @@ function renderPlayer() {
   // blockBanner is only for uncued / blocking messages — not placement details.
   if (isReviewMode()) {
     block.hidden = true;
-    sortBtn.disabled = true;
+    syncSortButtonState();
     updateApproveButtons();
   } else if (!track.is_cued) {
     block.hidden = false;
@@ -6974,12 +7699,14 @@ function renderPlayer() {
   renderCues();
   drawWaveform();
   if (isReviewMode()) {
-    recBox.hidden = true;
     renderReviewPanel();
+    renderLanePicker();
+    renderRecommendation();
   } else {
     recBox.hidden = false;
     renderRecommendation();
   }
+
   syncAutocueUi();
   loadDeepGridPreflight(track, gen);
 }
@@ -6996,7 +7723,17 @@ function buildPracticePlayerMetaHtml(track) {
     : `<span class="badge neutral">practice mix</span>`;
 }
 
-function placementCueBadge(hit) {
+function placementCueBadge(hit, options = {}) {
+  const justCopied = Boolean(options.justCopied);
+  const isSource = Boolean(options.isSource);
+  if (justCopied) {
+    const loops = hit.loop_count ? ` · ${hit.loop_count} loops` : "";
+    return `<span class="badge ok">${hit.cue_count} cues${loops}</span><span class="badge ok placement-just-copied">Just copied</span>`;
+  }
+  if (isSource) {
+    const loops = hit.loop_count ? ` · ${hit.loop_count} loops` : "";
+    return `<span class="badge ok">${hit.cue_count || 0} cues${loops}</span><span class="badge neutral placement-copy-source">Source</span>`;
+  }
   if (hit.is_cued) {
     const loops = hit.loop_count ? ` · ${hit.loop_count} loops` : "";
     return `<span class="badge ok">${hit.cue_count} cues${loops}</span>`;
@@ -7013,12 +7750,15 @@ function placementPathRow(labelPath, hit, options = {}) {
   const pathAttr = escapeHtml(hit.path || "");
   const allowDelete = options.allowDelete !== false;
   const allowCopyCues = options.allowCopyCues !== false;
+  const justCopied = Boolean(options.justCopied);
+  const isSource = Boolean(options.isSource);
   const copyLabel = hit.is_cued ? "Replace cues" : "Copy cues";
   const copyTitle = hit.is_cued
     ? "Replace this copy's VirtualDJ cues with the Ready / Add Cues markers"
     : "Copy this track's VirtualDJ cues onto this existing file";
   const actions = [];
   if (allowCopyCues) {
+    actions.push(placementMatchBadge(currentTrack(), hit));
     actions.push(`
       <button
         type="button"
@@ -7038,12 +7778,19 @@ function placementPathRow(labelPath, hit, options = {}) {
         aria-label="Delete from folder ${escapeHtml(labelPath)}"
       >Delete from folder</button>`);
   }
+  const rowClass = [
+    "placement-path-row",
+    justCopied ? "is-just-copied" : "",
+    isSource ? "is-copy-source" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return `
-    <div class="placement-path-row" data-placement-path="${pathAttr}">
+    <div class="${rowClass}" data-placement-path="${pathAttr}">
       <div class="placement-path-main">
         <div class="placement-path">${escapeHtml(labelPath)}</div>
         <div class="placement-path-meta">
-          ${placementCueBadge(hit)}
+          ${placementCueBadge(hit, { justCopied, isSource })}
           ${bpm}
           ${grid}
         </div>
@@ -7052,83 +7799,46 @@ function placementPathRow(labelPath, hit, options = {}) {
     </div>`;
 }
 
+const MusicSorterPlacements =
+  (typeof globalThis !== "undefined" && globalThis.MusicSorterPlacements) ||
+  (typeof window !== "undefined" && window.MusicSorterPlacements) ||
+  {};
+
 function isPajamathonPlacement(hit) {
-  return String(hit?.event || hit?.root_name || "")
-    .toLowerCase()
-    .startsWith("pajamathon");
+  return MusicSorterPlacements.isPajamathonPlacement(hit);
 }
 
 function emptyPlacements() {
-  return {
-    in_cues_sorted: false,
-    cues_sorted: [],
-    in_library: false,
-    library: [],
-    in_sets: false,
-    sets: [],
-    already_sorted: false,
-    any_library_cued: false,
-    any_archive_cued: false,
-    any_set_cued: false,
-  };
+  return MusicSorterPlacements.emptyPlacements();
 }
 
 function placementsArePopulated(placements) {
-  const p = placements || {};
-  return Boolean(
-    p.already_sorted ||
-      p.in_sets ||
-      p.in_library ||
-      p.in_cues_sorted ||
-      (p.library || []).length ||
-      (p.sets || []).length ||
-      (p.cues_sorted || []).length
-  );
+  return MusicSorterPlacements.placementsArePopulated(placements);
 }
 
 function mergeLoadedPlacements(prevTracks, nextTracks) {
-  const prevByPath = new Map((prevTracks || []).map((t) => [t.path, t]));
-  return (nextTracks || []).map((track) => {
-    const prev = prevByPath.get(track.path);
-    if (!prev) return track;
-    const incomingEmpty = !placementsArePopulated(track.placements);
-    if (incomingEmpty && prev.placementsLoaded && prev.placements) {
-      return {
-        ...track,
-        placements: prev.placements,
-        placementsLoaded: true,
-        placementsError: prev.placementsError || "",
-      };
-    }
-    return {
-      ...track,
-      placementsLoaded: Boolean(prev.placementsLoaded && incomingEmpty),
-      placementsError: incomingEmpty ? prev.placementsError || "" : "",
-    };
-  });
+  return MusicSorterPlacements.mergeLoadedPlacements(prevTracks, nextTracks);
 }
 
 function applyExistingSetPlacement(track, result) {
-  if (!track || !result) return track;
-  const dest = result.dest_path || result.existing?.path || "";
-  if (!dest) return track;
-  const placements = {
-    ...(track.placements || emptyPlacements()),
-  };
-  const sets = [...(placements.sets || [])];
-  if (!sets.some((hit) => hit.path === dest)) {
-    sets.push({
-      path: dest,
-      relative_path: result.relative_path || result.existing?.relative_path || "",
-      root_name: result.event || result.existing?.event || result.existing?.root_name || "",
-      event: result.event || result.existing?.event || "",
-      ...(result.existing || {}),
-    });
-  }
-  placements.sets = sets;
-  placements.in_sets = sets.length > 0;
-  track.placements = placements;
-  return track;
+  return MusicSorterPlacements.applyExistingSetPlacement(track, result);
+}
+
+function rememberCueCopy(sourcePath, payload) {
+  state.lastCueCopy = MusicSorterPlacements.normalizeCueCopyReceipt(
+    payload,
+    sourcePath
+  );
+}
+
+function cueCopyReceiptForTrack(track) {
+  const receipt = state.lastCueCopy;
+  if (!receipt || !track || receipt.sourcePath !== track.path) return null;
+  return receipt;
+}
+
+function placementCardModel(track, options) {
+  return MusicSorterPlacements.placementCardModel(track, options);
 }
 
 function renderPlacementCard(track) {
@@ -7141,12 +7851,21 @@ function renderPlacementCard(track) {
     return;
   }
 
+  const model = placementCardModel(track, { review: isReviewMode() });
   const rows = [];
-  const libs = track.placements?.library || [];
-  const sorted = track.placements?.cues_sorted || [];
-  const sets = track.placements?.sets || [];
+  const libs = model.libs;
+  const sorted = model.sorted;
+  const sets = model.sets;
 
   const canCopyCues = Boolean(track.is_cued);
+  const receipt = cueCopyReceiptForTrack(track);
+  const rowOpts = (hit, extra) => ({
+    ...extra,
+    justCopied: Boolean(
+      MusicSorterPlacements.cueCopyDestForPath(receipt, hit.path)
+    ),
+    isSource: Boolean(hit.path && track.path && hit.path === track.path),
+  });
   const libraryGroups = [];
   const zoukHits = libs.filter((p) => p.root_name === "Zouk");
   const houseHits = libs.filter((p) => p.root_name === "House");
@@ -7161,10 +7880,14 @@ function renderPlacementCard(track) {
   for (const [label, hits] of libraryGroups) {
     const paths = hits
       .map((p) =>
-        placementPathRow(`${p.root_name}/${p.relative_path}`, p, {
-          allowCopyCues: canCopyCues,
-          allowDelete: true,
-        })
+        placementPathRow(
+          `${p.root_name}/${p.relative_path}`,
+          p,
+          rowOpts(p, {
+            allowCopyCues: canCopyCues,
+            allowDelete: true,
+          })
+        )
       )
       .join("");
     rows.push(`
@@ -7176,10 +7899,14 @@ function renderPlacementCard(track) {
   if (sorted.length) {
     const paths = sorted
       .map((p) =>
-        placementPathRow(`Cues Sorted/${p.relative_path}`, p, {
-          allowCopyCues: canCopyCues,
-          allowDelete: true,
-        })
+        placementPathRow(
+          `Cues Sorted/${p.relative_path}`,
+          p,
+          rowOpts(p, {
+            allowCopyCues: canCopyCues,
+            allowDelete: true,
+          })
+        )
       )
       .join("");
     rows.push(`
@@ -7192,10 +7919,14 @@ function renderPlacementCard(track) {
     const allPaj = sets.every((p) => isPajamathonPlacement(p));
     const paths = sets
       .map((p) =>
-        placementPathRow(`Sets/${p.relative_path}`, p, {
-          allowCopyCues: canCopyCues,
-          allowDelete: true,
-        })
+        placementPathRow(
+          `Sets/${p.relative_path}`,
+          p,
+          rowOpts(p, {
+            allowCopyCues: canCopyCues && p.path !== track.path,
+            allowDelete: p.path !== track.path,
+          })
+        )
       )
       .join("");
     rows.push(`
@@ -7205,40 +7936,14 @@ function renderPlacementCard(track) {
       </div>`);
   }
 
-  const cuedN =
-    libs.filter((h) => h.is_cued).length +
-    sorted.filter((h) => h.is_cued).length +
-    sets.filter((h) => h.is_cued).length;
-  const totalN = libs.length + sorted.length + sets.length;
-  const titleExtra =
-    totalN > 0
-      ? ` · ${cuedN}/${totalN} cued`
-      : "";
-
   const review = isReviewMode();
-  const inPajamathon = sets.some((p) => isPajamathonPlacement(p));
-  const loading = Boolean(track.placementsLoading) && totalN === 0;
-  const loadError = !loading && totalN === 0 ? track.placementsError || "" : "";
-  const title = totalN > 0
-    ? review
-      ? `Already sorted in main library${titleExtra}`
-      : `Already in library${titleExtra}`
-    : loading
-      ? "Looking up library copies…"
-      : loadError
-        ? "Couldn't load library copies"
-        : "Not in Pajamathon";
-  const note = totalN > 0
-    ? review
-      ? cuedN > 0
-        ? "This song already exists under House/Zouk, Cues Sorted, and/or Sets/Pajamathon with VDJ cues. Approving still moves this Add Cues copy to Ready — Copy cues pushes markers onto that copy; Delete from folder removes a library/archive file only."
-        : "This song already exists under House/Zouk, Cues Sorted, and/or Sets/Pajamathon, but those copies are not cued in VirtualDJ yet. Copy cues writes this track's markers onto that file."
-      : "Copy cues writes this Ready track's markers onto the existing House/Zouk/Cues Sorted/Pajamathon file without moving audio. Delete from folder Trashes a duplicate library copy. Add to Pajamathon copies this Ready file into Sets/Pajamathon 2026."
-    : loading
-      ? "Looking up House / Zouk / Pajamathon copies for this track."
-      : loadError
-        ? loadError
-        : "No matching Sets/Pajamathon file. Add to Pajamathon copies this track into the event crate and clones its VirtualDJ cues.";
+  const cuedN = model.cuedN;
+  const totalN = model.totalN;
+  const inPajamathon = model.inPajamathon;
+  const loading = model.loading;
+  const loadError = model.loadError;
+  const title = model.title;
+  const note = model.note;
 
   const actionBtns = [];
   if (loadError) {
@@ -7268,15 +7973,25 @@ function renderPlacementCard(track) {
   const allAction = actionBtns.length
     ? `<div class="placement-card-actions">${actionBtns.join("")}</div>`
     : "";
+  const receiptLabel = receipt
+    ? MusicSorterPlacements.cueCopyReceiptLabel(receipt)
+    : "";
+  const receiptHtml = receiptLabel
+    ? `<div class="placement-copy-receipt" role="status">${escapeHtml(
+        receiptLabel
+      )}</div>`
+    : "";
 
   card.hidden = false;
   card.classList.toggle("placement-card-review", review);
   card.classList.toggle("placement-card-has-cued", cuedN > 0);
+  card.classList.toggle("placement-card-just-copied", Boolean(receiptLabel));
   card.innerHTML = `
-    <div class="placement-card-title">${title}</div>
+    <div class="placement-card-title">${escapeHtml(title)}</div>
+    ${receiptHtml}
     <div class="placement-rows">${rows.join("")}</div>
     ${allAction}
-    <div class="placement-card-note">${note}</div>
+    <div class="placement-card-note">${escapeHtml(note)}</div>
   `;
 
   card.querySelectorAll(".placement-delete-btn").forEach((btn) => {
@@ -7386,19 +8101,21 @@ async function deleteLibraryPlacement(placementPath) {
       "success"
     );
     // Refresh placements for the Ready track (source stays).
-    await loadTracks({ keepPath: track?.path });
-    if (!isReviewMode()) await loadFolders();
+    await loadTracks({ keepPath: track?.path, skipStatus: true });
+    await loadTrackPlacements(currentTrack(), { force: true });
+    await loadFolders();
   } catch (err) {
     setStatus(err.message, "error");
   }
 }
 
 function allPlacementHits(track) {
+  const src = track?.path;
   return [
     ...(track?.placements?.library || []),
     ...(track?.placements?.cues_sorted || []),
     ...(track?.placements?.sets || []),
-  ].filter((h) => h && h.path);
+  ].filter((h) => h && h.path && h.path !== src);
 }
 
 function placementHitLabel(hit) {
@@ -7474,16 +8191,21 @@ async function copyCuesToPlacement(placementPath) {
       }),
     });
     const r = data.result || {};
+    rememberCueCopy(track.path, r);
+    syncPlacementHitFromTrack(currentTrack() || track, placementPath);
+    refreshPlacementMatchUi(currentTrack() || track);
     const destName = r.root_name
       ? `${r.root_name}/${r.relative_path || label}`
       : label;
     setStatus(
-      `Copied ${r.copied_cues || 0} cues` +
-        (r.copied_loops ? ` · ${r.copied_loops} loops` : "") +
-        ` → ${destName}`,
+      MusicSorterPlacements.cueCopyReceiptLabel(state.lastCueCopy) ||
+        `Copied ${r.copied_cues || 0} cues` +
+          (r.copied_loops ? ` · ${r.copied_loops} loops` : "") +
+          ` → ${destName}`,
       "success"
     );
     await loadTracks({ keepPath: track.path, skipStatus: true });
+    await loadTrackPlacements(currentTrack(), { force: true });
   } catch (err) {
     setStatus(err.message, "error");
   }
@@ -7557,16 +8279,18 @@ async function copyCuesToAllPlacements() {
       }),
     });
     const r = data.result || {};
-    const bits = [`Copied to ${r.copied || 0}`];
-    if (r.skipped) bits.push(`skipped ${r.skipped}`);
-    if (r.failed) bits.push(`failed ${r.failed}`);
+    rememberCueCopy(track.path, r);
+    for (const hit of hits) {
+      syncPlacementHitFromTrack(currentTrack() || track, hit.path);
+    }
+    refreshPlacementMatchUi(currentTrack() || track);
     setStatus(
-      `${bits.join(" · ")}` +
-        (r.copied_cues != null ? ` · ${r.copied_cues} cues` : "") +
-        (r.copied_loops ? ` · ${r.copied_loops} loops` : ""),
+      MusicSorterPlacements.cueCopyReceiptLabel(state.lastCueCopy) ||
+        `Copied to ${r.copied || 0}`,
       r.failed ? "error" : "success"
     );
     await loadTracks({ keepPath: track.path, skipStatus: true });
+    await loadTrackPlacements(currentTrack(), { force: true });
   } catch (err) {
     setStatus(err.message, "error");
   }
@@ -7631,11 +8355,12 @@ async function addTrackToPajamathon() {
       }),
     });
     const r = data.result || {};
+    if (currentTrack()?.path !== track.path) return;
     if (r.already_exists) {
       applyExistingSetPlacement(track, r);
-      renderPlacementCard(currentTrack());
+      renderPlacementCard(track);
       setStatus(`Already in ${r.event || "Pajamathon"}: ${r.relative_path || r.dest_path || ""}`);
-      await loadTrackPlacements(currentTrack(), { force: true });
+      await loadTrackPlacements(track, { force: true });
       return;
     }
     setStatus(
@@ -7645,10 +8370,13 @@ async function addTrackToPajamathon() {
       "success"
     );
     await loadTracks({ keepPath: track.path, skipStatus: true });
+    if (currentTrack()?.path !== track.path) return;
     await loadTrackPlacements(currentTrack(), { force: true });
   } catch (err) {
     setStatus(err.message, "error");
-    await loadTrackPlacements(currentTrack(), { force: true });
+    if (currentTrack()?.path === track.path) {
+      await loadTrackPlacements(track, { force: true });
+    }
   }
 }
 
@@ -7662,6 +8390,10 @@ function renderReviewPanel() {
     return;
   }
 
+  const setFile = isPajamathonSetQueueTrack(track);
+  const fileLabel = setFile
+    ? `Sets/${track.relative_path || track.name || ""}`
+    : track.relative_path || "";
   const r = track.readiness || {};
   const checks = r.checks || {};
   const rows = [
@@ -7696,16 +8428,22 @@ function renderReviewPanel() {
     ${gridLine}
     <div class="review-guidance">
       ${
-        r.ready
-          ? "Markers look complete. Listen through key cues, then approve."
-          : "Not auto-ready — jump cues, listen, and only promote if they feel right."
+        setFile
+          ? r.status === "approved"
+            ? "Approved — hidden from the default Pajamathon list. Cue in Sets, not Add Cues."
+            : r.status === "needs_review"
+              ? "AI or existing cues — listen, then Approve. That is the Ready-for-Sort step for set files."
+              : "This is the Sets/Pajamathon event file — not the Add Cues inbox. AutoCue it in place, then Approve."
+          : r.ready
+            ? "Markers look complete. Listen through key cues, then approve."
+            : "Not auto-ready — jump cues, listen, and only promote if they feel right."
       }
     </div>
     ${
-      track.relative_path
-        ? `<div class="review-path" title="${escapeHtml(track.relative_path)}">
-            <span>File</span>
-            <strong>${escapeHtml(track.relative_path)}</strong>
+      fileLabel
+        ? `<div class="review-path" title="${escapeHtml(fileLabel)}">
+            <span>${setFile ? "Sets" : "File"}</span>
+            <strong>${escapeHtml(fileLabel)}</strong>
           </div>`
         : ""
     }
@@ -7715,22 +8453,97 @@ function renderReviewPanel() {
 
 function updateApproveButtons() {
   const track = currentTrack();
-  const canApprove = Boolean(track && track.is_cued);
+  const setFile = isPajamathonSetQueueTrack(track);
+  const canApprove = Boolean(track && track.is_cued && !setFile);
   const hasTrack = Boolean(track);
   ["approveBtn", "approveBtnSide"].forEach((id) => {
     const el = $(id);
-    if (el) el.disabled = !canApprove;
-  });
-  ["toNoCuesBtn", "toLowSkipBtn", "toAcLowBtn", "deleteAddCuesBtn"].forEach((id) => {
-    const el = $(id);
     if (!el) return;
-    el.disabled = !hasTrack;
-    // Ensure danger delete is never left pointer-events:none after enable.
-    if (id === "deleteAddCuesBtn" && hasTrack) {
-      el.removeAttribute("disabled");
-      el.setAttribute("aria-disabled", "false");
+    el.disabled = !canApprove;
+    if (id === "approveBtnSide") {
+      const destN = typeof selectedDestCount === "function" ? selectedDestCount() : 0;
+      if (isSetOverviewMode()) {
+        if (!track || !track.is_cued) {
+          el.textContent = "Cue this set file first";
+          el.disabled = true;
+        } else if (!destN) {
+          el.textContent = "Pick Gemini rec or a folder →";
+          el.disabled = true;
+        } else {
+          const dests = state.selectedDests || [];
+          el.textContent = dests[0]
+            ? `Sort · ${dests[0].library}/${dests[0].path}`
+            : "Sort";
+          el.disabled = false;
+        }
+      } else if (setFile) {
+        const approved = trackReadinessStatus(track) === "approved";
+        if (!track || !track.is_cued) {
+          el.textContent = "Cue this set file first";
+          el.disabled = true;
+        } else if (approved) {
+          el.textContent = "Next Pajamathon track";
+          el.disabled = false;
+        } else {
+          el.textContent = "Approve set cues";
+          el.disabled = false;
+        }
+      } else if (!state.selectedPath) {
+        el.textContent = "Pick a folder →";
+        el.disabled = true;
+      } else if (!state.selectedLane) {
+        el.textContent = "Confirm a color →";
+        el.disabled = true;
+      } else {
+        el.textContent = `Sort · Zouk/${state.selectedPath}`;
+        el.disabled = !canApprove;
+      }
     }
   });
+  const hint = document.querySelector(".rail-primary-hint");
+  if (hint) {
+    hint.textContent = isSetOverviewMode()
+      ? liveSortDestHint()
+      : setFile
+      ? "Sets/Pajamathon — Approve after you listen. Approved tracks leave this list. Inbox still uses Move to Ready."
+      : liveSortDestHint();
+  }
+  const railTitle = document.querySelector("#reviewPanel h2");
+  const railSub = document.querySelector("#reviewPanel .panel-header .subtitle");
+  if (railTitle) {
+    railTitle.textContent = setFile ? "Event crate" : "Cue review";
+  }
+  if (railSub) {
+    railSub.textContent = setFile
+      ? "Sets/Pajamathon: cue this file. Do not Move to Ready"
+      : "Cue, confirm a lane, then sort";
+  }
+  ["toNoCuesBtn", "toLowSkipBtn", "toAcLowBtn"].forEach((id) => {
+    const el = $(id);
+    if (!el) return;
+    el.disabled = !hasTrack || setFile;
+    if (setFile) {
+      el.title = "Park/Ready is only for Add Cues inbox tracks. This file already lives in the set.";
+    }
+  });
+  const deleteBtn = $("deleteAddCuesBtn");
+  if (deleteBtn) {
+    deleteBtn.disabled = !hasTrack;
+    if (hasTrack) {
+      deleteBtn.removeAttribute("disabled");
+      deleteBtn.setAttribute("aria-disabled", "false");
+      deleteBtn.textContent = setFile ? "Delete from Pajamathon" : "Delete from Add Cues";
+      deleteBtn.title = setFile
+        ? "Remove this Sets/Pajamathon name and its VirtualDJ entry. House/Zouk and inbox hard-links stay."
+        : "Trash this Add Cues file and remove its VirtualDJ entry";
+    }
+  }
+  const deleteHint = document.querySelector(".review-section-delete .hint");
+  if (deleteHint) {
+    deleteHint.textContent = setFile
+      ? "Set copy + stems → Trash · this path’s VDJ cues go with it. Library copies stay."
+      : "Audio + stems → Trash · this path’s VDJ cues go with it";
+  }
 }
 
 function _recLibCardHtml(libName, pick) {
@@ -7764,14 +8577,80 @@ function _recLibCardHtml(libName, pick) {
 
 function renderRecommendation() {
   const recBox = $("recommendation");
+  if (!recBox) return;
   const rec = state.recommendation;
   const track = currentTrack();
 
-  if (isReviewMode()) {
+  if (!track) {
     recBox.hidden = true;
     return;
   }
   recBox.hidden = false;
+
+  if (isReviewMode() || isSetOverviewMode()) {
+    if (rec === null) {
+      recBox.className = "recommendation loading review-lane-rec";
+      recBox.innerHTML = "Asking Gemini for a lane…";
+      return;
+    }
+    if (rec.error) {
+      recBox.className = "recommendation error review-lane-rec";
+      recBox.innerHTML = `<strong>Gemini rec failed</strong><div class="rec-reason">${escapeHtml(
+        rec.error
+      )}</div>`;
+      return;
+    }
+    const lane = recommendedLaneFromRec(rec);
+    const folder =
+      (rec.zouk && rec.zouk.relative_path) ||
+      rec.relative_path ||
+      (lane && LANE_FOLDERS[lane]) ||
+      "";
+    const label = lane ? LANE_LABELS[lane] : "";
+    const model = rec.model || "gemini-3.7-flash";
+    const reason = (rec.zouk && rec.zouk.reasoning) || rec.reasoning || "";
+    const destFolder = ensureSortFolder(folder, lane);
+    const alts = ((rec.zouk && rec.zouk.alternatives) || rec.alternatives || [])
+      .map((a) => ensureSortFolder(a, laneFromFolderPath(a) || lane))
+      .filter((a) => a && a !== destFolder);
+    recBox.className = "recommendation review-lane-rec";
+    recBox.innerHTML = `
+      <button type="button" class="review-lane-rec-btn" data-action="use-lane" data-lib="Zouk" data-path="${escapeHtml(
+        destFolder
+      )}"${lane ? ` data-lane="${escapeHtml(lane)}"` : ""}>
+        <div class="subtitle">Gemini rec · ${escapeHtml(model)}</div>
+        <div class="rec-path">${escapeHtml(
+          destFolder ? `Zouk/${destFolder}` : "No folder"
+        )}${label ? ` · ${escapeHtml(label)}` : ""}</div>
+        <div class="rec-reason">${escapeHtml(reason)}</div>
+      </button>
+      ${
+        alts.length
+          ? `<div class="rec-alts">${alts
+              .map(
+                (a) =>
+                  `<button type="button" class="chip" data-action="use-one" data-lib="Zouk" data-path="${escapeHtml(
+                    a
+                  )}">Zouk / ${escapeHtml(a)}</button>`
+              )
+              .join("")}</div>`
+          : ""
+      }
+    `;
+    const applyRecPath = (path) => {
+      if (!path) return;
+      if (currentTrack()?.path !== track.path) return;
+      applySortDest("Zouk", path);
+    };
+    const btn = recBox.querySelector("[data-action='use-lane']");
+    if (btn) btn.addEventListener("click", () => applyRecPath(btn.dataset.path || destFolder));
+    recBox.querySelectorAll("[data-action='use-one']").forEach((chip) => {
+      chip.addEventListener("click", () => applyRecPath(chip.dataset.path));
+    });
+    const destsEmpty = !((state.selectedDests || []).some((d) => d && d.path));
+    if (destsEmpty && destFolder) applyRecPath(destFolder);
+    return;
+  }
 
   if (!track) return;
 
@@ -7954,12 +8833,210 @@ function updatePathHint() {
   }
 }
 
+
+const LANE_FOLDERS = {
+  blue: "Chill",
+  cyan: "Trancy",
+  green: "Energy",
+  yellow: "Intense",
+  orange: "Lamba",
+  magenta: "Kizouk",
+  pink: "R&B",
+  red: "Remixes",
+};
+const LANE_LABELS = {
+  blue: "chill",
+  cyan: "trancy",
+  green: "energy",
+  yellow: "intense",
+  orange: "lamba / afro",
+  magenta: "kizouk",
+  pink: "r&b / hip-hop",
+  red: "remix / classics",
+};
+const FOLDER_TO_LANE = {
+  chill: "blue",
+  "beautiful sound": "blue",
+  beautiful: "blue",
+  longing: "blue",
+  mellow: "blue",
+  lounge: "blue",
+  jazzy: "blue",
+  trancy: "cyan",
+  trippy: "cyan",
+  experimental: "cyan",
+  energy: "green",
+  groovy: "green",
+  intense: "yellow",
+  lamba: "orange",
+  tribal: "orange",
+  world: "orange",
+  kizouk: "magenta",
+  "neo zouk": "magenta",
+  "r&b": "pink",
+  rnb: "pink",
+  "jr&b": "pink",
+  "hip hoppy": "pink",
+  hiphop: "pink",
+  "hip hop": "pink",
+  remixes: "red",
+  classics: "red",
+  nostalgia: "red",
+  pop: "red",
+};
+
+const LANE_DEFAULT_SUBDIRS = {
+  blue: "Chill/Lounge",
+  green: "Energy/Light",
+};
+
+function ensureSortFolder(path, lane) {
+  const parts = String(path || "").replace(/\\/g, "/").split("/").filter(Boolean);
+  if (parts.length >= 2) return parts.join("/");
+  if (parts.length === 1) {
+    const root = parts[0].trim().toLowerCase();
+    if (root === "energy") return "Energy/Light";
+    if (root === "chill") return "Chill/Lounge";
+    return parts[0];
+  }
+  if (LANE_DEFAULT_SUBDIRS[lane]) return LANE_DEFAULT_SUBDIRS[lane];
+  return LANE_FOLDERS[lane] || "";
+}
+
+function recFolderForLane(lane) {
+  const rec = state.recommendation;
+  const recPath = (rec && rec.zouk && rec.zouk.relative_path) || (rec && rec.relative_path) || "";
+  if (recPath && (!lane || laneFromFolderPath(recPath) === lane)) {
+    return ensureSortFolder(recPath, lane || laneFromFolderPath(recPath));
+  }
+  return ensureSortFolder(LANE_FOLDERS[lane], lane);
+}
+
+function liveSortDestHint() {
+  const dests = (state.selectedDests || []).filter((d) => d && d.path);
+  if (!dests.length) {
+    return "Pick Gemini rec or a folder · Zouk leaf + Cues Sorted + color";
+  }
+  const leaves = dests.map((d) => `${d.library}/${d.path}`);
+  const cues = `Cues Sorted/${dests[0].path}`;
+  return `${leaves.join(" · ")} + ${cues}`;
+}
+
+function applySortDest(library, relativePath) {
+  const lib = library === "Both" ? "Zouk" : library || "Zouk";
+  const lane = laneFromFolderPath(relativePath) || state.selectedLane || "";
+  const folder = ensureSortFolder(relativePath, lane);
+  if (lane && LANE_FOLDERS[lane]) state.selectedLane = lane;
+  state.selectedDests = folder
+    ? [{ library: lib, path: folder, key: destKey(lib, folder) }]
+    : [];
+  state.selectedPath = folder;
+  state.selectedPathLibrary = lib;
+  if (folder) {
+    const parts = folder.split("/");
+    let acc = [];
+    for (const part of parts) {
+      acc.push(part);
+      state.expanded.add(acc.join("/"));
+    }
+  }
+  if (typeof renderLanePicker === "function") renderLanePicker();
+  if (typeof updateSelectionLabels === "function") updateSelectionLabels();
+  if (typeof updateApproveButtons === "function") updateApproveButtons();
+  if (typeof syncSortButtonState === "function") syncSortButtonState();
+  if (typeof renderFolders === "function") renderFolders();
+}
+
+function laneFromFolderPath(relativePath) {
+  if (!relativePath) return "";
+  const first = String(relativePath).replace(/\\/g, "/").split("/").filter(Boolean)[0] || "";
+  return FOLDER_TO_LANE[first.trim().toLowerCase()] || "";
+}
+
+function syncLaneFromManualFolder(relativePath) {
+  const lane = laneFromFolderPath(relativePath);
+  if (!lane) return;
+  state.selectedLane = lane;
+  const deepened = ensureSortFolder(relativePath, lane);
+  if (deepened && deepened !== relativePath) {
+    state.selectedPath = deepened;
+    state.selectedDests = [{ library: "Zouk", path: deepened, key: destKey("Zouk", deepened) }];
+  }
+  if (typeof renderLanePicker === "function") renderLanePicker();
+  if (typeof syncSortButtonState === "function") syncSortButtonState();
+  if (typeof updateApproveButtons === "function") updateApproveButtons();
+}
+
+function recommendedLaneFromRec(rec) {
+  if (!rec) return "";
+  const zoukPath = rec.zouk && rec.zouk.relative_path;
+  return (
+    laneFromFolderPath(zoukPath) ||
+    laneFromFolderPath(rec.relative_path) ||
+    ""
+  );
+}
+
+function renderLanePicker() {
+  const box = $("lanePicker");
+  if (!box) return;
+  const recLane = state.recommendedLane || recommendedLaneFromRec(state.recommendation);
+  state.recommendedLane = recLane;
+  box.innerHTML = Object.keys(LANE_FOLDERS)
+    .map((lane) => {
+      const cls = [
+        "lane-swatch",
+        state.selectedLane === lane ? "is-selected" : "",
+        recLane === lane ? "is-rec" : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      return `<button type="button" class="${cls}" data-lane="${lane}" title="${LANE_LABELS[lane]}"></button>`;
+    })
+    .join("");
+  box.querySelectorAll("[data-lane]").forEach((btn) => {
+    btn.addEventListener("click", () => selectLane(btn.dataset.lane));
+  });
+  const hint = $("laneHint");
+  if (hint) {
+    if (state.selectedLane) {
+      hint.textContent = `Color ${LANE_LABELS[state.selectedLane]} · paints after sort. Folder is Gemini rec or manual.`;
+    } else if (recLane) {
+      hint.textContent = `Gemini rec: ${LANE_LABELS[recLane]}. Confirm a color. Folder is rec or manual.`;
+    } else {
+      hint.textContent = "Confirm a color. Folder is Gemini rec or a manual pick. White stays unsorteable.";
+    }
+  }
+}
+
+function selectLane(lane) {
+  if (!LANE_FOLDERS[lane]) return;
+  state.selectedLane = lane;
+  if (typeof renderLanePicker === "function") renderLanePicker();
+  if (typeof updateSelectionLabels === "function") updateSelectionLabels();
+  if (typeof updateApproveButtons === "function") updateApproveButtons();
+  if (typeof syncSortButtonState === "function") syncSortButtonState();
+}
+
+
+function resolveSortTrack() {
+  const selected = currentTrack();
+  if (selected) return selected;
+  const audio = $("audio");
+  const path = audio && audio.dataset && audio.dataset.path;
+  if (path) {
+    const hit = (state.tracks || []).find((t) => t.path === path);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 function syncSortButtonState() {
-  const track = currentTrack();
+  const track = resolveSortTrack();
   const n = selectedDestCount();
   const sortBtn = $("sortBtn");
   if (!sortBtn) return;
-  const canSort = Boolean(track && track.is_cued && n > 0);
+  const canSort = Boolean(track && track.is_cued && n > 0 && (state.selectedLane || isSetOverviewMode()));
   sortBtn.disabled = !canSort;
   sortBtn.classList.toggle("is-waiting", !canSort && !sortBtn.dataset.busy);
   sortBtn.classList.toggle("btn-cta", canSort || Boolean(sortBtn.dataset.busy));
@@ -7968,11 +9045,13 @@ function syncSortButtonState() {
     const paths = new Set(dests.map((d) => d.path));
     const libs = new Set(dests.map((d) => d.library));
     if (!track) {
-      sortBtn.textContent = "Select a track first";
+      sortBtn.textContent = "Confirm a lane →";
     } else if (!track.is_cued) {
       sortBtn.textContent = "Track not cued";
     } else if (n === 0) {
       sortBtn.textContent = "Select a folder →";
+    } else if (!state.selectedLane && !isSetOverviewMode()) {
+      sortBtn.textContent = "Confirm a lane →";
     } else if (n === 2 && paths.size === 1 && libs.has("House") && libs.has("Zouk")) {
       sortBtn.textContent = `Sort · House + Zouk / ${dests[0].path}`;
     } else if (n > 1) {
@@ -8004,9 +9083,12 @@ function updateSelectionLabels() {
   if (hint) {
     hint.textContent = state.selectedPath
       ? `New folder will be created under: ${parentLib} / ${state.selectedPath}`
-      : `New folder will be created at top level of ${pathModeLabel()}`;
+      : state.library === "Both"
+        ? "New folder will be created at top level of Zouk (click House first to create there)"
+        : `New folder will be created at top level of ${pathModeLabel()}`;
   }
   syncSortButtonState();
+  if (typeof updateApproveButtons === "function") updateApproveButtons();
 }
 
 function applyFolderSelection(library, relativePath) {
@@ -8029,12 +9111,13 @@ function applyFolderSelection(library, relativePath) {
 function setSingleDest(library, relativePath, { expand = false } = {}) {
   const lib =
     library === "Both" ? "Zouk" : library || state.library || "Zouk";
-  const path = relativePath || "";
+  const path = ensureSortFolder(relativePath, laneFromFolderPath(relativePath) || state.selectedLane);
   state.selectedDests = path
     ? [{ library: lib, path, key: destKey(lib, path) }]
     : [];
   state.selectedPath = path;
   state.selectedPathLibrary = lib;
+  syncLaneFromManualFolder(path);
   if (expand && path) {
     const parts = path.split("/");
     let acc = [];
@@ -8060,7 +9143,7 @@ function _expandFolderPath(relativePath) {
 /** Toggle a (library, folder) destination in the multi-select set. */
 function toggleDest(library, relativePath, { expand = false } = {}) {
   const lib = library || (state.library === "Both" ? "Zouk" : state.library);
-  const path = relativePath || "";
+  const path = ensureSortFolder(relativePath, laneFromFolderPath(relativePath) || state.selectedLane);
   if (!path) return;
   const key = destKey(lib, path);
   const exists = state.selectedDests.some((d) => d.key === key);
@@ -8074,6 +9157,7 @@ function toggleDest(library, relativePath, { expand = false } = {}) {
   }
   state.selectedPath = path;
   state.selectedPathLibrary = lib;
+  syncLaneFromManualFolder(path);
   if (expand) _expandFolderPath(path);
   updateSelectionLabels();
   renderFolders();
@@ -8084,7 +9168,7 @@ function toggleDest(library, relativePath, { expand = false } = {}) {
  * If both are already selected, remove both; otherwise ensure both are selected.
  */
 function toggleDestBothLibraries(relativePath, { expand = false } = {}) {
-  const path = relativePath || "";
+  const path = ensureSortFolder(relativePath, laneFromFolderPath(relativePath) || state.selectedLane);
   if (!path) return;
   const houseKey = destKey("House", path);
   const zoukKey = destKey("Zouk", path);
@@ -8162,11 +9246,20 @@ function renderFolderNode(node, depth = 0, library = "Zouk") {
   const open = state.expanded.has(node.relative_path) || Boolean(state.filter);
   const selected = hasDest(library, node.relative_path);
   const rec = state.recommendation;
-  const isRec =
-    rec &&
-    !rec.error &&
-    rec.library === library &&
-    rec.relative_path === node.relative_path;
+  const nodeDest = ensureSortFolder(node.relative_path, laneFromFolderPath(node.relative_path));
+  const recPaths = [];
+  if (rec && !rec.error) {
+    const pick = library === "House" ? rec.house : rec.zouk;
+    if (pick && pick.relative_path) recPaths.push(pick.relative_path);
+    if (rec.library === library && rec.relative_path) recPaths.push(rec.relative_path);
+    const alts = (pick && pick.alternatives) || [];
+    recPaths.push(...alts);
+    if (rec.library === library) recPaths.push(...(rec.alternatives || []));
+  }
+  const isRec = recPaths.some((p) => {
+    const dest = ensureSortFolder(p, laneFromFolderPath(p));
+    return p === node.relative_path || dest === node.relative_path || dest === nodeDest;
+  });
 
   const kids =
     hasKids && open
@@ -8204,7 +9297,10 @@ function renderFolderNode(node, depth = 0, library = "Zouk") {
             ? "Copy into House + Zouk at this folder (Alt-click for this library only)"
             : "Toggle destination"
         }">
-          <span class="folder-name">${escapeHtml(node.name)}</span>
+          <span class="folder-copy">
+            <span class="folder-name">${escapeHtml(node.name)}</span>
+            <span class="folder-sort-to">sort to ${escapeHtml(library)}/${escapeHtml(nodeDest)}</span>
+          </span>
           ${
             bothComplete
               ? `<span class="folder-hz-badge" title="House + Zouk">H+Z</span>`
@@ -8276,6 +9372,7 @@ function renderSelectedDestChips() {
 
 function renderFolders() {
   const root = $("folderTree");
+  if (!root) return;
   let html = "";
 
   if (state.library === "Both" && state.folderTrees) {
@@ -8310,6 +9407,7 @@ function renderFolders() {
       } else {
         toggleDest(lib, path, { expand: true });
       }
+      if (typeof updateApproveButtons === "function") updateApproveButtons();
     });
   });
   root.querySelectorAll("[data-toggle]").forEach((btn) => {
@@ -8323,8 +9421,18 @@ function renderFolders() {
   });
 }
 
+const UI_BUILD = "20260829-recs-event-plays";
+
 async function loadHealth() {
   state.health = await api("/api/health");
+  const serverBuild = state.health && state.health.ui_build;
+  if (serverBuild && serverBuild !== UI_BUILD) {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("v") === String(serverBuild)) return;
+    url.searchParams.set("v", String(serverBuild));
+    window.location.replace(url.toString());
+    return;
+  }
   const vdj = state.health.virtualdj_running;
   $("vdjBadge").className = `badge ${vdj ? "warn" : "ok"}`;
   $("vdjBadge").textContent = vdj ? "VirtualDJ running" : "VirtualDJ closed";
@@ -8362,7 +9470,11 @@ async function loadTracks({ keepPath, skipStatus = false, silent = false } = {})
   if (listEl && !soft) listEl.classList.add("list-loading");
   if (!skipStatus && !soft) {
     setStatus(
-      requestedMode === "add_cues" ? "Loading Add Cues…" : "Loading Ready for Sort…"
+      requestedMode === "add_cues"
+        ? "Loading Add Cues…"
+        : requestedMode === "set_overview"
+          ? "Loading Set Overview…"
+          : "Loading Ready for Sort…"
     );
   } else if (!skipStatus && soft && requestedMode === "add_cues" && !isAutocueJobRunning()) {
     setStatus("Updating cue list…");
@@ -8382,9 +9494,17 @@ async function loadTracks({ keepPath, skipStatus = false, silent = false } = {})
 
     const prevPath = keepPath || currentTrack()?.path;
     state.tracks = mergeLoadedPlacements(state.tracks, data.tracks || []);
+    if (requestedMode === "set_overview") {
+      applyApprovedPaths(data.approved_paths);
+      applyMustPlayPaths(data.must_play_paths);
+    }
     const counts = data.counts || {};
 
-    if (requestedMode === "add_cues") {
+    if (requestedMode === "set_overview") {
+      $("countsBadge").textContent = `${counts.total || 0} in set · ${
+        counts.different || 0
+      } different`;
+    } else if (requestedMode === "add_cues") {
       const paj = counts.pajamathon || 0;
       $("countsBadge").textContent = paj
         ? `Pajamathon ${counts.pajamathon_not_cued || 0}/${paj} need cues · ${
@@ -8412,7 +9532,7 @@ async function loadTracks({ keepPath, skipStatus = false, silent = false } = {})
     if (currentTrack() && !isPracticeMode() && !isRecsMode() && !isAssembleMode()) {
       loadTrackPlacements(currentTrack());
     }
-    if (currentTrack() && requestedMode === "sort") requestRecommendation(currentTrack());
+    if (currentTrack() && (requestedMode === "add_cues" || requestedMode === "sort" || requestedMode === "set_overview")) requestRecommendation(currentTrack());
     // Callers that just finished promote/sort pass skipStatus and set their own
     // success handoff *after* this returns so the CTA is not wiped.
     if (!skipStatus) {
@@ -8421,11 +9541,17 @@ async function loadTracks({ keepPath, skipStatus = false, silent = false } = {})
           ? counts.pajamathon
             ? `Add Cues · ${counts.pajamathon} Pajamathon · ${counts.inbox || 0} inbox`
             : `Add Cues · ${counts.total || state.tracks.length} tracks · primary action on the right`
-          : `Ready for Sort · ${counts.total || state.tracks.length} tracks · pick a folder, then Sort`
+          : requestedMode === "set_overview"
+            ? `Set Overview · ${counts.total || state.tracks.length} · same / different · Remove · Send back · Approved`
+            : `Ready for Sort · ${counts.total || state.tracks.length} tracks · pick a folder, then Sort`
       );
     }
     updateBatchAddCuesButton();
     updatePipelineStrip();
+    syncSortButtonState();
+    renderLanePicker();
+    if (typeof updateApproveButtons === "function") updateApproveButtons();
+    if (requestedMode === "set_overview") renderSetOverviewRail();
   } catch (err) {
     if (loadGen !== state.tracksLoadGen || state.mode !== requestedMode) {
       return;
@@ -8456,48 +9582,62 @@ async function loadTracks({ keepPath, skipStatus = false, silent = false } = {})
     // Only clear loading style if this is still the latest load for this mode.
     if (listEl && loadGen === state.tracksLoadGen) {
       listEl.classList.remove("list-loading");
+      await hydrateAutocueJobs();
     }
   }
 }
 
 function applyModeUi() {
+  syncReadinessFilterLabels();
   const review = isReviewMode();
   const practice = isPracticeMode();
   const recs = isRecsMode();
   const assemble = isAssembleMode();
+  const bestSet = isBestSetMode();
+  const setOverview = isSetOverviewMode();
   document.body.classList.toggle("mode-practice", practice);
   document.body.classList.toggle("mode-recs", recs);
   document.body.classList.toggle("mode-assemble", assemble);
   document.body.classList.toggle("mode-review", review);
-  document.body.classList.toggle("mode-sort", !review && !practice && !recs && !assemble);
+  document.body.classList.toggle("mode-best-set", bestSet);
+  document.body.classList.toggle("mode-set-overview", setOverview);
+  document.body.classList.toggle("mode-sort", !review && !practice && !recs && !assemble && !bestSet && !setOverview);
   document.body.classList.toggle("practice-stack-layout", practice);
 
-  $("listTitle").textContent = practice
+  $("listTitle").textContent = bestSet
+    ? "Best for set"
+    : practice
     ? "Practice mixes"
-    : isAssembleMode()
+    : setOverview
+      ? "Set Overview"
+      : isAssembleMode()
       ? "Pajamathon"
       : isRecsMode()
         ? "Live from VDJ"
         : review
           ? state.crateFilter === "pajamathon"
-            ? "Pajamathon cues"
+            ? "Add Cues / Pajamathon"
             : state.crateFilter === "cueing"
               ? "Currently cueing"
               : "Add Cues"
           : "Ready for Sort";
-  $("listSubtitle").textContent = practice
+  $("listSubtitle").textContent = bestSet
+    ? "Play a keeper · Pause / Stop stay on this page"
+    : practice
     ? "Select a mix to analyze"
-    : isAssembleMode()
+    : setOverview
+      ? "same / different · Copy cues · Remove · Send back · Approved"
+      : isAssembleMode()
       ? "Newest Zouk first · vibe crate"
       : isRecsMode()
-        ? "Auto-checks now-playing every 5s"
+        ? "Follows VDJ / STAGE now-playing"
         : review
           ? state.crateFilter === "pajamathon"
-            ? "Event crate · cue these separately from the inbox"
+            ? "Cue, confirm a lane, then sort"
             : state.crateFilter === "cueing"
               ? "Tracks AutoCue is working on right now"
-              : "Step 1 · cue, listen, promote"
-          : "Step 2 · place into House / Zouk";
+              : "Cue, confirm a lane, then sort"
+          : "Cue, confirm a lane, then sort";
   const playerHeading = $("playerHeading");
   if (playerHeading) {
     playerHeading.textContent = practice ? "Mix playback" : "Now playing";
@@ -8509,25 +9649,52 @@ function applyModeUi() {
     subEl.textContent = "";
     subEl.hidden = true;
   }
-  $("listToolbar").hidden = !review || isRecsMode() || isAssembleMode();
+  $("listToolbar").hidden = (!review && !setOverview) || isRecsMode() || isAssembleMode();
   const trackSearch = $("trackSearch");
   if (trackSearch) {
     trackSearch.placeholder = practice
       ? "Search practice mixes…"
-      : review
+      : setOverview
+        ? "Search the set…"
+        : review
         ? "Search Add Cues…"
         : "Search Ready for Sort…";
   }
   const recsMode = isRecsMode();
   const assembleMode = isAssembleMode();
-  $("foldersPanel").hidden = review || practice || recsMode || assembleMode;
+  $("foldersPanel").hidden = review || practice || recsMode || assembleMode || bestSet || setOverview;
+  const crateFilter = $("crateFilter");
+  if (crateFilter) crateFilter.hidden = setOverview;
+  const readinessFilter = $("readinessFilter");
+  if (readinessFilter) readinessFilter.hidden = setOverview;
+  const setDirFilter = $("setDirFilter");
+  if (setDirFilter) setDirFilter.hidden = !setOverview;
+  const setApprovalFilter = $("setApprovalFilter");
+  if (setApprovalFilter) setApprovalFilter.hidden = !setOverview;
+  if (setOverview) {
+    renderSetDirFilter();
+    document.querySelectorAll("#setApprovalFilter button").forEach((b) => {
+      b.classList.toggle("active", b.dataset.setApproval === (state.setApprovalFilter || "all"));
+    });
+  }
+  renderLanePicker();
   $("reviewPanel").hidden = !review;
+  const setOverviewPanel = $("setOverviewPanel");
+  if (setOverviewPanel) setOverviewPanel.hidden = !setOverview;
+  if (typeof mountSharedSortRail === "function") mountSharedSortRail();
+  if (setOverview) renderSetOverviewRail();
   const practicePanel = $("practicePanel");
   if (practicePanel) practicePanel.hidden = !practice;
+  const bestSetPanel = $("bestSetPanel");
+  if (bestSetPanel) bestSetPanel.hidden = !bestSet;
   const recsPanel = $("recsPanel");
   if (recsPanel) recsPanel.hidden = !recsMode;
   const assemblePanel = $("assemblePanel");
   if (assemblePanel) assemblePanel.hidden = !assembleMode;
+  const playerPanel = $("playerPanel");
+  if (playerPanel) playerPanel.hidden = bestSet;
+  const queue = document.querySelector(".zone-queue");
+  if (queue) queue.hidden = bestSet;
 
   // Practice: transport + transition waveform; hide sort/cue chrome.
   const hideInPractice = [
@@ -8543,14 +9710,14 @@ function applyModeUi() {
   hideInPractice.forEach((id) => {
     const el = $(id);
     if (!el) return;
-    if (practice || recsMode || assembleMode) {
+    if (practice || recsMode || assembleMode || bestSet) {
       el.hidden = true;
     } else if (id === "sortActions") {
-      el.hidden = review;
+      el.hidden = review || setOverview;
     } else if (id === "reviewActions") {
       el.hidden = !review;
     } else if (id === "recommendation") {
-      el.hidden = review;
+      el.hidden = review || setOverview;
     } else if (id === "blockBanner" || id === "placementCard") {
       // leave to their own renderers when leaving practice
     } else {
@@ -8566,7 +9733,7 @@ function applyModeUi() {
       practiceWave.classList.remove("is-empty");
     }
   }
-  $("rerunRecBtn").hidden = review || practice || isRecsMode() || isAssembleMode();
+  $("rerunRecBtn").hidden = review || setOverview || practice || bestSet || isRecsMode() || isAssembleMode();
 
   // AutoCue scope buttons live in Add Cues review, not Sort.
   const headerScopes = $("autocueScopeHeader");
@@ -8579,23 +9746,31 @@ function applyModeUi() {
   if (practice) {
     $("shortcutsHint").innerHTML = `Shortcuts: <span class="kbd">Space</span> play/pause ·
        <span class="kbd">J</span>/<span class="kbd">K</span> mixes ·
-       Seek on a transition to jump −20s`;
+       <span class="kbd">←</span>/<span class="kbd">→</span> beat ·
+       Seek on a transition to jump −20s ·
+       <span class="kbd">?</span> keys`;
   } else if (review) {
     $("shortcutsHint").innerHTML = `Shortcuts: <span class="kbd">Space</span> play/pause ·
        <span class="kbd">J</span>/<span class="kbd">K</span> tracks ·
+       <span class="kbd">←</span>/<span class="kbd">→</span> beat ·
        <span class="kbd">1</span>–<span class="kbd">9</span> jump cues ·
-       <span class="kbd">L</span> loop play ·
+       <span class="kbd">L</span> loop ·
+       <span class="kbd">C</span> cue · <span class="kbd">O</span> loop place ·
        <span class="kbd">Z</span> zouk · <span class="kbd">H</span> ½ BPM ·
        <span class="kbd">G</span> ones ·
-       <span class="kbd">A</span> approve · <span class="kbd">S</span> skip`;
+       <span class="kbd">A</span>/<span class="kbd">S</span> approve/skip ·
+       <span class="kbd">?</span> keys`;
   } else {
     $("shortcutsHint").innerHTML = `Shortcuts: <span class="kbd">Space</span> play/pause ·
        <span class="kbd">J</span>/<span class="kbd">K</span> tracks ·
+       <span class="kbd">←</span>/<span class="kbd">→</span> beat ·
        <span class="kbd">1</span>–<span class="kbd">9</span> jump cues ·
-       <span class="kbd">L</span> loop play ·
+       <span class="kbd">L</span> loop ·
+       <span class="kbd">C</span> cue · <span class="kbd">O</span> loop place ·
        <span class="kbd">Z</span> zouk · <span class="kbd">H</span> ½ BPM ·
        <span class="kbd">G</span> ones ·
-       <span class="kbd">⌘</span>+<span class="kbd">Enter</span> sort`;
+       <span class="kbd">⌘</span>+<span class="kbd">Enter</span> sort ·
+       <span class="kbd">?</span> keys`;
   }
 
   document.querySelectorAll("#modeSeg button").forEach((b) => {
@@ -8611,10 +9786,13 @@ function applyModeUi() {
 }
 
 async function setMode(mode) {
+  if (mode === "sort") mode = "add_cues";
   if (
     mode !== "sort" &&
     mode !== "add_cues" &&
     mode !== "practice" &&
+    mode !== "best_set" &&
+    mode !== "set_overview" &&
     mode !== "recs" &&
     mode !== "assemble"
   )
@@ -8630,7 +9808,11 @@ async function setMode(mode) {
   stopRecsPoll();
   stopAssemblePoll();
   state.mode = mode;
+  if (mode === "set_overview" && !state.setDirFilter) state.setDirFilter = "pajamathon";
+  if (mode === "set_overview" && !state.setApprovalFilter) state.setApprovalFilter = "all";
   state.recommendation = null;
+  state.selectedLane = "";
+  state.recommendedLane = "";
   state.selectedPath = "";
   state.selectedPathLibrary = "";
   state.readinessFilter = "all";
@@ -8686,6 +9868,13 @@ async function setMode(mode) {
       renderPracticePanel();
       setPlayerLoading(false);
       await loadPracticeMixes();
+    } else if (isBestSetMode()) {
+      setPlayerLoading(false);
+      state.tracks = [];
+      state.index = 0;
+      renderTrackList();
+      setStatus("Loading best transitions…");
+      await loadBestPracticeScores();
     } else if (isRecsMode()) {
       setPlayerLoading(false);
       state.tracks = [];
@@ -8707,8 +9896,8 @@ async function setMode(mode) {
       setWaveformStatus("Select a track");
       setPlayerLoading(false);
       await loadTracks();
-      if (isReviewMode()) await hydrateAutocueJobs();
-      if (!isReviewMode()) await loadFolders();
+      await hydrateAutocueJobs();
+      await loadFolders();
     }
   } finally {
     document.body.classList.remove("is-mode-loading");
@@ -8773,7 +9962,15 @@ async function loadTrackPlacements(track, { force = false } = {}) {
 async function selectTrack(index) {
   state.index = index;
   state.trackGen += 1;
+  // Dest is per-track. Never keep the last song's artist/folder as a global dest.
+  try { clearSelectedDests(); } catch { state.selectedDests = []; state.selectedPath = ""; state.selectedPathLibrary = ""; }
   const selected = currentTrack();
+  if (
+    state.lastCueCopy &&
+    (!selected || state.lastCueCopy.sourcePath !== selected.path)
+  ) {
+    state.lastCueCopy = null;
+  }
   if (selected) {
     loadTrackPlacements(selected);
   }
@@ -8821,6 +10018,7 @@ async function selectTrack(index) {
   setPlayerLoading(true);
   renderTrackList();
   renderPlayer();
+  if (isSetOverviewMode()) renderSetOverviewRail();
   // AutoCue busy state is per-track — refresh labels when switching.
   if (!isPracticeMode()) {
     syncAutocueUi();
@@ -8829,7 +10027,12 @@ async function selectTrack(index) {
   const track = currentTrack();
   if (isPracticeMode() && track) {
     await loadPracticeDetail(track.path);
-  } else if (track && !isReviewMode()) {
+  } else if (
+    track &&
+    !isPracticeMode() &&
+    !isRecsMode() &&
+    !isAssembleMode()
+  ) {
     requestRecommendation(track);
   }
 }
@@ -8906,9 +10109,11 @@ function renderPracticeMixList() {
         mix.duration_sec != null
           ? `<span class="mix-dur">${formatClock(mix.duration_sec)}</span>`
           : "";
-      const flag = mix.is_practice
-        ? `<span class="badge ok">practice</span>`
-        : `<span class="badge neutral">mix</span>`;
+      const flag = mix.exclude_from_best
+        ? `<span class="badge warn">not in Best</span>`
+        : mix.is_practice
+          ? `<span class="badge ok">practice</span>`
+          : `<span class="badge neutral">mix</span>`;
       return `<button type="button" class="practice-mix-row ${active}" data-index="${i}">
         <strong>${escapeHtml(t.name)}</strong>
         <div class="track-row-meta">${flag} ${dur}</div>
@@ -9116,45 +10321,23 @@ function renderPracticeAnalyzeStatus() {
 
 
 function syncPracticeViewToggle() {
-  document.querySelectorAll("#practiceViewToggle button").forEach((b) => {
-    b.classList.toggle("active", b.dataset.practiceView === state.practiceView);
-  });
+  // Best for set is its own page now. Practice stays on the mix view.
   const mixView = $("practiceMixView");
-  const bestView = $("practiceBestView");
-  const isBest = state.practiceView === "best";
-  if (mixView) mixView.hidden = isBest;
-  if (bestView) bestView.hidden = !isBest;
+  if (mixView) mixView.hidden = false;
   const analyzeBtn = $("practiceAnalyzeBtn");
-  if (analyzeBtn) {
-    analyzeBtn.hidden = isBest;
-  }
-  // Per-mix sort only applies to This mix view (lives inside #practiceMixView).
+  if (analyzeBtn) analyzeBtn.hidden = false;
   const txSort = $("practiceTxSort");
-  if (txSort) txSort.hidden = isBest;
-  const hint = $("practiceViewBarHint");
-  if (hint) {
-    hint.textContent = isBest
-      ? "Across all pj mixes"
-      : "Per-mix transitions";
-  }
-  const bar = $("practiceViewBar");
-  if (bar) bar.classList.toggle("is-best", isBest);
+  if (txSort) txSort.hidden = false;
 }
 
 async function setPracticeView(view) {
-  const next = view === "best" ? "best" : "mix";
-  if (state.practiceView === next) {
-    syncPracticeViewToggle();
-    if (next === "best") await loadBestPracticeScores();
+  if (view === "best") {
+    await setMode("best_set");
     return;
   }
-  state.practiceView = next;
+  state.practiceView = "mix";
   syncPracticeViewToggle();
-  if (next === "best") {
-    await loadBestPracticeScores();
-  } else {
-    renderPracticePanel();
-  }
+  if (isPracticeMode()) renderPracticePanel();
 }
 
 async function loadBestPracticeScores() {
@@ -9184,7 +10367,6 @@ async function loadBestPracticeScores() {
 }
 
 function renderPracticeBestList() {
-  syncPracticeViewToggle();
   const el = $("practiceBestList");
   const countEl = $("practiceBestCount");
   if (!el) return;
@@ -9251,6 +10433,12 @@ function renderPracticeBestList() {
     })
     .join("");
 
+  const playingId = state.practicePlayingBestId;
+  if (playingId != null) {
+    const playing = el.querySelector(`.practice-best-row[data-id="${playingId}"]`);
+    if (playing) playing.classList.add("is-playing");
+  }
+
   el.querySelectorAll(".practice-priority-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const id = Number(btn.dataset.id);
@@ -9313,32 +10501,106 @@ async function playBestPracticeItem(item) {
     setStatus("Missing mix path for this transition.", "error");
     return;
   }
-  let idx = state.tracks.findIndex((t) => t.path === mixPath);
-  if (idx < 0) {
-    // Mix not in current sidebar list — inject a synthetic row so player can load it.
-    const name = mixPath.split("/").pop() || mixPath;
-    state.practiceMixes = [
-      ...(state.practiceMixes || []),
-      { path: mixPath, name, is_practice: true },
-    ];
-    state.tracks = state.practiceMixes.map(practiceMixAsTrack);
-    idx = state.tracks.length - 1;
-    renderTrackList();
+  const audio = $("audio");
+  if (!audio) {
+    setStatus("No audio element — refresh the page.", "error");
+    return;
   }
-  // Stay on Best view; selectTrack loads audio + detail for seeking.
-  const prevView = state.practiceView;
-  state.practiceView = "best";
-  await selectTrack(idx);
-  state.practiceView = prevView;
-  syncPracticeViewToggle();
-  // Ensure best list still visible after selectTrack → renderPracticePanel
-  if (state.practiceView === "best") {
-    renderPracticeBestList();
+  const list = $("practiceBestList");
+  const panel = $("bestSetPanel");
+  const listScroll = list ? list.scrollTop : 0;
+  const panelScroll = panel ? panel.scrollTop : 0;
+
+  state.practicePlayingBestId = item.id;
+  const now = $("bestSetNow");
+  const nowTitle = $("bestSetNowTitle");
+  const nowMeta = $("bestSetNowMeta");
+  if (now) now.hidden = false;
+  if (nowTitle) {
+    nowTitle.textContent = `${item.from_track || "?"} → ${item.to_track || "?"}`;
+  }
+  if (nowMeta) {
+    const clock =
+      item.at_sec != null && typeof formatClock === "function"
+        ? formatClock(item.at_sec)
+        : "";
+    nowMeta.textContent = `${item.mix_name || ""}${clock ? ` · @ ${clock}` : ""} · −20s`;
+  }
+  if (list) {
+    list.querySelectorAll(".practice-best-row.is-playing").forEach((el) => {
+      el.classList.remove("is-playing");
+    });
+    const row = list.querySelector(`.practice-best-row[data-id="${item.id}"]`);
+    if (row) row.classList.add("is-playing");
+  }
+
+  if (audio.dataset.path !== mixPath) {
+    audio.pause();
+    try {
+      audio.removeAttribute("src");
+      audio.load();
+    } catch {
+      /* ignore */
+    }
+    audio.dataset.path = mixPath;
+    audio.src = `/api/audio?path=${encodeURIComponent(mixPath)}`;
   }
   seekPracticeTransition(Number(item.at_sec) || 0, {
     play: true,
     index: item.transition_index,
   });
+  updateTransportUi();
+  if (list) list.scrollTop = listScroll;
+  if (panel) panel.scrollTop = panelScroll;
+}
+
+function renderPracticeExcludeBestBtn() {
+  const btn = $("practiceExcludeBestBtn");
+  if (!btn) return;
+  const d = state.practiceDetail;
+  const hasMix = Boolean(d?.path || state.practiceMixPath);
+  btn.hidden = !hasMix || isBestSetMode();
+  const on = Boolean(d?.exclude_from_best);
+  btn.classList.toggle("is-on", on);
+  btn.setAttribute("aria-pressed", on ? "true" : "false");
+  btn.textContent = on ? "Excluded from Best" : "Exclude from Best";
+  btn.title = on
+    ? "This mix stays on Practice. Click to list its transitions on Best for set again."
+    : "Keep reviewing this mix, but do not list its transitions on Best for set.";
+}
+
+async function togglePracticeExcludeFromBest() {
+  const path = state.practiceDetail?.path || state.practiceMixPath;
+  if (!path) {
+    setStatus("Select a practice mix first.", "error");
+    return;
+  }
+  const next = !Boolean(state.practiceDetail?.exclude_from_best);
+  try {
+    const data = await api("/api/practice/mix-settings", {
+      method: "POST",
+      body: JSON.stringify({ path, exclude_from_best: next }),
+    });
+    const excluded = Boolean(data.exclude_from_best);
+    if (state.practiceDetail) {
+      state.practiceDetail = { ...state.practiceDetail, exclude_from_best: excluded };
+    }
+    const name = state.practiceDetail?.name || "";
+    state.practiceMixes = (state.practiceMixes || []).map((m) =>
+      m.path === path || m.name === name
+        ? { ...m, exclude_from_best: excluded }
+        : m
+    );
+    renderPracticePanel();
+    renderTrackList();
+    setStatus(
+      excluded
+        ? "Excluded from Best for set — still here to review."
+        : "This mix can appear on Best for set again."
+    );
+  } catch (err) {
+    setStatus(err.message || String(err), "error");
+  }
 }
 
 function renderPracticePanel() {
@@ -9349,9 +10611,9 @@ function renderPracticePanel() {
   if (!meta || !tracksEl || !txEl) return;
   renderPracticeDbBadge();
   renderPracticeAnalyzeStatus();
+  renderPracticeExcludeBestBtn();
   syncPracticeViewToggle();
-  if (state.practiceView === "best") {
-    // Keep mix-detail state warm for playback, but render the Best shortlist.
+  if (isBestSetMode()) {
     renderPracticeBestList();
     return;
   }
@@ -9368,6 +10630,7 @@ function renderPracticePanel() {
       $("practiceSummary").innerHTML = "";
     }
     if (analyzeBtn) analyzeBtn.disabled = true;
+    renderPracticeExcludeBestBtn();
     return;
   }
 
@@ -9389,6 +10652,11 @@ function renderPracticePanel() {
       <span class="badge ${txN ? "ok" : "neutral"}">${txN} transitions</span>
       <span class="badge neutral">${escapeHtml(dur)}</span>
       <span class="badge ${scoredN ? "ok" : "neutral"}">${scoredN} scored</span>
+      ${
+        d.exclude_from_best
+          ? `<span class="badge warn">Real set · not in Best</span>`
+          : ""
+      }
     </div>
     ${
       txN
@@ -9756,10 +11024,88 @@ async function startPracticeAnalyze({ force = false } = {}) {
   }
 }
 
+async function markSetOverviewMustPlay() {
+  const track = selectedQueueTrack() || currentTrack();
+  if (!track || !isPajamathonSetQueueTrack(track)) {
+    setStatus("Must Play is only for Sets/Pajamathon copies.", "error");
+    return;
+  }
+  try {
+    setStatus(`Must Play · ${trackDisplayTitle(track)}…`);
+    await api("/api/must-play-set", {
+      method: "POST",
+      body: JSON.stringify({ path: track.path }),
+    });
+    markTrackMustPlay(track);
+    setStatus(`Must Play · ${trackDisplayTitle(track)}`, "success");
+    renderTrackList();
+    renderSetOverviewRail();
+    await loadTracks({ keepPath: track.path, skipStatus: true });
+    markTrackMustPlay(track);
+    renderTrackList();
+    renderSetOverviewRail();
+  } catch (err) {
+    setStatus(err.message || String(err), "error");
+  }
+}
+
+async function approveSetOverviewCues() {
+  return approveSetCues({ stick: true });
+}
+
+async function approveSetCues({ stick = false } = {}) {
+  const track = selectedQueueTrack() || currentTrack();
+  if (!track || !isPajamathonSetQueueTrack(track)) return;
+  const stay = stick || isSetOverviewMode();
+  if (!track.is_cued) {
+    setStatus("Add cue points before approving this set file.", "error");
+    return;
+  }
+  try {
+    setStatus(`Approving cues on ${trackDisplayTitle(track)}…`);
+    await api("/api/approve-set-cues", {
+      method: "POST",
+      body: JSON.stringify({ path: track.path }),
+    });
+    markTrackKirillApproved(track);
+    setStatus(
+      stay
+        ? `Kirill approved · ${trackDisplayTitle(track)}`
+        : `Approved · ${trackDisplayTitle(track)} leaves the open Pajamathon list`,
+      "success"
+    );
+    if (stay) {
+      renderTrackList();
+      renderSetOverviewRail();
+    }
+    await loadTracks({ keepPath: track.path, skipStatus: true });
+    markTrackKirillApproved(track);
+    if (stay) {
+      renderTrackList();
+      renderSetOverviewRail();
+      return;
+    }
+    const still = currentTrack();
+    if (still && trackIsKirillApproved(still)) {
+      skipToNextReviewTrack();
+    }
+  } catch (err) {
+    setStatus(err.message || String(err), "error");
+  }
+}
+
 async function promoteTrack(destinationStage, { requireCued = null } = {}) {
   const track = currentTrack();
   if (!track) return;
   if (state.promoteInFlight) return;
+
+  if (isPajamathonSetQueueTrack(track)) {
+    setStatus(
+      "This file is already in the Pajamathon set. Cue it in place — Move to Ready is only for Add Cues inbox tracks.",
+      "error"
+    );
+    return;
+  }
 
   if (destinationStage === "ready_for_sort" && !track.is_cued) {
     setStatus("Cannot approve: track has no VDJ cue points yet.", "error");
@@ -9860,8 +11206,9 @@ async function requestRecommendation(track, { force = false } = {}) {
     });
     if (currentTrack()?.path !== track.path) return;
     state.recommendation = data.recommendation;
+    state.recommendedLane = recommendedLaneFromRec(data.recommendation);
     renderRecommendation();
-    // Soft-highlight folders after dual or single rec
+    renderLanePicker();
     if (data.ok && data.recommendation) {
       renderFolders();
     }
@@ -9879,9 +11226,24 @@ async function requestRecommendation(track, { force = false } = {}) {
 }
 
 async function sortSelected() {
-  const track = currentTrack();
+  const track = resolveSortTrack();
+  if (!track) {
+    setStatus("Select a track in the list, or wait for it to finish loading.", "error");
+    return;
+  }
   const dests = state.selectedDests || [];
-  if (!track || !dests.length) return;
+  if (!state.selectedLane && dests[0] && dests[0].path) {
+    const inferred = laneFromFolderPath(dests[0].path);
+    if (inferred) state.selectedLane = inferred;
+  }
+  if (!dests.length) {
+    setStatus("Pick Gemini rec or a folder first. Color does not pick dest.", "error");
+    return;
+  }
+  if (!state.selectedLane && !isSetOverviewMode()) {
+    setStatus("Confirm a color. It paints after sort and does not pick the folder.", "error");
+    return;
+  }
   if (state.sortInFlight) return;
   if (!track.is_cued) {
     setStatus("Cannot sort: track is not cued.", "error");
@@ -9927,11 +11289,12 @@ async function sortSelected() {
       method: "POST",
       body: JSON.stringify({
         path: track.path,
+        lane: state.selectedLane,
         library: dests[0].library,
-        relative_folder: dests[0].path,
+        relative_folder: ensureSortFolder(dests[0].path, state.selectedLane),
         destinations: dests.map((d) => ({
           library: d.library,
-          relative_folder: d.path,
+          relative_folder: ensureSortFolder(d.path, state.selectedLane),
         })),
         allow_vdj_running: Boolean(allowRunning),
       }),
@@ -9949,14 +11312,51 @@ async function sortSelected() {
     else if ((r.sets_cues_skipped || 0) > 0) {
       archiveBits.push("Pajamathon already cued");
     }
+    if (isSetOverviewMode()) {
+      if (r.lane) {
+        track.lane = r.lane;
+        track.user_color = r.lane_color || track.user_color;
+        track.needs_sort = false;
+      }
+      const dests = r.library_dests || [];
+      if (dests.length) {
+        track.placements = track.placements || { library: [], cues_sorted: [], sets: [] };
+        const rel = dests[0].relative_folder || "";
+        const destPath = dests[0].path || r.dest_path;
+        if (destPath) {
+          track.placements.library = [
+            { path: destPath, relative_path: rel ? `${rel}/${track.name}` : track.name, is_cued: true },
+            ...(track.placements.library || []).filter((h) => h.path !== destPath),
+          ];
+        }
+        if (r.cues_sorted_path) {
+          track.placements.cues_sorted = [
+            { path: r.cues_sorted_path, relative_path: rel ? `${rel}/${track.name}` : track.name, is_cued: true },
+            ...(track.placements.cues_sorted || []).filter((h) => h.path !== r.cues_sorted_path),
+          ];
+        }
+      }
+      renderSetOverviewList(filteredTrackIndexes());
+      if (typeof renderSetOverviewRail === "function") renderSetOverviewRail();
+    }
     clearSelectedDests();
     // Refresh without clobbering status; remaining count comes from post-load list.
-    await loadTracks({ skipStatus: true });
+    await loadTracks({ skipStatus: true, keepPath: track.path });
     await loadFolders();
+    if (isSetOverviewMode()) {
+      const indexes = filteredTrackIndexes();
+      if (indexes.length && !indexes.includes(state.index)) {
+        state.index = indexes[0];
+        renderPlayer();
+        requestRecommendation(currentTrack());
+      }
+      if (typeof renderSetOverviewRail === "function") renderSetOverviewRail();
+    }
     updatePipelineStrip();
-    const handoff = (
-      globalThis.MusicSorterStatusHandoff || window.MusicSorterStatusHandoff
-    ).composeSortSuccessHandoff(r, state.tracks.length, archiveBits);
+    const handoffApi = globalThis.MusicSorterStatusHandoff || window.MusicSorterStatusHandoff;
+    const handoff = isSetOverviewMode()
+      ? handoffApi.composeSetSortSuccessHandoff(r)
+      : handoffApi.composeSortSuccessHandoff(r, state.tracks.length, archiveBits);
     setStatus(
       handoff.message,
       handoff.kind,
@@ -10051,7 +11451,7 @@ async function removeFromReadyOnly() {
     );
     state.selectedPath = "";
     await loadTracks();
-    if (!isReviewMode()) await loadFolders();
+    await loadFolders();
   } catch (err) {
     setStatus(err.message, "error");
   } finally {
@@ -10070,11 +11470,13 @@ async function deleteAddCuesTrack() {
 
   const cueN = track.cues?.cue_count ?? 0;
   const loopN = track.cues?.loop_count ?? 0;
+  const setFile = isPajamathonSetQueueTrack(track);
   const ok = await showConfirmDialog({
-    title: "Delete from Add Cues?",
+    title: setFile ? "Delete from Pajamathon?" : "Delete from Add Cues?",
     track: trackDisplayTitle(track),
-    message:
-      "This permanently removes the track from Add Cues and deletes its VirtualDJ entry (cues and loops for this path).",
+    message: setFile
+      ? "This removes the Pajamathon set copy and its VirtualDJ entry (cues and loops for this path). House/Zouk library copies are not touched."
+      : "This permanently removes the track from Add Cues and deletes its VirtualDJ entry (cues and loops for this path).",
     note: `Audio${track.stems_path ? " + stems" : ""} → Trash (${cueN} cues, ${loopN} loops). Close VirtualDJ first if it is open.`,
     confirmLabel: "Delete to Trash",
     tone: "danger",
@@ -10114,8 +11516,15 @@ async function deleteAddCuesTrack() {
       : r.in_database === false
         ? " · not in VDJ database"
         : "";
+    const linkPart =
+      r.kept_hardlinks > 0
+        ? ` · kept ${r.kept_hardlinks} other hard-link${
+            r.kept_hardlinks === 1 ? "" : "s"
+          } (library/inbox)`
+        : "";
+    const destPart = r.unlink_only ? "unlinked set name" : "Trash";
     setStatus(
-      `Deleted → Trash: ${r.name || track.name}${dbPart}`,
+      `Deleted → ${destPart}: ${r.name || track.name}${dbPart}${linkPart}`,
       "success"
     );
     state.recommendation = null;
@@ -10186,7 +11595,7 @@ async function demoteReadyToAddCues() {
     setStatus(`Back to Add Cues · ${short}`, "success");
     state.selectedPath = "";
     await loadTracks();
-    if (!isReviewMode()) await loadFolders();
+    await loadFolders();
   } catch (err) {
     setStatus(err.message, "error");
   } finally {
@@ -10208,7 +11617,7 @@ async function createFolder() {
     // Create under the library of the last-clicked folder, or all (Both).
     const createLib =
       state.library === "Both"
-        ? state.selectedPathLibrary || "Both"
+        ? state.selectedPathLibrary || "Zouk"
         : state.library;
     const data = await api("/api/folders", {
       method: "POST",
@@ -10232,6 +11641,28 @@ async function createFolder() {
 }
 
 function bindUi() {
+  const exactCueJump = $("exactCueJump");
+  if (exactCueJump) {
+    exactCueJump.addEventListener("change", () => {
+      setExactCueJump(exactCueJump.checked);
+    });
+    syncExactCueJumpUi();
+  }
+  const shortcutsHelpBtn = $("shortcutsHelpBtn");
+  if (shortcutsHelpBtn) {
+    shortcutsHelpBtn.addEventListener("click", () => toggleKeyboardOverlay());
+  }
+  const overlay = $("keyboardOverlay");
+  if (overlay) {
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) setKeyboardOverlayOpen(false);
+    });
+  }
+  const overlayClose = $("keyboardOverlayClose");
+  if (overlayClose) {
+    overlayClose.addEventListener("click", () => setKeyboardOverlayOpen(false));
+  }
+
   // Cue/loop list tabs — bind early (must not depend on later listeners succeeding).
   const cueKindFilter = $("cueKindFilter");
   if (cueKindFilter) {
@@ -10265,6 +11696,10 @@ function bindUi() {
     button.addEventListener("click", () => applyAccentTheme(button.dataset.accentTheme));
   });
 
+  document.querySelectorAll("#schemePicker [data-color-scheme]").forEach((button) => {
+    button.addEventListener("click", () => applyColorScheme(button.dataset.colorScheme));
+  });
+
   document.querySelectorAll("#modeSeg button").forEach((btn) => {
     btn.addEventListener("click", () => setMode(btn.dataset.mode));
   });
@@ -10289,6 +11724,30 @@ function bindUi() {
   document.querySelectorAll("#crateFilter button").forEach((btn) => {
     btn.addEventListener("click", () => {
       setCrateFilter(btn.dataset.crate || "all");
+    });
+  });
+  $("setOverviewCopyBtn")?.addEventListener("click", () => {
+    copySetOverviewCues(state.index);
+  });
+  $("setOverviewSendBackBtn")?.addEventListener("click", sendBackSetOverview);
+  $("setOverviewRemoveBtn")?.addEventListener("click", removeSetOverviewCopy);
+  $("setOverviewApproveBtn")?.addEventListener("click", approveSetOverviewCues);
+  $("setOverviewMustPlayBtn")?.addEventListener("click", markSetOverviewMustPlay);
+
+  document.querySelectorAll("#setApprovalFilter button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.setApprovalFilter = btn.getAttribute("data-set-approval") || btn.dataset.setApproval || "all";
+      document.querySelectorAll("#setApprovalFilter button").forEach((b) =>
+        b.classList.toggle("active", b === btn)
+      );
+      const indexes = filteredTrackIndexes();
+      if (indexes.length && !indexes.includes(state.index)) {
+        state.index = indexes[0];
+        renderPlayer();
+      }
+      renderTrackList();
+      renderSetOverviewRail();
+      updatePipelineStrip();
     });
   });
 
@@ -10320,6 +11779,9 @@ function bindUi() {
   // Manual button forces a full re-score; auto-load uses force:false (saved scores kept).
   $("practiceAnalyzeBtn")?.addEventListener("click", () =>
     startPracticeAnalyze({ force: true })
+  );
+  $("practiceExcludeBestBtn")?.addEventListener("click", () =>
+    togglePracticeExcludeFromBest()
   );
   bindPracticeWaveInteractions();
   document.querySelectorAll("#practiceTxSort button").forEach((btn) => {
@@ -10392,22 +11854,43 @@ function bindUi() {
       return;
     }
     await loadTracks({ keepPath: currentTrack()?.path });
-    if (!isReviewMode()) await loadFolders();
+    await hydrateAutocueJobs();
+    await loadFolders();
     setStatus("Refreshed.");
   });
   $("rerunRecBtn").addEventListener("click", () => {
-    if (isReviewMode() || isPracticeMode()) return;
-    const t = currentTrack();
+    if (isPracticeMode()) return;
+    const t = resolveSortTrack();
     if (!t) return;
     requestRecommendation(t, { force: true });
   });
 
-  $("approveBtn").addEventListener("click", () =>
-    promoteTrack("ready_for_sort", { requireCued: true })
-  );
-  $("approveBtnSide").addEventListener("click", () =>
-    promoteTrack("ready_for_sort", { requireCued: true })
-  );
+  $("approveBtn").addEventListener("click", () => {
+    if (isSetOverviewMode()) {
+      sortSelected();
+      return;
+    }
+    if (isPajamathonSetQueueTrack(currentTrack())) {
+      approveSetCues();
+      return;
+    }
+    sortSelected();
+  });
+  $("approveBtnSide").addEventListener("click", () => {
+    if (isSetOverviewMode()) {
+      sortSelected();
+      return;
+    }
+    if (isPajamathonSetQueueTrack(currentTrack())) {
+      if (trackReadinessStatus(currentTrack()) === "approved") {
+        skipToNextReviewTrack();
+        return;
+      }
+      approveSetCues();
+      return;
+    }
+    sortSelected();
+  });
   $("skipBtn").addEventListener("click", skipToNextReviewTrack);
   $("toNoCuesBtn").addEventListener("click", () =>
     promoteTrack("no_cues_found", { requireCued: false })
@@ -10473,11 +11956,37 @@ function bindUi() {
     }
   });
 
-  $("playPauseBtn")?.addEventListener("click", () => {
+  function toggleStagePlayback() {
     if (!audio.src) return;
     if (audio.paused) playAudio(audio).catch(() => {});
     else audio.pause();
-  });
+  }
+  function stopStagePlayback() {
+    if (!audio.src) return;
+    audio.pause();
+    if (isBestSetMode() && state.practicePlayingBestId != null) {
+      const item = (state.practiceBestItems || []).find(
+        (x) => Number(x.id) === Number(state.practicePlayingBestId)
+      );
+      if (item) {
+        seekPracticeTransition(Number(item.at_sec) || 0, {
+          play: false,
+          index: item.transition_index,
+        });
+        updateTransportUi();
+        return;
+      }
+    }
+    try {
+      audio.currentTime = 0;
+    } catch {
+      /* ignore */
+    }
+    updateTransportUi();
+  }
+  $("playPauseBtn")?.addEventListener("click", () => toggleStagePlayback());
+  $("bestSetPauseBtn")?.addEventListener("click", () => toggleStagePlayback());
+  $("bestSetStopBtn")?.addEventListener("click", () => stopStagePlayback());
   $("quietSessionChip")?.addEventListener("click", () => disableQuietSession());
   $("previousTrackBtn")?.addEventListener("click", () => stepTrack(-1));
   $("nextTrackBtn")?.addEventListener("click", () => stepTrack(1));
@@ -10594,7 +12103,10 @@ function bindUi() {
   $("gridNudgeBeatLeft")?.addEventListener("click", () => nudgeGridAlignBeats(-1));
   $("gridNudgeBeatRight")?.addEventListener("click", () => nudgeGridAlignBeats(1));
   $("gridNudgeBarRight")?.addEventListener("click", () => nudgeGridAlignBeats(4));
-  $("loopPlayBtn")?.addEventListener("click", toggleLoopPlayback);
+  $("loopPlayBtn")?.addEventListener("change", () => {
+    const on = Boolean($("loopPlayBtn")?.checked);
+    if (on !== Boolean(state.loopPlaybackOn)) toggleLoopPlayback();
+  });
   // Restore ones overlay preference (default on)
   try {
     const saved = localStorage.getItem("musicSorter.showBeatOnes");
@@ -10633,7 +12145,17 @@ function bindUi() {
   });
 
   document.addEventListener("keydown", (e) => {
-    if (e.target.matches("input, textarea")) return;
+    if (e.target.matches("input, textarea, select")) return;
+    if (e.key === "?" || (e.key === "/" && e.shiftKey)) {
+      e.preventDefault();
+      toggleKeyboardOverlay();
+      return;
+    }
+    if (e.key === "Escape" && isKeyboardOverlayOpen()) {
+      e.preventDefault();
+      setKeyboardOverlayOpen(false);
+      return;
+    }
     if (e.code === "Space") {
       e.preventDefault();
       if (!audio.src) return;
@@ -10645,12 +12167,21 @@ function bindUi() {
     } else if (e.key === "k" || e.key === "ArrowUp") {
       e.preventDefault();
       stepTrack(-1);
+    } else if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      seekByBeat(-1, e.shiftKey);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      seekByBeat(1, e.shiftKey);
     } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-      if (isReviewMode()) promoteTrack("ready_for_sort", { requireCued: true });
-      else sortSelected();
+      sortSelected();
     } else if (isReviewMode() && (e.key === "a" || e.key === "A")) {
       e.preventDefault();
-      promoteTrack("ready_for_sort", { requireCued: true });
+      if (isPajamathonSetQueueTrack(currentTrack())) {
+        approveSetCues();
+      } else {
+        sortSelected();
+      }
     } else if (isReviewMode() && (e.key === "s" || e.key === "S")) {
       e.preventDefault();
       skipToNextReviewTrack();
@@ -10691,7 +12222,7 @@ function bindUi() {
       const point = points[Number(e.key) - 1];
       if (point) {
         e.preventDefault();
-        jumpToCue(point.pos, point);
+        jumpToCue(point.pos, point, e);
       }
     }
   });
@@ -10699,6 +12230,7 @@ function bindUi() {
 
 async function boot() {
   applyAccentTheme(storedAccentTheme(), { persist: false });
+  applyColorScheme(storedColorScheme(), { persist: false });
   applyQuietSession();
   try {
     bindUi();
@@ -10719,6 +12251,9 @@ async function boot() {
   if (params.get("mode") === "add_cues" || params.get("add") === "1") {
     state.mode = "add_cues";
   }
+  if (params.get("mode") === "set_overview") {
+    state.mode = "set_overview";
+  }
   window.addEventListener("resize", () => {
     if (isPracticeMode()) schedulePracticeWaveRedraw();
   });
@@ -10726,9 +12261,11 @@ async function boot() {
   $("trackList")?.classList.add("list-loading");
   renderTrackList();
   try {
+    restoreRememberedAutocueJobs();
+    syncAutocueUi();
     await loadHealth();
     await loadTracks();
-    if (isReviewMode()) await hydrateAutocueJobs();
+    await hydrateAutocueJobs();
     if (!isReviewMode()) {
       await loadFolders();
       selectFolder("");
@@ -10749,7 +12286,7 @@ boot();
 state.recsNow = null;
 state.recsJobId = null;
 state.recsPollTimer = null; // job status poll while Gemini runs
-state.recsNowPollTimer = null; // VDJ now-playing poll (every 5s)
+state.recsNowPollTimer = null; // VDJ now-playing stamp (250ms)
 state.recsResult = null;
 state.recsNowPollInFlight = false;
 state.recsNowSeq = 0; // ignore stale now-playing responses
@@ -10757,8 +12294,10 @@ state.recsRetryTimer = null;
 state.recsJobRunning = false;
 state.recsAutoForPath = ""; // last path we auto-fetched recs for
 state.recsPendingPath = ""; // path change while a job is running
+state.recsNowStampKey = "";
 
-const RECS_NOW_POLL_MS = 5_000;
+const RECS_NOW_STAMP_MS = 250;
+const RECS_NOW_POLL_MS = 250;
 
 function stopRecsPoll() {
   if (state.recsPollTimer) {
@@ -10786,11 +12325,10 @@ function renderRecsPollCountdown() {
   const el = $("recsPollCountdown");
   if (!el) return;
   if (!isRecsMode() || !state.recsNowPollTimer) {
-    el.textContent = "Next check in 5s";
+    el.textContent = "Live";
     return;
   }
-  const sec = recsPollSecondsLeft();
-  el.textContent = sec <= 0 ? "Checking now…" : `Next check in ${sec}s`;
+  el.textContent = "Live";
 }
 
 function armRecsNowPlayingPoll() {
@@ -10798,9 +12336,24 @@ function armRecsNowPlayingPoll() {
   renderRecsPollCountdown();
 }
 
+async function pollRecsNowStamp() {
+  try {
+    const data = await api("/api/recs/now-playing/stamp", { timeoutMs: 1500 });
+    const key = `${data.path || ""}|${data.lastplay || 0}|${data.mtime || 0}`;
+    if (key === state.recsNowStampKey && state.recsNow) return;
+    if (state.recsNowPollInFlight) return;
+    state.recsNowStampKey = key;
+    await refreshRecsNowPlaying({ quiet: true, loadAudio: false });
+  } catch (_) {
+    /* next stamp tick retries */
+  }
+}
+
 function startRecsNowPlayingPoll() {
   stopRecsNowPlayingPoll();
   if (!isRecsMode()) return;
+  state.recsNowStampKey = "";
+  refreshRecsNowPlaying({ quiet: true, loadAudio: false });
   armRecsNowPlayingPoll();
   state.recsNowPollTimer = setInterval(() => {
     if (!isRecsMode()) {
@@ -10808,11 +12361,10 @@ function startRecsNowPlayingPoll() {
       return;
     }
     renderRecsPollCountdown();
-    if (recsPollSecondsLeft() > 0) return;
     armRecsNowPlayingPoll();
     if (state.recsNowPollInFlight) return;
-    refreshRecsNowPlaying({ quiet: true, loadAudio: false });
-  }, 250);
+    pollRecsNowStamp();
+  }, RECS_NOW_STAMP_MS);
 }
 
 /** Auto-run Gemini energy buckets when now-playing is new or changed. */
@@ -10885,7 +12437,7 @@ function renderRecsNowCard(np) {
     if (hint) {
       hint.hidden = false;
       hint.textContent =
-        "Play a track in VirtualDJ — this view auto-checks every 5s.";
+        "Play a track in VirtualDJ or STAGE — this view follows now-playing.";
     }
     return;
   }
@@ -10945,13 +12497,57 @@ function renderRecsNowCard(np) {
   }
 }
 
+function recPathIsPajamathonSet(path, library) {
+  const lib = String(library || "");
+  const p = String(path || "");
+  if (lib === "Pajamathon") return true;
+  if (lib === "Sets" && /pajamathon/i.test(p)) return true;
+  return /\/Sets\/Pajamathon/i.test(p);
+}
+
+function recSetIdentityKeys(p) {
+  const keys = [];
+  const artist = String(p?.artist || "").trim();
+  const title = String(p?.title || "").trim();
+  const label = `${artist} ${title}`.trim().toLowerCase().replace(/\s+/g, " ");
+  if (label) keys.push(`label:${label}`);
+  const rawName =
+    String(p?.name || "").trim() ||
+    String(p?.path || p?.relative_path || "")
+      .split(/[/\\]/)
+      .pop() ||
+    "";
+  let stem = rawName.replace(/\.(m4a|mp3|flac|wav|aiff?)$/i, "");
+  stem = stem.replace(/^\d+[\s.\-]+/, "").trim().toLowerCase().replace(/\s+/g, " ");
+  if (stem) {
+    keys.push(`name:${stem}`);
+    if (/\s[-–—]\s/.test(stem)) keys.push(`label:${stem}`);
+  }
+  return keys;
+}
+
+function recIsInSet(p) {
+  // In-set = a Sets/Pajamathon FilePath exists, not the rec's folder.
+  if (p?.in_set === true) return true;
+  if (recPathIsPajamathonSet(p?.path || p?.relative_path, p?.library)) return true;
+  const keys = recSetIdentityKeys(p);
+  if (!keys.length) return false;
+  const have = new Set(keys);
+  for (const t of state.tracks || []) {
+    if (!recPathIsPajamathonSet(t.path || t.relative_path, t.library || t.group)) continue;
+    if (recSetIdentityKeys(t).some((k) => have.has(k))) return true;
+  }
+  return false;
+}
+
 function renderRecsBucket(el, picks) {
   if (!el) return;
   if (!picks?.length) {
     el.innerHTML = `<div class="empty recs-empty">No picks in this bucket.</div>`;
     return;
   }
-  el.innerHTML = picks
+  const ordered = [...picks].sort((a, b) => Number(recIsInSet(b)) - Number(recIsInSet(a)));
+  el.innerHTML = ordered
     .map((p) => {
       const conf = p.confidence != null ? Math.round(Number(p.confidence) * 100) : null;
       const genreLabel = p.genre || "";
@@ -10965,9 +12561,11 @@ function renderRecsBucket(el, picks) {
             ${fills ? `<span class="badge timing">fills ${escapeHtml(fills)}</span>` : ""}
           </div>`
         : "";
-      return `<article class="recs-card" data-path="${escapeHtml(p.path || "")}">
+      const inSet = recIsInSet(p);
+      return `<article class="recs-card${inSet ? " recs-card-inset" : ""}" data-path="${escapeHtml(p.path || "")}">
         <div class="recs-card-title">${escapeHtml(p.artist || "")}${p.artist && p.title ? " — " : ""}${escapeHtml(p.title || p.name || "Track")}</div>
         <div class="recs-card-meta">
+          ${inSet ? `<span class="badge recs-inset">in set</span>` : ""}
           ${p.bpm != null ? `<span class="badge ok">${Number(p.bpm).toFixed(0)} BPM</span>` : ""}
           ${p.key ? `<span class="badge neutral">${escapeHtml(p.key)}${p.camelot ? ` · ${escapeHtml(p.camelot)}` : ""}</span>` : ""}
           ${genreLabel ? `<span class="badge genre" title="Genre">${escapeHtml(genreLabel)}</span>` : ""}
@@ -10999,6 +12597,12 @@ function renderRecsFilterBar(result) {
   bar.hidden = false;
   if (label) label.textContent = filterLabel;
   if (count) count.textContent = `${n} match${n === 1 ? "" : "es"}`;
+  const removedEl = $("recsRemovedPlays");
+  if (removedEl) {
+    const removedLabel = String(filters.removed_recent_label || "").trim();
+    removedEl.hidden = !removedLabel;
+    removedEl.textContent = removedLabel;
+  }
   if (detail) {
     const bits = [];
     if (src.bpm != null) bits.push(`${Number(src.bpm).toFixed(0)} BPM`);
@@ -11093,7 +12697,7 @@ async function refreshRecsNowPlaying({
                   }`
                 : ""
             }`
-          : "No VDJ history yet — play something in VirtualDJ (auto-checks every 5s).",
+          : "No VDJ history yet — play something in VirtualDJ or STAGE.",
         np ? "ok" : "warn"
       );
     }
@@ -11190,10 +12794,11 @@ async function generateTransitionRecs({ auto = false } = {}) {
       state.recsAutoForPath = body.path;
       state.recsJobRunning = false;
       renderRecsResult(data.result);
+      const removedSync = data.result.filters?.removed_recent_label || "";
       setRecsStatus(
         `Ready · ${data.result.candidates_considered || 0} in-key ±5 BPM · ${
           data.result.recommendations?.model || ""
-        }`,
+        }${removedSync ? ` · ${removedSync}` : ""}`,
         "ok"
       );
       _setRecsGenerateBtnIdle();
@@ -11235,10 +12840,11 @@ async function generateTransitionRecs({ auto = false } = {}) {
             }
             renderRecsResult(j.result);
             const n = j.result.candidates_considered || 0;
+            const removed = j.result.filters?.removed_recent_label || "";
             setRecsStatus(
               `Ready · ${n} in-key ±5 BPM matches · higher / same / lower ranked · ${
                 j.result.recommendations?.model || ""
-              }`,
+              }${removed ? ` · ${removed}` : ""}`,
               "ok"
             );
           } else {
@@ -11364,46 +12970,19 @@ function setAssembleStatus(msg, kind = "") {
 }
 
 function assembleSongKey(t) {
-  const artist = (t.artist || "")
-    .toLowerCase()
-    .split(/[,&+/]| feat\.? | ft\.? | featuring | and /i)[0]
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-  let title = (t.title || t.name || "").toLowerCase();
-  title = title.replace(/^\d+[\s.\-]+/, "");
-  title = title.replace(/\([^)]*\)/g, " ");
-  title = title.replace(
-    /\b(original mix|extended mix|radio edit|club mix|remix|mix|edit|version)\b/g,
-    " "
-  );
-  title = title.replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
-  return `${artist}|${title}`;
+  return MusicSorterAssemble.assembleSongKey(t);
 }
 
 function uniqueAssembleTracks(tracks) {
-  const seen = new Set();
-  return (tracks || []).filter((t) => {
-    const key = assembleSongKey(t);
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return MusicSorterAssemble.uniqueAssembleTracks(tracks);
 }
 
 function assembleFitPercent(track) {
-  return Math.round(Number(track?.fit || 0) * 100);
+  return MusicSorterAssemble.assembleFitPercent(track);
 }
 
 function sortAssemblePlaylist(tracks, mode) {
-  const rows = Array.isArray(tracks) ? tracks.slice() : [];
-  if ((mode || "crate") !== "fit") return rows;
-  return rows.sort((a, b) => {
-    const fitDelta = assembleFitPercent(b) - assembleFitPercent(a);
-    if (fitDelta) return fitDelta;
-    const titleA = `${a?.artist || ""} ${a?.title || a?.name || ""}`.toLowerCase();
-    const titleB = `${b?.artist || ""} ${b?.title || b?.name || ""}`.toLowerCase();
-    return titleA.localeCompare(titleB);
-  });
+  return MusicSorterAssemble.sortAssemblePlaylist(tracks, mode);
 }
 
 function syncAssemblePlaylistSortUi() {
@@ -11413,86 +12992,21 @@ function syncAssemblePlaylistSortUi() {
   });
 }
 
-const ASSEMBLE_LANES = [
-  ["chill", "Chill"],
-  ["energy", "Energy"],
-  ["rnb", "R&B"],
-  ["kizouk", "Kizouk"],
-  ["lamba", "Lamba"],
-  ["trancy", "Trancy"],
-  ["hiphop", "Hip-hop"],
-  ["remixes", "Remixes"],
-  ["tribal", "Tribal"],
-  ["bassy", "Bassy"],
-  ["experimental", "Experimental"],
-  ["intense", "Intense"],
-  ["beautiful", "Beautiful"],
-  ["classics", "Classics"],
-  ["neo_zouk", "Neo Zouk"],
-  ["pop", "Pop"],
-  ["nostalgia", "Nostalgia"],
-  ["reggaeton", "Reggaeton"],
-  ["trippy", "Trippy"],
-  ["world", "World"],
-  ["other", "Other"],
-];
-const ASSEMBLE_SHARE_STORE = "assembleLaneShares.v3";
-const ASSEMBLE_MIN_FIT_STORE = "assembleMinFit.v3";
-const ASSEMBLE_DEFAULT_MIN_FIT = 0.6;
+const ASSEMBLE_LANES = MusicSorterAssemble.ASSEMBLE_LANES;
+const ASSEMBLE_SHARE_STORE = MusicSorterAssemble.ASSEMBLE_SHARE_STORE;
+const ASSEMBLE_MIN_FIT_STORE = MusicSorterAssemble.ASSEMBLE_MIN_FIT_STORE;
+const ASSEMBLE_DEFAULT_MIN_FIT = MusicSorterAssemble.ASSEMBLE_DEFAULT_MIN_FIT;
 
 function defaultAssembleShares() {
-  return {
-    chill: 0.24,
-    energy: 0.14,
-    rnb: 0.12,
-    kizouk: 0.1,
-    lamba: 0.08,
-    trancy: 0.05,
-    hiphop: 0.04,
-    remixes: 0.06,
-    classics: 0.05,
-    nostalgia: 0.04,
-    tribal: 0,
-    bassy: 0,
-    experimental: 0,
-    intense: 0,
-    beautiful: 0,
-    neo_zouk: 0,
-    pop: 0,
-    reggaeton: 0,
-    trippy: 0,
-    world: 0,
-    other: 0.08,
-  };
+  return MusicSorterAssemble.defaultAssembleShares();
 }
 
 function normalizeClientShares(raw) {
-  const out = {};
-  let any = false;
-  ASSEMBLE_LANES.forEach(([lane]) => {
-    let num = Number(raw?.[lane]);
-    if (!Number.isFinite(num) || num < 0) num = 0;
-    if (num > 1.5) num /= 100;
-    out[lane] = Math.max(0, Math.min(1, num));
-    if (out[lane] > 0) any = true;
-  });
-  if (!any) return defaultAssembleShares();
-  const total = Object.values(out).reduce((a, b) => a + b, 0);
-  if (total > 1 + 1e-6) {
-    ASSEMBLE_LANES.forEach(([lane]) => {
-      out[lane] = Math.round((out[lane] / total) * 10000) / 10000;
-    });
-  }
-  return out;
+  return MusicSorterAssemble.normalizeClientShares(raw);
 }
 
 function sharesToPercents(shares) {
-  const norm = normalizeClientShares(shares);
-  const raw = {};
-  ASSEMBLE_LANES.forEach(([lane]) => {
-    raw[lane] = Math.round((norm[lane] || 0) * 100);
-  });
-  return raw;
+  return MusicSorterAssemble.sharesToPercents(shares);
 }
 
 function readAssembleMixSharesFromDom() {
@@ -11575,10 +13089,7 @@ function applySavedMixPrefs(prefs) {
 }
 
 function normalizeClientMinFit(raw) {
-  let num = Number(raw);
-  if (!Number.isFinite(num)) return ASSEMBLE_DEFAULT_MIN_FIT;
-  if (num > 1.5) num /= 100;
-  return Math.max(0, Math.min(1, num));
+  return MusicSorterAssemble.normalizeClientMinFit(raw);
 }
 
 function loadAssembleMinFit() {
@@ -11767,7 +13278,7 @@ function renderAssembleLists(result) {
 }
 
 function assembleJobBusy(job) {
-  return Boolean(job?.id && (job.status === "running" || job.status === "queued"));
+  return MusicSorterAssemble.assembleJobBusy(job);
 }
 
 function unstickAssembleJob(job, message) {

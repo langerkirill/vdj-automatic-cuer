@@ -12,13 +12,13 @@ from unittest import mock
 class AutocueConcurrencyTests(unittest.TestCase):
     def tearDown(self) -> None:
         with mock.patch.dict(
-            os.environ, {"MUSIC_SORTER_AUTOCUE_CONCURRENCY": "5"}, clear=False
+            os.environ, {"MUSIC_SORTER_AUTOCUE_CONCURRENCY": "1"}, clear=False
         ):
             import sorter.autocue_retry as mod
 
             importlib.reload(mod)
 
-    def test_default_max_concurrent_is_five(self):
+    def test_default_max_concurrent_is_one(self):
         env = {
             k: v for k, v in os.environ.items() if k != "MUSIC_SORTER_AUTOCUE_CONCURRENCY"
         }
@@ -26,16 +26,16 @@ class AutocueConcurrencyTests(unittest.TestCase):
             import sorter.autocue_retry as mod
 
             importlib.reload(mod)
-            self.assertEqual(mod._MAX_CONCURRENT, 5)
-            self.assertEqual(mod._parse_max_concurrent(), 5)
-            self.assertEqual(mod.max_concurrent_jobs(), 5)
+            self.assertEqual(mod._MAX_CONCURRENT, 1)
+            self.assertEqual(mod._parse_max_concurrent(), 1)
+            self.assertEqual(mod.max_concurrent_jobs(), 1)
 
     def test_env_override_clamped(self):
         with mock.patch.dict(os.environ, {"MUSIC_SORTER_AUTOCUE_CONCURRENCY": "12"}):
             import sorter.autocue_retry as mod
 
             importlib.reload(mod)
-            self.assertEqual(mod._MAX_CONCURRENT, 8)  # hard cap
+            self.assertEqual(mod._MAX_CONCURRENT, 3)  # hard cap
         with mock.patch.dict(os.environ, {"MUSIC_SORTER_AUTOCUE_CONCURRENCY": "0"}):
             import sorter.autocue_retry as mod
 

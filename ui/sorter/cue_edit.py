@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .autocue_path import ensure_autocue_on_path
-from .config import CUES_ROOT, LIBRARIES, VDJ_DATABASE
+from .config import CUES_ROOT, LIBRARIES, VDJ_DATABASE, assert_existing_audio
+from .ml_training import schedule_training_drop, schedule_training_update
 from .relocate import is_virtualdj_running, summarize_cues
 from .db_lock import vdj_db_write
 
@@ -35,18 +36,17 @@ from vdj_database_safety import (  # noqa: E402
 POS_TOLERANCE = 0.02  # seconds
 
 
+def _schedule_ml_after_cue_change(path: Path, summary: Any) -> None:
+    if summary is None:
+        return
+    if getattr(summary, "cue_count", 0) or getattr(summary, "loop_count", 0):
+        schedule_training_update(path, summary)
+    else:
+        schedule_training_drop(path)
+
+
 def _assert_allowed(path: Path) -> Path:
-    audio = path.expanduser().resolve()
-    if not audio.is_file():
-        raise FileNotFoundError(f"Audio not found: {audio}")
-    roots = [CUES_ROOT.resolve(), *[p.resolve() for p in LIBRARIES.values()]]
-    for root in roots:
-        try:
-            audio.relative_to(root)
-            return audio
-        except ValueError:
-            continue
-    raise ValueError("Cue edit is only allowed under Cues/ or House/Zouk libraries")
+    return assert_existing_audio(path)
 
 
 def _poi_matches(
@@ -57,6 +57,7 @@ def _poi_matches(
     num: str | None,
     name: str | None,
     slot: str | None = None,
+    require_pos: bool = True,
 ) -> bool:
     if not _is_manual_cue_or_loop_poi(tag):
         return False
@@ -66,8 +67,15 @@ def _poi_matches(
     want_kind = "loop" if kind == "loop" else "cue"
     if parsed["kind"] != want_kind:
         return False
-    if abs(float(parsed["position"]) - float(pos)) > POS_TOLERANCE:
-        return False
+    if require_pos:
+        if abs(float(parsed["position"]) - float(pos)) > POS_TOLERANCE:
+            return False
+    elif want_kind == "cue":
+        if num is None or str(num) in {"", "-1", "0"}:
+            return False
+    elif want_kind == "loop":
+        if slot is None or str(slot) in {"", "None"}:
+            return False
     # Loops almost always share Num="-1"; use Slot when provided to disambiguate.
     tag_slot = _poi_attr(tag, "Slot")
     if (
@@ -88,6 +96,27 @@ def _poi_matches(
     return True
 
 
+def _match_attempts(
+    kind: str,
+    num: str | None,
+    name: str | None,
+    slot: str | None,
+) -> list[tuple[str | None, str | None, str | None, bool]]:
+    """Pos match first; then cue Num / loop Slot after a drag moved Pos."""
+    attempts: list[tuple[str | None, str | None, str | None, bool]] = [
+        (num, name, slot, True),
+    ]
+    if kind == "loop" and (num is not None or slot is not None or name is not None):
+        attempts.append((None, None, None, True))
+        if slot is not None and str(slot) not in {"", "None"}:
+            attempts.append((None, None, slot, False))
+    elif kind == "cue" and (num is not None or name is not None):
+        attempts.append((None, None, None, True))
+        if num is not None and str(num) not in {"", "-1", "0"}:
+            attempts.append((num, None, None, False))
+    return attempts
+
+
 def remove_manual_poi_from_song_xml(
     song_xml: str,
     *,
@@ -104,15 +133,10 @@ def remove_manual_poi_from_song_xml(
     """
     kind = "loop" if str(kind).lower() == "loop" else "cue"
 
-    # Try strict match first; for loops fall back to pos-only (Num is usually -1).
-    attempts: list[tuple[str | None, str | None, str | None]] = [
-        (num, name, slot),
-    ]
-    if kind == "loop" and (num is not None or slot is not None or name is not None):
-        attempts.append((None, None, None))
-
     last_error: Optional[KeyError] = None
-    for try_num, try_name, try_slot in attempts:
+    for try_num, try_name, try_slot, require_pos in _match_attempts(
+        kind, num, name, slot
+    ):
         removed: Optional[dict[str, Any]] = None
 
         def repl(match: re.Match[str]) -> str:
@@ -127,6 +151,7 @@ def remove_manual_poi_from_song_xml(
                 num=try_num,
                 name=try_name,
                 slot=try_slot,
+                require_pos=require_pos,
             ):
                 return tag
             parsed = parse_manual_poi_tag(tag) or {}
@@ -368,6 +393,7 @@ def scale_loop_point(
     with vdj_db_write():
         rewrite_song_xml_in_database(db, path_in_db, new_song, validate=True)
     after = summarize_cues(audio, db)
+    _schedule_ml_after_cue_change(audio, after)
 
     return {
         "ok": True,
@@ -396,16 +422,10 @@ def set_poi_color_in_song_xml(
     kind = "loop" if str(kind).lower() == "loop" else "cue"
     color_name, color_raw = normalize_cue_color(color)
 
-    attempts: list[tuple[str | None, str | None, str | None]] = [
-        (num, name, slot),
-    ]
-    if kind == "loop" and (num is not None or slot is not None or name is not None):
-        attempts.append((None, None, None))
-    elif kind == "cue" and (num is not None or name is not None):
-        attempts.append((None, None, None))
-
     last_error: Optional[KeyError] = None
-    for try_num, try_name, try_slot in attempts:
+    for try_num, try_name, try_slot, require_pos in _match_attempts(
+        kind, num, name, slot
+    ):
         changed: Optional[dict[str, Any]] = None
 
         def repl(match: re.Match[str]) -> str:
@@ -420,6 +440,7 @@ def set_poi_color_in_song_xml(
                 num=try_num,
                 name=try_name,
                 slot=try_slot,
+                require_pos=require_pos,
             ):
                 return tag
             old_color = _poi_attr(tag, "Color")
@@ -460,6 +481,114 @@ def set_poi_color_in_song_xml(
         )
 
     raise last_error or KeyError(f"No matching {kind} at pos≈{pos}")
+
+
+def fill_missing_poi_colors_in_song_xml(
+    song_xml: str,
+    *,
+    default_color: str = "green",
+    color_for_tag: Optional[Any] = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Insert Color= on cue/loop POIs that have none. Leaves existing colors."""
+    default_name, default_raw = normalize_cue_color(default_color)
+    changes: list[dict[str, Any]] = []
+
+    def repl(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        if not _is_manual_cue_or_loop_poi(tag):
+            return tag
+        existing = _poi_attr(tag, "Color")
+        if existing and existing in VDJ_CUE_COLOR_NAMES:
+            return tag
+        parsed_name = (_poi_attr(tag, "Name") or "").strip()
+        if parsed_name.lower().startswith("energy "):
+            return tag
+        parsed = parse_manual_poi_tag(tag) or {}
+        chosen = default_name
+        if color_for_tag is not None:
+            hinted = color_for_tag(parsed, tag)
+            if hinted:
+                chosen = str(hinted)
+        name, raw = normalize_cue_color(chosen)
+        if existing:
+            new_tag = _COLOR_ATTR_RE.sub(
+                lambda m: f"{m.group(1)}{raw}{m.group(3)}",
+                tag,
+                count=1,
+            )
+        else:
+            new_tag = re.sub(
+                r"<Poi\b",
+                f'<Poi Color="{raw}"',
+                tag,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        changes.append(
+            {
+                "kind": parsed.get("kind"),
+                "name": parsed.get("name"),
+                "pos": parsed.get("position"),
+                "color_name": name,
+            }
+        )
+        return new_tag
+
+    return _POI_LINE_RE.sub(repl, song_xml), changes
+
+
+def fill_missing_poi_colors(
+    source_path: str | Path,
+    *,
+    default_color: str = "green",
+    database_path: Path | None = None,
+    dry_run: bool = False,
+    allow_vdj_running: bool = False,
+    create_backup: bool = False,
+    color_for_tag: Optional[Any] = None,
+) -> dict[str, Any]:
+    """Write Color= onto every cue/loop that is missing one."""
+    audio = _assert_allowed(Path(source_path))
+    db = Path(database_path) if database_path else VDJ_DATABASE
+    if not db.is_file():
+        raise FileNotFoundError(f"VDJ database not found: {db}")
+    if is_virtualdj_running() and not dry_run and not allow_vdj_running:
+        raise RuntimeError(
+            "VirtualDJ is running. Close it before coloring cues, or pass "
+            "allow_vdj_running=true (not recommended)."
+        )
+    content = read_vdj_database_text(db)
+    path_in_db, start, end = _resolve_song_span(content, audio, source_path)
+    new_song, changes = fill_missing_poi_colors_in_song_xml(
+        content[start:end],
+        default_color=default_color,
+        color_for_tag=color_for_tag,
+    )
+    if dry_run or not changes:
+        return {
+            "ok": True,
+            "dry_run": dry_run,
+            "path": str(audio),
+            "painted": len(changes),
+            "changes": changes,
+            "database_backup": None,
+        }
+    backup = None
+    if create_backup:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = f"{db}.backup.{ts}.music-sorter-fill-color"
+        shutil.copy2(db, backup)
+    with vdj_db_write():
+        rewrite_song_xml_in_database(db, path_in_db, new_song, validate=False)
+    return {
+        "ok": True,
+        "dry_run": False,
+        "path": str(audio),
+        "name": audio.name,
+        "painted": len(changes),
+        "changes": changes,
+        "database_backup": backup,
+    }
 
 
 def set_poi_color(
@@ -580,6 +709,137 @@ def _next_cue_num(song_xml: str) -> str:
     raise ValueError("All 8 VirtualDJ cue slots are used — delete one first")
 
 
+_NUM_ATTR_RE = re.compile(r'(Num=")([^"]*)(")', re.I)
+_NAME_ATTR_RE = re.compile(r'(Name=")([^"]*)(")', re.I)
+
+
+def _is_info_cue(parsed: dict[str, Any] | None) -> bool:
+    if not parsed:
+        return False
+    name = str(parsed.get("name") or "")
+    num = str(parsed.get("num") or "")
+    return num == "0" or name.lower().startswith("info ")
+
+
+def set_cue_jumpable_in_song_xml(
+    song_xml: str,
+    *,
+    pos: float,
+    jumpable: bool,
+    num: str | None = None,
+    name: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Flip a cue between pad jump (Num 1-8) and info-only (Num=0)."""
+    attempts = [(num, name), (None, None)]
+    last_error: Optional[KeyError] = None
+    for try_num, try_name in attempts:
+        changed: Optional[dict[str, Any]] = None
+
+        def repl(match: re.Match[str]) -> str:
+            nonlocal changed
+            tag = match.group(0)
+            if changed is not None:
+                return tag
+            if not _poi_matches(
+                tag, kind="cue", pos=pos, num=try_num, name=try_name
+            ):
+                return tag
+            parsed = parse_manual_poi_tag(tag) or {}
+            old_num = str(parsed.get("num") or "")
+            old_name = str(parsed.get("name") or "")
+            if jumpable:
+                new_num = old_num if old_num not in {"", "0"} else _next_cue_num(song_xml)
+                new_name = old_name
+                if new_name.lower().startswith("info "):
+                    new_name = new_name[5:].strip() or "Cue"
+                elif new_name.lower() == "info":
+                    new_name = "Cue"
+            else:
+                new_num = "0"
+                new_name = old_name
+                if not new_name.lower().startswith("info"):
+                    new_name = f"Info {new_name}".strip() if new_name else "Info"
+            new_tag = tag
+            if _NUM_ATTR_RE.search(new_tag):
+                new_tag = _NUM_ATTR_RE.sub(
+                    lambda m: f"{m.group(1)}{new_num}{m.group(3)}", new_tag, count=1
+                )
+            else:
+                new_tag = re.sub(
+                    r"<Poi\b",
+                    f'<Poi Num="{new_num}"',
+                    new_tag,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+            if new_name and _NAME_ATTR_RE.search(new_tag):
+                new_tag = _NAME_ATTR_RE.sub(
+                    lambda m: f"{m.group(1)}{new_name}{m.group(3)}", new_tag, count=1
+                )
+            changed = {
+                "kind": "cue",
+                "pos": parsed.get("position"),
+                "num_before": old_num,
+                "num": new_num,
+                "name_before": old_name,
+                "name": new_name,
+                "jumpable": bool(jumpable),
+            }
+            return new_tag
+
+        new_xml = _POI_LINE_RE.sub(repl, song_xml)
+        if changed is not None:
+            return new_xml, changed
+        last_error = KeyError(f"No matching cue at pos≈{pos}")
+    raise last_error or KeyError(f"No matching cue at pos≈{pos}")
+
+
+def set_cue_jumpable(
+    source_path: str | Path,
+    *,
+    pos: float,
+    jumpable: bool,
+    num: str | None = None,
+    name: str | None = None,
+    database_path: Path | None = None,
+    dry_run: bool = False,
+    allow_vdj_running: bool = False,
+    create_backup: bool = False,
+) -> dict[str, Any]:
+    audio = _assert_allowed(Path(source_path))
+    db = Path(database_path) if database_path else VDJ_DATABASE
+    if not db.is_file():
+        raise FileNotFoundError(f"VDJ database not found: {db}")
+    if is_virtualdj_running() and not dry_run and not allow_vdj_running:
+        raise RuntimeError(
+            "VirtualDJ is running. Close it before changing cue jump/info, or pass allow_vdj_running=true."
+        )
+    content = read_vdj_database_text(db)
+    path_in_db, start, end = _resolve_song_span(content, audio, source_path)
+    new_song, change = set_cue_jumpable_in_song_xml(
+        content[start:end], pos=float(pos), jumpable=bool(jumpable), num=num, name=name
+    )
+    if dry_run:
+        return {"ok": True, "dry_run": True, "path": str(audio), "change": change}
+    backup = None
+    if create_backup:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = f"{db}.backup.{ts}.music-sorter-jumpable"
+        shutil.copy2(db, backup)
+    with vdj_db_write():
+        rewrite_song_xml_in_database(db, path_in_db, new_song, validate=False)
+    after = summarize_cues(audio, db)
+    _schedule_ml_after_cue_change(audio, after)
+    return {
+        "ok": True,
+        "dry_run": False,
+        "path": str(audio),
+        "change": change,
+        "cues": after.to_dict(),
+        "database_backup": backup,
+    }
+
+
 def add_cue_poi_in_song_xml(
     song_xml: str,
     *,
@@ -681,6 +941,7 @@ def add_cue_point(
         )
         rewrite_song_xml_in_database(db, path_in_db, new_song, validate=True)
     after = summarize_cues(audio, db)
+    _schedule_ml_after_cue_change(audio, after)
 
     return {
         "ok": True,
@@ -846,6 +1107,7 @@ def add_loop_point(
         )
         rewrite_song_xml_in_database(db, path_in_db, new_song, validate=True)
     after = summarize_cues(audio, db)
+    _schedule_ml_after_cue_change(audio, after)
 
     return {
         "ok": True,
@@ -993,6 +1255,7 @@ def set_poi_position(
     with vdj_db_write():
         rewrite_song_xml_in_database(db, path_in_db, new_song, validate=True)
     after = summarize_cues(audio, db)
+    _schedule_ml_after_cue_change(audio, after)
 
     return {
         "ok": True,
@@ -1069,8 +1332,10 @@ def delete_cue_point(
 
     with vdj_db_write():
         rewrite_song_xml_in_database(db, path_in_db, new_song, validate=False)
-    after_cues = max(0, before.cue_count - (1 if removed.get("kind") == "cue" else 0))
-    after_loops = max(0, before.loop_count - (1 if removed.get("kind") == "loop" else 0))
+    after = summarize_cues(audio, db)
+    _schedule_ml_after_cue_change(audio, after)
+    after_cues = after.cue_count
+    after_loops = after.loop_count
     return {
         "ok": True,
         "dry_run": False,

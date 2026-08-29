@@ -30,16 +30,40 @@ from .config import (
     SETS_ROOT,
     VDJ_DATABASE,
 )
-from .library import invalidate_placement_indexes, placement_match_keys
+from .library import invalidate_placement_indexes
 from .musical_key import (
-    genre_family,
     key_to_camelot,
     unescape_xml_text,
     vibe_label_from_path,
 )
 from .audio_meta import MIN_BITRATE_KBPS, track_meets_bitrate_floor
+from vdj_cuer.gemini_call import generate_json
+
 from .llm import models_to_try, resolve_sorter_model
-from .relocate import vdj_bpm_to_actual
+from .assemble_policy import (
+    DEFAULT_CHUNK,
+    DEFAULT_MIN_FIT,
+    DEFAULT_TARGET,
+    LANE_LABELS,
+    LANE_MAX,
+    LANE_SHARE,
+    MAX_CHUNK,
+    MAX_TARGET,
+    MIN_CHUNK,
+    MIN_TARGET,
+    clamp_chunk,
+    clamp_target,
+    chunk_tracks,
+    crate_lane,
+    interleave_by_lane,
+    mix_summary,
+    normalize_lane_shares,
+    normalize_min_fit,
+    rank_score,
+    recency_score,
+    shares_were_provided as _shares_were_provided,
+)
+from .cue_readiness import vdj_bpm_to_actual
 from .song_web import lookup_blurbs_for_tracks
 from .transition_recs import track_block_keys
 from .transitions_db import normalize_key
@@ -58,32 +82,12 @@ DEFAULT_EVENT = {
 }
 
 DEFAULT_LIBRARY = "Zouk"
-DEFAULT_CHUNK = 12
 LISTEN_SECONDS = 28.0
 LISTEN_BITRATE = "96k"
 SCORE_CACHE_VERSION = 3  # 3 = heard a clip + web blurb
-DEFAULT_TARGET = 400
-MIN_TARGET = 300
-MAX_TARGET = 500
-MIN_CHUNK = 10
-MAX_CHUNK = 20
 NEWEST_GUARANTEE = 40
 KEEP_FIT = 0.60
 MAYBE_FIT = 0.45
-DEFAULT_MIN_FIT = 0.60
-
-
-def normalize_min_fit(raw: Any = None) -> float:
-    """Accept 0–1 fractions or 0–100 percents. Default is the keep floor (60%)."""
-    if raw is None or raw == "":
-        return DEFAULT_MIN_FIT
-    try:
-        num = float(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_MIN_FIT
-    if num > 1.5:
-        num = num / 100.0
-    return max(0.0, min(1.0, num))
 
 
 DEFAULT_MODEL = resolve_sorter_model()
@@ -276,7 +280,11 @@ def clone_cues_for_set_paths(
         }
 
     from vdj_database_safety import (
+        _detect_newline,
         _find_song_span,
+        _lightweight_content_stats,
+        _lightweight_rewrite_stats,
+        atomic_replace_database,
         directory_sort_label,
         normalize_database_path,
         read_vdj_database_text,
@@ -296,6 +304,8 @@ def clone_cues_for_set_paths(
 
     with vdj_db_write():
         content = read_vdj_database_text(db)
+        original_stats = _lightweight_rewrite_stats(content, db)
+        newline = _detect_newline(content)
         inserts: list[str] = []
         replacements: list[tuple[int, int, str]] = []
         cloned = 0
@@ -345,13 +355,19 @@ def clone_cues_for_set_paths(
                 raise ValueError("Database is missing </VirtualDJ_Database>")
             prefix = content[:close_idx].rstrip(" \t")
             if not prefix.endswith("\n"):
-                prefix += "\n"
-            content = prefix + "\n".join(inserts) + "\n" + content[close_idx:]
+                prefix += newline
+            normalized = [
+                xml.replace("\r\n", "\n").replace("\n", newline) for xml in inserts
+            ]
+            content = prefix + newline.join(normalized) + newline + content[close_idx:]
             dirty = True
         if dirty:
-            tmp = db.with_suffix(db.suffix + ".tmp")
-            tmp.write_text(content, encoding="utf-8")
-            tmp.replace(db)
+            atomic_replace_database(
+                db,
+                content,
+                original_stats=original_stats,
+                stats_fn=_lightweight_content_stats,
+            )
     total = cloned + replaced
     return {
         "cloned": total,
@@ -464,21 +480,35 @@ def stage_uncued_playlist_tracks(
     }
 
 
-def _set_copy_keys(*names: str) -> set[str]:
-    keys: set[str] = set()
-    for name in names:
-        if not name:
-            continue
-        keys.update(key for key in placement_match_keys(name) if key)
-    return keys
+_SET_COPY_INDEX_RE = re.compile(r"^\d{1,4}\.\s+")
 
 
-def _unlink_set_audio(path: Path) -> None:
+def _set_index_stripped(name: str) -> str:
+    """Comparable set filename: drop only '405. ', keep remix parentheticals."""
+    path = Path(name)
+    stem = _SET_COPY_INDEX_RE.sub("", path.stem, count=1).casefold()
+    return f"{stem}{path.suffix.lower()}"
+
+
+def _is_previous_set_copy(old_name: str, *candidates: str) -> bool:
+    old_key = _set_index_stripped(old_name)
+    if not old_key:
+        return False
+    return any(
+        _set_index_stripped(candidate) == old_key
+        for candidate in candidates
+        if candidate
+    )
+
+
+def _remove_set_audio(path: Path, *, to_trash: bool) -> None:
+    from .relocate import _trash_or_unlink
+
     stems = Path(f"{path}.vdjstems")
     if path.is_file():
-        path.unlink()
+        _trash_or_unlink(path, to_trash=to_trash)
     if stems.is_file():
-        stems.unlink()
+        _trash_or_unlink(stems, to_trash=to_trash)
 
 
 def _existing_set_audio(folder: Path) -> list[Path]:
@@ -491,6 +521,35 @@ def _existing_set_audio(folder: Path) -> list[Path]:
     ]
 
 
+def _remove_leftover_song_entries(
+    leftovers: list[Path],
+    *,
+    database_path: Path | None,
+) -> int:
+    """Drop VirtualDJ Songs for exact leftover paths so rematerialize leaves no ghosts."""
+    if not leftovers:
+        return 0
+    from .relocate import is_virtualdj_running, remove_song_entry_from_database
+
+    if is_virtualdj_running():
+        return 0
+    removed = 0
+    first = True
+    for old in leftovers:
+        try:
+            result = remove_song_entry_from_database(
+                old,
+                database_path=database_path,
+                create_backup=first,
+            )
+        except Exception:
+            continue
+        first = False
+        if result.get("removed_from_db"):
+            removed += 1
+    return removed
+
+
 def materialize_set_directory(
     playlist: list[dict[str, Any]],
     *,
@@ -498,6 +557,7 @@ def materialize_set_directory(
     sets_root: Path | None = None,
     clone_cues: bool = True,
     database_path: Path | None = None,
+    to_trash: bool = False,
 ) -> dict[str, Any]:
     """
     Copy/hardlink the crate into Sets/<Event>, same place as Moon / Silesian.
@@ -513,6 +573,7 @@ def materialize_set_directory(
     errors: list[str] = []
     cue_pairs: list[tuple[str, str]] = []
     removed_duplicates = 0
+    removed_db = 0
     existing = _existing_set_audio(folder)
     for i, track in enumerate(playlist, 1):
         if track_is_assemble_excluded(track):
@@ -525,21 +586,30 @@ def materialize_set_directory(
         title = (track.get("title") or track.get("name") or src.stem).strip()
         label = f"{artist} - {title}" if artist else title
         dest = folder / f"{i:03d}. {_safe_filename(label)}{src.suffix.lower()}"
-        song_keys = _set_copy_keys(
-            dest.name,
-            src.name,
-            f"{artist} - {title}{src.suffix.lower()}" if artist else "",
-        )
         leftovers = [
             old
             for old in existing
             if old.resolve() != dest.resolve()
-            and (_set_copy_keys(old.name) & song_keys)
+            and _is_previous_set_copy(
+                old.name,
+                dest.name,
+                src.name,
+                f"{artist} - {title}{src.suffix.lower()}" if artist else "",
+            )
         ]
-        for old in leftovers:
-            _unlink_set_audio(old)
-            removed_duplicates += 1
-        existing = [old for old in existing if old.resolve() != dest.resolve() and old not in leftovers]
+        if leftovers:
+            if clone_cues or database_path is not None:
+                removed_db += _remove_leftover_song_entries(
+                    leftovers, database_path=database_path
+                )
+            for old in leftovers:
+                _remove_set_audio(old, to_trash=to_trash)
+                removed_duplicates += 1
+        existing = [
+            old
+            for old in existing
+            if old.resolve() != dest.resolve() and old not in leftovers
+        ]
         if dest.exists():
             dest.unlink()
         try:
@@ -578,167 +648,8 @@ def materialize_set_directory(
         "tracks": written,
         "cues": cues,
         "removed_duplicates": removed_duplicates,
+        "removed_duplicate_db": removed_db,
     }
-
-
-def clamp_target(n: int | float | None) -> int:
-    try:
-        value = int(n or DEFAULT_TARGET)
-    except (TypeError, ValueError):
-        value = DEFAULT_TARGET
-    return max(MIN_TARGET, min(MAX_TARGET, value))
-
-
-def clamp_chunk(n: int | float | None) -> int:
-    try:
-        value = int(n or DEFAULT_CHUNK)
-    except (TypeError, ValueError):
-        value = DEFAULT_CHUNK
-    return max(MIN_CHUNK, min(MAX_CHUNK, value))
-
-
-def chunk_tracks(tracks: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
-    n = max(1, int(size))
-    return [tracks[i : i + n] for i in range(0, len(tracks), n)]
-
-
-def recency_score(first_seen: float | None, *, now: float | None = None) -> float:
-    if not first_seen:
-        return 0.12
-    age_days = max(0.0, (now or time.time()) - float(first_seen)) / 86400.0
-    if age_days <= 14:
-        return 1.0
-    if age_days <= 45:
-        return 0.78
-    if age_days <= 90:
-        return 0.45
-    if age_days <= 180:
-        return 0.22
-    return 0.1
-
-
-def rank_score(track: dict[str, Any], *, now: float | None = None) -> float:
-    fit = float(track.get("fit") or 0.0)
-    recency = recency_score(track.get("first_seen") or track.get("mtime"), now=now)
-    return round(0.72 * fit + 0.28 * recency, 4)
-
-
-LANE_SHARE = {
-    "chill": 0.24,
-    "energy": 0.14,
-    "rnb": 0.12,
-    "kizouk": 0.10,
-    "lamba": 0.08,
-    "trancy": 0.05,
-    "hiphop": 0.04,
-    "remixes": 0.06,
-    "classics": 0.05,
-    "nostalgia": 0.04,
-    "tribal": 0.0,
-    "bassy": 0.0,
-    "experimental": 0.0,
-    "intense": 0.0,
-    "beautiful": 0.0,
-    "neo_zouk": 0.0,
-    "pop": 0.0,
-    "reggaeton": 0.0,
-    "trippy": 0.0,
-    "world": 0.0,
-    "other": 0.08,
-}
-LANE_MAX = 0.34
-LANE_LABELS = {
-    "chill": "Chill",
-    "energy": "Energy",
-    "rnb": "R&B",
-    "kizouk": "Kizouk",
-    "lamba": "Lamba",
-    "trancy": "Trancy / house",
-    "hiphop": "Hip-hop",
-    "remixes": "Remixes",
-    "tribal": "Tribal",
-    "bassy": "Bassy",
-    "experimental": "Experimental",
-    "intense": "Intense",
-    "beautiful": "Beautiful",
-    "classics": "Classics",
-    "neo_zouk": "Neo Zouk",
-    "pop": "Pop",
-    "nostalgia": "Nostalgia",
-    "reggaeton": "Reggaeton",
-    "trippy": "Trippy",
-    "world": "World",
-    "other": "Other",
-}
-
-# First Zouk folder → lane (top crates by count + requested vibes).
-_TOP_FOLDER_LANE = {
-    "chill": "chill",
-    "energy": "energy",
-    "jr&b": "rnb",
-    "jrb": "rnb",
-    "r&b": "rnb",
-    "rnb": "rnb",
-    "neo soul": "rnb",
-    "kizouk": "kizouk",
-    "lamba": "lamba",
-    "brazillian": "lamba",
-    "brazilian": "lamba",
-    "brazilian matter": "lamba",
-    "trancy": "trancy",
-    "hip hoppy": "hiphop",
-    "trappy": "hiphop",
-    "remixes": "remixes",
-    "edits": "remixes",
-    "tribal": "tribal",
-    "india": "tribal",
-    "bassy": "bassy",
-    "experimental": "experimental",
-    "intense": "intense",
-    "beautiful sound": "beautiful",
-    "classics": "classics",
-    "neo zouk": "neo_zouk",
-    "neozouk": "neo_zouk",
-    "pop": "pop",
-    "nostalgia": "nostalgia",
-    "reggatonish": "reggaeton",
-    "trippy party": "trippy",
-    "middle east": "world",
-    "asian": "world",
-    "foreign": "world",
-}
-
-
-def normalize_lane_shares(raw: Optional[dict[str, Any]] = None) -> dict[str, float]:
-    """Coerce UI percents or fractions. Keep typed values; only scale if over 100%."""
-    out = {lane: 0.0 for lane in LANE_SHARE}
-    src = raw if isinstance(raw, dict) else {}
-    any_set = False
-    for lane in LANE_SHARE:
-        if lane not in src:
-            continue
-        try:
-            num = float(src[lane])
-        except (TypeError, ValueError):
-            continue
-        if num > 1.5:
-            num = num / 100.0
-        out[lane] = max(0.0, min(1.0, num))
-        any_set = True
-    if not any_set:
-        return dict(LANE_SHARE)
-    total = sum(out.values())
-    if total <= 0:
-        return dict(LANE_SHARE)
-    if total > 1.0 + 1e-6:
-        return {lane: round(out[lane] / total, 4) for lane in LANE_SHARE}
-    return {lane: round(out[lane], 4) for lane in LANE_SHARE}
-
-
-def _shares_were_provided(raw: Optional[dict[str, Any]]) -> bool:
-    if not isinstance(raw, dict):
-        return False
-    return any(lane in raw for lane in LANE_SHARE)
 
 
 def load_mix_prefs() -> dict[str, Any]:
@@ -832,89 +743,6 @@ def resolve_mix(
     if persist:
         save_mix_prefs(lane_shares, fit)
     return lane_shares, fit
-
-
-def crate_lane(track: dict[str, Any]) -> str:
-    """Crate lane from top folder first, then vibe/genre keywords."""
-    rel = str(track.get("relative_path") or "").replace("\\", "/")
-    top = rel.split("/", 1)[0].strip().lower()
-    if top in _TOP_FOLDER_LANE:
-        return _TOP_FOLDER_LANE[top]
-    blob = f"{rel} {track.get('vibe') or ''} {track.get('genre') or ''}".lower()
-    if any(k in blob for k in ("jr&b", "jrb", "r&b", "rnb", "neo soul", "kizouk r")):
-        return "rnb"
-    if any(k in blob for k in ("kizouk", "kizomba", "urban kiz")):
-        return "kizouk"
-    if any(k in blob for k in ("lamba", "brazil", "brazilian", "brazillian")):
-        return "lamba"
-    if any(k in blob for k in ("tribal", "india", "shaman", "downtemple", "psytrance")):
-        return "tribal"
-    if any(k in blob for k in ("hip hop", "hiphop", "trappy", "trap")):
-        return "hiphop"
-    if any(k in blob for k in ("/remixes/", "remixes/", "edits/")):
-        return "remixes"
-    if any(k in blob for k in ("trancy", "trance", "housey", "deep house", "tech house")):
-        return "trancy"
-    if "bassy" in blob:
-        return "bassy"
-    if "experimental" in blob:
-        return "experimental"
-    if "intense" in blob:
-        return "intense"
-    if "beautiful" in blob:
-        return "beautiful"
-    if "classic" in blob:
-        return "classics"
-    if "neo zouk" in blob or "neozouk" in blob:
-        return "neo_zouk"
-    if any(k in blob for k in ("reggaeton", "reggaton")):
-        return "reggaeton"
-    if "nostalgia" in blob:
-        return "nostalgia"
-    if "trippy" in blob:
-        return "trippy"
-    if any(k in blob for k in ("middle east", "asian", "foreign", "world")):
-        return "world"
-    if any(k in blob for k in ("energy", "light", "party", "peak", "openers")):
-        return "energy"
-    if any(
-        k in blob
-        for k in ("chill", "mystical", "journey", "fire", "lounge", "closers")
-    ):
-        return "chill"
-    if blob.strip().startswith("pop") or "/pop/" in blob or blob.endswith(" pop"):
-        return "pop"
-    fam = genre_family(track.get("genre"), track.get("vibe"))
-    if fam == "rnb_soul_zouk":
-        return "rnb"
-    if fam == "house_dance":
-        return "trancy"
-    if fam == "hiphop":
-        return "hiphop"
-    if fam == "psy_tribal_world":
-        return "tribal"
-    return "other"
-
-
-def interleave_by_lane(tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Rotate lanes so Gemini does not hear 12 Chill in a row."""
-    buckets: dict[str, list[dict[str, Any]]] = {lane: [] for lane in LANE_SHARE}
-    for track in tracks:
-        buckets.setdefault(crate_lane(track), []).append(track)
-    out: list[dict[str, Any]] = []
-    while any(buckets.values()):
-        for lane in LANE_SHARE:
-            if buckets.get(lane):
-                out.append(buckets[lane].pop(0))
-    return out
-
-
-def mix_summary(playlist: list[dict[str, Any]]) -> dict[str, int]:
-    counts: dict[str, int] = {lane: 0 for lane in LANE_SHARE}
-    for track in playlist:
-        lane = track.get("lane") or crate_lane(track)
-        counts[lane] = counts.get(lane, 0) + 1
-    return counts
 
 
 def heuristic_fit(track: dict[str, Any]) -> tuple[float, str, str]:
@@ -1536,76 +1364,65 @@ TRACKS:
                 row["heard"] = False
             return fallback
 
-        for model in MODEL_FALLBACKS:
-            if not model:
+        try:
+            data, model = generate_json(
+                client,
+                contents,
+                ChunkScoreSchema,
+                models=MODEL_FALLBACKS,
+                timeout_seconds=180,
+                temperature=0.2,
+                thinking=False,
+                use_response_schema=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            fallback = score_chunk_heuristic(chunk)
+            for row in fallback:
+                row["reason"] = f"{row['reason']} (Gemini unavailable: {last_err})"
+                row["heard"] = False
+            return fallback
+        by_path = {t["path"]: t for t in chunk}
+        out: list[dict[str, Any]] = []
+        used: set[str] = set()
+        for p in data.get("picks") or []:
+            path = (p.get("path") or "").strip()
+            if path not in by_path or path in used:
                 continue
+            used.add(path)
+            row = dict(by_path[path])
             try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        temperature=0.2,
-                        response_mime_type="application/json",
-                        response_schema=ChunkScoreSchema,
-                        http_options=types.HttpOptions(timeout=180_000),
-                    ),
+                fit = max(0.0, min(1.0, float(p.get("fit") or 0)))
+            except (TypeError, ValueError):
+                fit = 0.0
+            verdict = (p.get("verdict") or "maybe").strip().lower()
+            if verdict not in {"keep", "maybe", "skip"}:
+                verdict = "maybe"
+            row.update(
+                {
+                    "fit": fit,
+                    "verdict": verdict,
+                    "reason": (p.get("reason") or "").strip(),
+                    "model": model,
+                    "heard": True,
+                }
+            )
+            out.append(row)
+        for t in chunk:
+            if t["path"] not in used:
+                fit, verdict, reason = heuristic_fit(t)
+                row = dict(t)
+                row.update(
+                    {
+                        "fit": fit,
+                        "verdict": verdict,
+                        "reason": reason,
+                        "model": f"{model}+heuristic",
+                        "heard": False,
+                    }
                 )
-                raw = getattr(response, "parsed", None)
-                if raw is None:
-                    data = json.loads(getattr(response, "text", None) or "")
-                elif hasattr(raw, "model_dump"):
-                    data = raw.model_dump()
-                else:
-                    data = dict(raw)
-                by_path = {t["path"]: t for t in chunk}
-                out: list[dict[str, Any]] = []
-                used: set[str] = set()
-                for p in data.get("picks") or []:
-                    path = (p.get("path") or "").strip()
-                    if path not in by_path or path in used:
-                        continue
-                    used.add(path)
-                    row = dict(by_path[path])
-                    try:
-                        fit = max(0.0, min(1.0, float(p.get("fit") or 0)))
-                    except (TypeError, ValueError):
-                        fit = 0.0
-                    verdict = (p.get("verdict") or "maybe").strip().lower()
-                    if verdict not in {"keep", "maybe", "skip"}:
-                        verdict = "maybe"
-                    row.update(
-                        {
-                            "fit": fit,
-                            "verdict": verdict,
-                            "reason": (p.get("reason") or "").strip(),
-                            "model": model,
-                            "heard": True,
-                        }
-                    )
-                    out.append(row)
-                for t in chunk:
-                    if t["path"] not in used:
-                        fit, verdict, reason = heuristic_fit(t)
-                        row = dict(t)
-                        row.update(
-                            {
-                                "fit": fit,
-                                "verdict": verdict,
-                                "reason": reason,
-                                "model": f"{model}+heuristic",
-                                "heard": False,
-                            }
-                        )
-                        out.append(row)
-                return out
-            except Exception as exc:  # noqa: BLE001
-                last_err = exc
-                continue
-        fallback = score_chunk_heuristic(chunk)
-        for row in fallback:
-            row["reason"] = f"{row['reason']} (Gemini unavailable: {last_err})"
-            row["heard"] = False
-        return fallback
+                out.append(row)
+        return out
 
 
 def _lookup_cache_entry(
@@ -1785,7 +1602,7 @@ def write_playlist_files(
     from .vdj_sideview_recs import VDJ_MYLISTS, build_virtual_folder_xml, _atomic_write
 
     materialized = materialize_set_directory(
-        playlist, event_name=event_name, sets_root=sets_root
+        playlist, event_name=event_name, sets_root=sets_root, to_trash=True
     )
     crate = materialized.get("tracks") or playlist
     slug = slug_event(event_folder_name(event_name))

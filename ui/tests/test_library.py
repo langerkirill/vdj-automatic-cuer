@@ -1,5 +1,6 @@
 """Folder discovery and create-folder safety."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,30 @@ from sorter import library as library_mod
 
 
 class LibraryTests(unittest.TestCase):
+    def test_is_pajamathon_set_audio(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sets = Path(tmp) / "Sets"
+            paj = sets / "Pajamathon 2026"
+            other = sets / "Wedding"
+            paj.mkdir(parents=True)
+            other.mkdir()
+            hit = paj / "087. Give A Little.mp3"
+            miss = other / "01. Other.mp3"
+            inbox = Path(tmp) / "Add Cues" / "Give A Little.mp3"
+            hit.write_bytes(b"x")
+            miss.write_bytes(b"x")
+            inbox.parent.mkdir()
+            inbox.write_bytes(b"x")
+            self.assertTrue(
+                library_mod.is_pajamathon_set_audio(hit, sets_root=sets)
+            )
+            self.assertFalse(
+                library_mod.is_pajamathon_set_audio(miss, sets_root=sets)
+            )
+            self.assertFalse(
+                library_mod.is_pajamathon_set_audio(inbox, sets_root=sets)
+            )
+
     def test_create_folder_at_root_and_nested(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -353,7 +378,7 @@ class LibraryTests(unittest.TestCase):
             inbox_only = library_mod.add_cues_tracks_by_crate("inbox", root)
             self.assertEqual([t.name for t in inbox_only], ["inbox.m4a"])
 
-    def test_list_pajamathon_set_tracks_and_merge_prefers_set(self):
+    def test_add_cues_queue_is_add_cues_folder_not_sets(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             add = root / "Add Cues"
@@ -370,13 +395,89 @@ class LibraryTests(unittest.TestCase):
                 merged = library_mod.merge_add_cues_and_pajamathon_set(
                     library_mod.list_add_cues_tracks(add), event
                 )
+                paj_only = library_mod.add_cues_tracks_by_crate("pajamathon", add)
             names = [t.name for t in merged]
-            self.assertIn("140. Amaria - Moon.flac", names)
+            self.assertNotIn("140. Amaria - Moon.flac", names)
+            self.assertIn("01 - Amaria - Moon.flac", names)
             self.assertIn("Only In Add.flac", names)
             self.assertIn("inbox.m4a", names)
-            self.assertNotIn("01 - Amaria - Moon.flac", names)
-            paj = [t for t in merged if t.section == "pajamathon"]
-            self.assertTrue(any(t.group == "Pajamathon 2026" for t in paj))
+            self.assertEqual(
+                sorted(t.name for t in paj_only),
+                ["01 - Amaria - Moon.flac", "Only In Add.flac"],
+            )
+            self.assertTrue(all("/Sets/" not in t.path for t in paj_only))
+
+    def test_add_cues_hides_set_hardlink_with_no_vdj_song(self):
+        """Leftover Add Cues path after the Song moved to Sets is not a work item."""
+        with tempfile.TemporaryDirectory() as tmp:
+            add = Path(tmp) / "Add Cues" / "Pajamathon"
+            sets = Path(tmp) / "Sets" / "Pajamathon 2026"
+            add.mkdir(parents=True)
+            sets.mkdir(parents=True)
+            leftover = add / "02 - KastomariN - Come back to me_1.flac"
+            set_copy = sets / "393. KastomariN - Come back to me.flac"
+            leftover.write_bytes(b"audio")
+            os.link(leftover, set_copy)
+            fresh = add / "Brand New Drop.flac"
+            fresh.write_bytes(b"new")
+            still_working = add / "Still In VDJ.flac"
+            still_working.write_bytes(b"work")
+            os.link(still_working, sets / "100. Still In VDJ.flac")
+
+            set_inodes = library_mod.inode_keys_for_paths(
+                [set_copy, sets / "100. Still In VDJ.flac"]
+            )
+            self.assertTrue(
+                library_mod.is_add_cues_vdj_ghost(
+                    leftover, in_database=False, set_inodes=set_inodes
+                )
+            )
+            self.assertFalse(
+                library_mod.is_add_cues_vdj_ghost(
+                    leftover, in_database=True, set_inodes=set_inodes
+                )
+            )
+            self.assertFalse(
+                library_mod.is_add_cues_vdj_ghost(
+                    fresh, in_database=False, set_inodes=set_inodes
+                )
+            )
+            self.assertFalse(
+                library_mod.is_add_cues_vdj_ghost(
+                    still_working, in_database=True, set_inodes=set_inodes
+                )
+            )
+
+            tracks = library_mod.list_add_cues_tracks(Path(tmp) / "Add Cues")
+            kept = library_mod.drop_add_cues_vdj_ghosts(
+                tracks,
+                in_database_by_path={
+                    str(leftover): False,
+                    str(fresh): False,
+                    str(still_working): True,
+                },
+                set_inodes=set_inodes,
+            )
+            names = sorted(t.name for t in kept)
+            self.assertEqual(names, ["Brand New Drop.flac", "Still In VDJ.flac"])
+            self.assertNotIn("02 - KastomariN - Come back to me_1.flac", names)
+
+    def test_batch_add_cues_routes_use_ghost_filter(self) -> None:
+        app_py = (Path(__file__).resolve().parents[1] / "app.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def _add_cues_work_tracks", app_py)
+        self.assertIn('_add_cues_work_tracks("all")', app_py)
+        self.assertIn('_add_cues_work_tracks("pajamathon")', app_py)
+        self.assertIn("_add_cues_work_tracks(crate)", app_py)
+        retry_fn = app_py.split("def post_retry_cues_batch", 1)[1].split(
+            "def post_", 1
+        )[0]
+        grid_fn = app_py.split("def post_grid_fix_batch", 1)[1].split("def ", 1)[0]
+        self.assertIn("_add_cues_work_tracks", retry_fn)
+        self.assertNotIn("add_cues_tracks_by_crate(crate)", retry_fn)
+        self.assertIn("_add_cues_work_tracks", grid_fn)
+        self.assertNotIn("add_cues_tracks_by_crate(\"pajamathon\")", grid_fn)
 
 
 if __name__ == "__main__":

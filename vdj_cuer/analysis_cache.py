@@ -9,10 +9,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-CACHE_SCHEMA = 1
+CACHE_SCHEMA = 2  # loop stability thirds + skip-kick wrap; 0-loop caches must miss
 DEFAULT_CACHE_DIR = (
     Path.home() / "Music" / "DJ" / "Music" / "Cues" / ".cache" / "autocue-analysis"
 )
+# Keep in sync with vdj_cuer.common.TARGET_MIN_LOOPS (avoid importing common here).
+MIN_CACHED_LOOPS = 2
 
 
 def analysis_is_usable(analysis: Any) -> bool:
@@ -21,6 +23,18 @@ def analysis_is_usable(analysis: Any) -> bool:
     cues = analysis.get("measure_changes") or []
     loops = analysis.get("loop_segments") or []
     return bool(cues) or bool(loops)
+
+
+def analysis_ready_to_reuse(analysis: Any) -> bool:
+    """Reuse only analyses that already met the 2-loop bar.
+
+    Caching a 6-cue / 0-loop result skipped stem re-scans, so gate fixes never
+    ran on Make You Feel / Swimmers.
+    """
+    if not analysis_is_usable(analysis):
+        return False
+    loops = analysis.get("loop_segments") or []
+    return len(loops) >= MIN_CACHED_LOOPS
 
 
 def _env_flag(name: str) -> bool:
@@ -101,7 +115,9 @@ def load_cached_analysis(
     if model and record.get("model") and str(record.get("model")) != str(model):
         return None
     analysis = record.get("analysis")
-    if not analysis_is_usable(analysis):
+    if not analysis_ready_to_reuse(analysis):
+        return None
+    if record.get("schema") != CACHE_SCHEMA:
         return None
     return analysis
 
@@ -113,7 +129,7 @@ def save_cached_analysis(
     model: Optional[str] = None,
     cache_dir: Path | None = None,
 ) -> Optional[Path]:
-    if not cache_enabled() or not analysis_is_usable(analysis):
+    if not cache_enabled() or not analysis_ready_to_reuse(analysis):
         return None
     fingerprint = _fingerprint(audio_path)
     if fingerprint is None:

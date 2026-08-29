@@ -27,7 +27,9 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
-from .llm import models_to_try, resolve_sorter_model, should_try_next_model
+from vdj_cuer.gemini_call import generate_json
+
+from .llm import models_to_try, resolve_sorter_model
 from .practice_sets import get_practice_set_detail
 from .transitions_db import lookup_options, normalize_key, save_practice_score
 
@@ -306,32 +308,14 @@ Be honest. Average club transitions score 5–6. 9–10 is rare.
     uploaded = client.files.upload(file=str(clip_path))
     uploaded = _wait_file_active(client, uploaded)
 
-    config = types.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_json_schema=TransitionScoreSchema.model_json_schema(),
-        http_options=types.HttpOptions(timeout=180_000),
+    data, used = generate_json(
+        client,
+        [prompt, uploaded],
+        TransitionScoreSchema,
+        models=models_to_try(model_name),
+        timeout_seconds=180,
+        thinking=False,
     )
-
-    response = None
-    last_error: Optional[Exception] = None
-    used = model_name
-    for mid in models_to_try(model_name):
-        try:
-            response = client.models.generate_content(
-                model=mid,
-                contents=[prompt, uploaded],
-                config=config,
-            )
-            used = mid
-            break
-        except Exception as exc:
-            last_error = exc
-            if should_try_next_model(exc):
-                continue
-            raise
-
-    if response is None or not response.text:
-        raise last_error or RuntimeError("Empty Gemini response")
 
     try:
         if getattr(uploaded, "name", None):
@@ -339,7 +323,6 @@ Be honest. Average club transitions score 5–6. 9–10 is rare.
     except Exception:
         pass
 
-    data = _parse_json_response(response.text)
     parsed = TransitionScoreSchema.model_validate(data)
     result = parsed.model_dump()
     result["model"] = used

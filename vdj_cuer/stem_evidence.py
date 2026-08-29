@@ -17,6 +17,13 @@ POST_BOUNDARY_OFFSET_SECONDS = 0.25
 GLOBAL_SILENCE_PEAK = 0.004
 ACTIVITY_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
 SPECIFIC_INSTRUMENTS = ("piano", "synth", "strings", "guitar")
+# VDJ's "vocal" stem on instrumentals is melody bleed. Relative scores then
+# look medium/high because they are calibrated to that stem's own peak.
+# Memories vocal/instruments peak ≈ 0.21; NDULE/Essence/Sozinho ≥ 0.60.
+VOCAL_STEM_TO_INSTRUMENTS = 0.40
+# Even on a vocal track, a window is not a singer if vocal energy is a
+# tiny fraction of kick+instruments (intro / breakdown).
+VOCAL_WINDOW_TO_MIX = 0.12
 
 
 def _percentile(values: Sequence[float], percentile: float) -> float:
@@ -188,6 +195,33 @@ def _is_assertable(level: str) -> bool:
     return ACTIVITY_RANK.get(level, 0) >= ACTIVITY_RANK["medium"]
 
 
+def vocal_stem_is_usable(profiles: Dict[str, StemProfile]) -> bool:
+    """False when the VDJ vocal stem is too quiet to be a singer (bleed)."""
+    vocal = profiles.get("vocal")
+    if vocal is None or vocal.reference_peak < GLOBAL_SILENCE_PEAK:
+        return False
+    instruments = profiles.get("instruments")
+    if instruments is None or instruments.reference_peak < GLOBAL_SILENCE_PEAK:
+        return True
+    return vocal.reference_peak >= VOCAL_STEM_TO_INSTRUMENTS * instruments.reference_peak
+
+
+def _vocal_competes_in_window(
+    measurements: Dict[str, ActivityMeasurement],
+) -> bool:
+    vocal = measurements.get("vocal")
+    if vocal is None:
+        return False
+    mix = 0.0
+    for name in ("instruments", "kick"):
+        item = measurements.get(name)
+        if item is not None:
+            mix = max(mix, item.local_peak)
+    if mix <= 0.0:
+        return True
+    return vocal.local_peak >= VOCAL_WINDOW_TO_MIX * mix
+
+
 def measure_stem_evidence(
     profiles: Dict[str, StemProfile],
     timestamp: float,
@@ -219,9 +253,17 @@ def measure_stem_evidence(
             drum_level = "low"
     else:
         drum_level = _strongest_level(kick_level, hihat_level)
+    vocal_level = activity.get("vocal", "none")
+    if not vocal_stem_is_usable(profiles):
+        vocal_level = "none"
+    elif _is_assertable(vocal_level) and not _vocal_competes_in_window(measurements):
+        vocal_level = "none"
+    if vocal_level != activity.get("vocal"):
+        activity = {**activity, "vocal": vocal_level}
+
     component_levels = {
         "drums": drum_level,
-        "vocals": activity.get("vocal", "none"),
+        "vocals": vocal_level,
         "bass": activity.get("bass", "none"),
         "instruments": activity.get("instruments", "none"),
     }
@@ -277,28 +319,45 @@ def _broad_signature(elements: Iterable[str]) -> frozenset[str]:
     return frozenset(signature)
 
 
+def _groove_signature(elements: Iterable[str]) -> frozenset[str]:
+    """Arrangement fingerprint that ignores vocal phrasing.
+
+    A singer resting for a bar is not a section change. Kick/bass/instruments
+    appearing or disappearing is.
+    """
+    signature = set(_broad_signature(elements))
+    groove = signature - {"vocals"}
+    return frozenset(groove if groove else signature)
+
+
 def loop_is_stable(
     profiles: Dict[str, StemProfile],
     start: float,
     duration_seconds: float,
     model_elements: Iterable[str],
 ) -> bool:
-    """Require the same asserted components near the start, middle, and end."""
+    """Require the same groove in each third of the loop.
+
+    Short 1–2s slices flip drums/vocals around the medium threshold on sparse
+    R&B and chill grooves, which zeroed out loops on Make You Feel / Swimmers.
+    """
     if duration_seconds <= 0:
         return False
-    sample_duration = min(2.0, max(0.75, duration_seconds / 4.0))
-    latest_start = max(start, start + duration_seconds - sample_duration - 0.25)
-    sample_starts = (start, start + duration_seconds / 2.0, latest_start)
+    third = duration_seconds / 3.0
+    half = third / 2.0
+    sample_centers = (start + half, start + third + half, start + 2.0 * third + half)
     signatures = [
-        _broad_signature(
+        _groove_signature(
             measure_stem_evidence(
                 profiles,
-                timestamp=sample_start,
-                duration_seconds=sample_duration,
+                timestamp=sample_center,
+                duration_seconds=third,
                 model_elements=model_elements,
+                centered=True,
+                strict_drums=False,
             ).elements
         )
-        for sample_start in sample_starts
+        for sample_center in sample_centers
     ]
     return bool(signatures[0]) and signatures[0] == signatures[1] == signatures[2]
 
@@ -322,19 +381,14 @@ CUE_PRESS_BUSY_PRE = 0.08
 CUE_PRESS_ABS_FLOOR = 0.02
 
 
-def is_clean_cue_press(
+def _vocal_press_levels(
     profiles: Dict[str, StemProfile],
     timestamp: float,
-) -> bool:
-    """True when the vocal stem is quiet or attacks cleanly at the cue press.
-
-    Always inspects the vocal stem, including Groove/synth-labeled markers.
-    Instrumental jump-ins with a singing vocal at t=0 fail.
-    """
+) -> Optional[tuple[float, float, float, float]]:
+    """Return (pre_abs, press_abs, pre, press) or None if no usable vocal stem."""
     vocal = profiles.get("vocal")
     if vocal is None or vocal.reference_peak < GLOBAL_SILENCE_PEAK:
-        return True
-
+        return None
     reference = max(vocal.reference_peak, 1e-6)
     t = max(0.0, float(timestamp))
     pre_start = max(0.0, t - CUE_PRESS_PRE_SECONDS)
@@ -343,27 +397,75 @@ def is_clean_cue_press(
         vocal.window_peak(pre_start, CUE_PRESS_PRE_SECONDS),
     )
     press_abs = max(
-        vocal.window_average(max(0.0, t - 0.03), CUE_PRESS_WINDOW_SECONDS),
-        vocal.window_peak(max(0.0, t - 0.03), CUE_PRESS_WINDOW_SECONDS),
+        vocal.window_average(t, CUE_PRESS_WINDOW_SECONDS),
+        vocal.window_peak(t, CUE_PRESS_WINDOW_SECONDS),
     )
-    # Uniform near-silence would otherwise normalize to 1.0 against itself.
-    if pre_abs < CUE_PRESS_ABS_FLOOR and press_abs < CUE_PRESS_ABS_FLOOR:
-        return True
+    return pre_abs, press_abs, pre_abs / reference, press_abs / reference
 
-    pre = pre_abs / reference
-    press = press_abs / reference
 
-    # Already making noise as the playhead lands.
-    if pre >= CUE_PRESS_PRE_MAX and pre_abs >= CUE_PRESS_ABS_FLOOR:
+def vocal_onset_on_downbeat(
+    profiles: Dict[str, StemProfile],
+    timestamp: float,
+    *,
+    beat_seconds: float = 0.5,
+) -> bool:
+    return is_vocal_onset_on_press(profiles, timestamp)
+
+
+def is_vocal_onset_on_press(
+    profiles: Dict[str, StemProfile],
+    timestamp: float,
+) -> bool:
+    """True when a vocal *enters* on or into the 1 — jump would catch the word."""
+    vocal = profiles.get("vocal")
+    levels = _vocal_press_levels(profiles, timestamp)
+    if vocal is None or levels is None:
         return False
-    # At-press vocal without a silent approach = mid-syllable / held note.
+    pre_abs, press_abs, pre, press = levels
+    if pre_abs < CUE_PRESS_ABS_FLOOR and press_abs < CUE_PRESS_ABS_FLOOR:
+        return False
+    # Attack on the downbeat.
     if (
-        press >= CUE_PRESS_BUSY
-        and pre >= CUE_PRESS_BUSY_PRE
+        pre < CUE_PRESS_PRE_MAX
+        and press >= CUE_PRESS_BUSY
         and press_abs >= CUE_PRESS_ABS_FLOOR
     ):
-        return False
-    return True
+        return True
+    # Lead-in burst: quiet, then singing in the last ~200ms before the 1.
+    if pre >= CUE_PRESS_PRE_MAX and pre_abs >= CUE_PRESS_ABS_FLOOR:
+        t = max(0.0, float(timestamp))
+        earlier_start = max(0.0, t - 0.70)
+        earlier_abs = max(
+            vocal.window_average(earlier_start, 0.25),
+            vocal.window_peak(earlier_start, 0.25),
+        )
+        if earlier_abs < max(CUE_PRESS_ABS_FLOOR, pre_abs * 0.25):
+            return True
+    return False
+
+
+def is_jump_safe_cue_press(
+    profiles: Dict[str, StemProfile],
+    timestamp: float,
+) -> bool:
+    """True when the vocal stem is silent at the press — safe pad jump."""
+    levels = _vocal_press_levels(profiles, timestamp)
+    if levels is None:
+        return True
+    pre_abs, press_abs, _pre, _press = levels
+    return pre_abs < CUE_PRESS_ABS_FLOOR and press_abs < CUE_PRESS_ABS_FLOOR
+
+
+def is_clean_cue_press(
+    profiles: Dict[str, StemProfile],
+    timestamp: float,
+) -> bool:
+    """True when a cue on the 1 is safe to jump to.
+
+    Jump-safe: vocal silent at the press. Vocal onset or already-singing
+    is not jump-safe (write as info POI instead).
+    """
+    return is_jump_safe_cue_press(profiles, timestamp)
 
 
 def is_clean_phrase_entry(
@@ -374,48 +476,10 @@ def is_clean_phrase_entry(
 ) -> bool:
     """True when a marker is safe to cue-jump to / loop from.
 
-    Every marker must be clean at the cue press. Vocal-forward markers also
-    must not start while a line is already running (pre-chorus into chorus).
+    Reject vocal onset on the 1. Already-rolling vocal is allowed.
     """
-    if not is_clean_cue_press(profiles, timestamp):
-        return False
-
-    element_set = {
-        str(element).strip().lower() for element in (elements or [])
-    }
-    # Longer mid-phrase gate only when the marker claims vocals.
-    if elements is not None and "vocals" not in element_set:
-        return True
-
-    vocal = profiles.get("vocal")
-    if vocal is None:
-        return True
-
-    lookback = max(0.5, float(lookback_seconds))
-    pre = vocal.window_average(max(0.0, timestamp - lookback), lookback)
-    post = vocal.window_average(max(0.0, timestamp), min(2.0, lookback + 0.5))
-    reference = max(vocal.reference_peak, 1e-6)
-    pre_n = pre / reference
-    post_n = post / reference
-
-    # Already singing hard before the hit.
-    if pre_n >= PHRASE_ENTRY_STRONG_PRE:
-        return False
-    # Pre-chorus words leading into a loud vocal section.
-    if (
-        pre_n >= PHRASE_ENTRY_LEAD_IN_PRE
-        and post_n >= PHRASE_ENTRY_LEAD_IN_POST
-        and post_n < pre_n * 3.5
-    ):
-        return False
-    # Continuous mid-line: pre and post both high with no clear phrase attack.
-    if (
-        pre_n >= PHRASE_ENTRY_CONTINUOUS_PRE
-        and post_n >= PHRASE_ENTRY_CONTINUOUS_PRE
-        and post_n <= pre_n * 1.6
-    ):
-        return False
-    return True
+    del elements, lookback_seconds
+    return is_clean_cue_press(profiles, timestamp)
 
 
 # Loop wrap-around continuity thresholds. Component presence can stay "stable"
@@ -500,6 +564,12 @@ def loop_seam_is_clean(
         if not stem_names:
             # Asserted components with no matching stem profiles cannot be proven.
             return False
+
+    # Sparse/syncopated kick envelopes fail cosine even on a repeating 8-count.
+    # If bass, instruments, or vocal can prove the wrap, do not let kick veto.
+    non_kick = tuple(name for name in stem_names if name != "kick")
+    if non_kick:
+        stem_names = non_kick
 
     active_stems = 0
     for stem_name in stem_names:
