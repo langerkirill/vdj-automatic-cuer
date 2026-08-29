@@ -38,18 +38,21 @@ def load_gemini_api_key() -> str:
 
     load_dotenv() alone only searches the process CWD, which breaks when the
     Music Sorter UI is launched from home/src without a local .env while the
-    key lives under Desktop/vdj-automatic-cuer/.env.
+    key lives under a checkout .env (vdj-station or a legacy vdj-automatic-cuer path).
     """
     if os.getenv("GEMINI_API_KEY"):
         return os.environ["GEMINI_API_KEY"]
 
     repo_root = Path(__file__).resolve().parents[1]
+    home = Path.home()
     candidates = [
         repo_root / ".env",
         repo_root / "ui" / ".env",
-        Path.home() / "Desktop" / "vdj-automatic-cuer" / ".env",
-        Path.home() / "Desktop" / "vdj-automatic-cuer" / "ui" / ".env",
-        Path.home() / "src" / "vdj-automatic-cuer" / ".env",
+        home / "src" / "vdj-station" / ".env",
+        home / "src" / "vdj-automatic-cuer" / ".env",
+        home / "Desktop" / "vdj-station" / ".env",
+        home / "Desktop" / "vdj-automatic-cuer" / ".env",
+        home / "Desktop" / "vdj-automatic-cuer" / "ui" / ".env",
         Path.cwd() / ".env",
     ]
     for path in candidates:

@@ -8,30 +8,30 @@ from pathlib import Path
 
 def ensure_autocue_on_path() -> Path:
     """
-    Add the vdj-automatic-cuer repo root to sys.path.
+    Add the VDJ Station repo root to sys.path.
 
     Preferred layout (monorepo)::
 
-        vdj-automatic-cuer/
+        vdj-station/
           vdj_database_safety.py
           vdj_cuer/
           ui/                 ← this package
             sorter/
               autocue_path.py
 
-    Also supports the older sibling-folder layout::
-
-        Desktop/vdj-automatic-cuer/
-        Desktop/music-sorter/
+    Also supports older checkouts named vdj-automatic-cuer.
     """
     here = Path(__file__).resolve()
+    home = Path.home()
     candidates = [
         # Monorepo: ui/sorter → repo root
         here.parents[2],
         # If sorter is ever top-level under ui with different nesting
         here.parents[1],
-        # Legacy sibling checkout on Desktop
-        Path.home() / "Desktop" / "vdj-automatic-cuer",
+        home / "src" / "vdj-station",
+        home / "src" / "vdj-automatic-cuer",
+        home / "Desktop" / "vdj-station",
+        home / "Desktop" / "vdj-automatic-cuer",
     ]
     for candidate in candidates:
         safety = candidate / "vdj_database_safety.py"
@@ -41,6 +41,6 @@ def ensure_autocue_on_path() -> Path:
                 sys.path.insert(0, path_str)
             return candidate
     raise RuntimeError(
-        "Could not find vdj-automatic-cuer repo root (vdj_database_safety.py). "
-        "Expected this UI under vdj-automatic-cuer/ui/ or a sibling Desktop checkout."
+        "Could not find VDJ Station repo root (vdj_database_safety.py). "
+        "Expected this UI under vdj-station/ui/ (or a legacy vdj-automatic-cuer checkout)."
     )
