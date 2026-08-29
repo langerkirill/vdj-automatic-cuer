@@ -12,6 +12,8 @@ class VdjSongMetadata:
     song_length: Optional[float] = None
     beatgrid_offset: float = 0.0
     scan_phase: Optional[float] = None
+    audio_sig: Optional[str] = None
+    file_size: Optional[int] = None
 
 
 class VdjDatabaseMixin:
@@ -59,6 +61,18 @@ class VdjDatabaseMixin:
                 beatgrid_poi_pos = self._optional_float(poi.get("Pos"))
                 break
 
+        file_size = None
+        raw_size = song.get("FileSize")
+        if raw_size not in (None, ""):
+            try:
+                file_size = int(raw_size)
+            except (TypeError, ValueError):
+                file_size = None
+        audio_sig = None
+        if scan is not None:
+            raw_sig = (scan.get("AudioSig") or "").strip()
+            audio_sig = raw_sig or None
+
         return (
             self._normalize_database_path(song.get("FilePath", "")),
             VdjSongMetadata(
@@ -71,6 +85,8 @@ class VdjDatabaseMixin:
                     beatgrid_poi_pos, scan_phase
                 ),
                 scan_phase=scan_phase,
+                audio_sig=audio_sig,
+                file_size=file_size,
             ),
         )
 

@@ -78,10 +78,10 @@ class BatchAnalysisMixin:
               isolated and no bass, synth, melody, vocal, pad, or tonal element is
               audible.
             - If a section has drums plus other elements, use neutral names like
-              "Rhythm Section", "Groove", "Build", "Drop", or "Outro".
+              "Groove", "Build", "Drop", "Chorus", or "Outro".
             - Use "Drop" only when the timestamp marks an actual energy rise or
               fuller section entering. If the point is musically useful but the
-              energy is already steady, rename it to "Rhythm Section", "Groove",
+              energy is already steady, rename it to "Groove", "Beat Entry",
               or "Vocal Mix"; if the true drop is elsewhere, move the cue.
             - Use "Breakdown" only when elements clearly drop out at that exact
               timestamp. If the label is wrong but the cue is useful, rename it;

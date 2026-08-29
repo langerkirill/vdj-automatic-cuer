@@ -12,7 +12,10 @@ import re
 import unittest
 from pathlib import Path
 
-UI_STATIC = Path(__file__).resolve().parents[1] / "static"
+try:
+    from tests.js_assets import UI_STATIC, read_shipped_js, read_static
+except ImportError:
+    from js_assets import UI_STATIC, read_shipped_js, read_static
 
 
 def visible_wave_window(duration: float, zoom: float, offset: float) -> dict[str, float]:
@@ -159,11 +162,13 @@ class PlayheadFollowAssetTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.html = (UI_STATIC / "index.html").read_text(encoding="utf-8")
         cls.css = (UI_STATIC / "styles.css").read_text(encoding="utf-8")
-        cls.js = (UI_STATIC / "app.js").read_text(encoding="utf-8")
+        cls.app_js = read_static("app.js")
+        cls.wave_js = read_static("waveform.js")
+        cls.js = read_shipped_js()
 
     def test_js_exports_follow_helpers(self) -> None:
-        self.assertIn("function keepPlayheadInView", self.js)
-        self.assertIn("function applyPlayheadFollow", self.js)
+        self.assertIn("function keepPlayheadInView", self.wave_js)
+        self.assertIn("function applyPlayheadFollow", self.wave_js)
         self.assertIn("function startPlayheadWatch", self.js)
         self.assertIn("function positionWavePlayhead", self.js)
 

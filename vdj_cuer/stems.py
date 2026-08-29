@@ -270,11 +270,10 @@ class StemMixin:
         *,
         max_attempts: int = LOOP_SEAM_MAX_ATTEMPTS,
     ) -> List[Tuple[float, int]]:
-        """Alternate starts/lengths when a wrap fails (prefer original, then ±1 beat).
+        """Retry shorter lengths on the same yellow [1]. Never ±1 beat.
 
-        Loops do not have to start on beat 1, but staying on a beat (and preferring
-        the original downbeat-ish placement) helps. Returns unique (start, beats)
-        pairs, longest list first attempt = original.
+        Off-1 nudges wrote loops next to the phrase grid, then the writer
+        either hard-failed or snapped them to a different 1.
         """
         if beat_duration <= 0:
             return [(float(start), int(length_beats))]
@@ -283,14 +282,8 @@ class StemMixin:
         base_beats = int(length_beats)
         # offset_beats, optional length override (None = keep base)
         plan: List[Tuple[int, Optional[int]]] = [
-            (0, None),  # original
-            (1, None),  # +1 beat
-            (-1, None),  # -1 beat
-            (2, None),
-            (-2, None),
-            (0, max(MIN_USEFUL_LOOP_BEATS, base_beats // 2)),  # shorter
-            (1, max(MIN_USEFUL_LOOP_BEATS, base_beats // 2)),
-            (-1, max(MIN_USEFUL_LOOP_BEATS, base_beats // 2)),
+            (0, None),
+            (0, max(MIN_USEFUL_LOOP_BEATS, base_beats // 2)),
         ]
         placements: List[Tuple[float, int]] = []
         seen: set[Tuple[int, int]] = set()
@@ -394,11 +387,10 @@ class StemMixin:
         audio_file_path: Optional[str],
         require_gemini_seam: bool = True,
     ) -> Optional[Dict]:
-        """Run stem gates + up to LOOP_SEAM_MAX_ATTEMPTS Gemini wrap listens.
+        """Run stem gates + a Gemini wrap listen on the same phrase [1].
 
-        On wrap failure, retries nearby beat starts (and optionally a shorter
-        length). Returns a filled loop dict or None. Zero loops for a track is
-        fine — callers should not invent fillers.
+        Shorter lengths on that 1 are allowed. Never nudge off the 1.
+        Gemini wrap is advisory: a stem-clean loop is kept.
         """
         if beat_duration <= 0:
             return None
@@ -442,37 +434,31 @@ class StemMixin:
             ):
                 last_stem_fail = "stem seam"
                 continue
-            if not is_clean_phrase_entry(
-                profiles,
-                timestamp=float(candidate_start),
-                elements=evidence.elements,
-            ):
-                last_stem_fail = "mid-phrase"
-                continue
 
             if require_gemini_seam and audio_file_path:
                 gemini_attempts += 1
-                if not self._evaluate_loop_seam_with_gemini(
-                    audio_file_path,
-                    float(candidate_start),
-                    float(duration_seconds),
-                    loop_name=loop_name,
-                    attempt=gemini_attempts,
-                    max_attempts=LOOP_SEAM_MAX_ATTEMPTS,
-                ):
-                    last_stem_fail = "gemini wrap"
-                    if gemini_attempts < LOOP_SEAM_MAX_ATTEMPTS:
-                        print(
-                            f"  🔄 Retrying loop '{loop_name}' "
-                            f"({gemini_attempts}/{LOOP_SEAM_MAX_ATTEMPTS} wrap tries used)"
-                        )
-                    continue
-                gemini_ok = True
+                gemini_ok = bool(
+                    self._evaluate_loop_seam_with_gemini(
+                        audio_file_path,
+                        float(candidate_start),
+                        float(duration_seconds),
+                        loop_name=loop_name,
+                        attempt=gemini_attempts,
+                        max_attempts=LOOP_SEAM_MAX_ATTEMPTS,
+                    )
+                )
+                if not gemini_ok:
+                    # Stem stability + seam already passed. Do not drop-all
+                    # loops just because Gemini is down or disagrees.
+                    print(
+                        f"  ⚠️  Gemini wrap failed for '{loop_name}' — "
+                        "keeping stem-clean loop"
+                    )
             else:
                 gemini_ok = False
 
             confidence = _stem_gate_confidence(evidence)
-            if confidence < 0.75:
+            if confidence < MIN_LOOP_CONFIDENCE:
                 last_stem_fail = "low confidence"
                 continue
 
@@ -628,18 +614,17 @@ class StemMixin:
                 )
                 # Gate on measured stem activity, not optimistic model scores.
                 cue_data["confidence"] = _stem_gate_confidence(evidence)
+                cue_data["color"] = self.validate_color_assignment(
+                    list(evidence.elements),
+                    cue_data.get("color") or "green",
+                    evidence.activity,
+                )
                 if not is_clean_phrase_entry(
                     profiles,
                     timestamp=float(timestamp),
                     elements=evidence.elements,
                 ):
-                    print(
-                        f"  🧹 Rejecting cue "
-                        f"'{cue_data.get('cue_name', 'cue')}' at "
-                        f"{float(timestamp):.2f}s "
-                        "(vocal noise on press / mid-phrase)"
-                    )
-                    continue
+                    cue_data["jumpable"] = False
                 kept_cues.append(cue_data)
             else:
                 kept_cues.append(cue_data)
@@ -888,26 +873,19 @@ class StemMixin:
         if "vocal" not in profiles:
             return []
 
-        bar_duration = beat_duration * 4.0
+        phrase_duration = beat_duration * float(PHRASE_BEATS)
         existing_times = sorted(
             float(cue.get("timestamp"))
             for cue in existing_cues
             if cue.get("timestamp") is not None
         )
-        min_spacing = beat_duration * 12.0
+        min_spacing = beat_duration * float(PHRASE_BEATS)
         candidates: List[Dict] = []
-        # Stay on the same bar grid as accepted cues (or beat 0 if none yet).
-        if existing_times:
-            phase = existing_times[0] % bar_duration
-        else:
-            phase = 0.0
-        start = phase
-        while start - bar_duration >= -1e-9:
-            start -= bar_duration
-        start = max(0.0, start)
-        while start + bar_duration < song_length - 2.0:
+        origin = existing_times[0] if existing_times else 0.0
+        start = origin
+        while start + phrase_duration < song_length - 2.0:
             if any(abs(start - existing) < min_spacing for existing in existing_times):
-                start += bar_duration
+                start += phrase_duration
                 continue
             evidence = measure_stem_evidence(
                 profiles,
@@ -918,16 +896,16 @@ class StemMixin:
                 strict_drums=False,
             )
             if "vocals" not in evidence.elements:
-                start += bar_duration
+                start += phrase_duration
                 continue
             if not is_clean_phrase_entry(
                 profiles, timestamp=start, elements=evidence.elements
             ):
-                start += bar_duration
+                start += phrase_duration
                 continue
             confidence = _stem_gate_confidence(evidence)
             if confidence < 0.70:
-                start += bar_duration
+                start += phrase_duration
                 continue
             label = self._element_label(list(evidence.elements))
             color = self.validate_color_assignment(evidence.elements, "yellow")
@@ -947,7 +925,7 @@ class StemMixin:
                     "model_confidence": 0.0,
                 }
             )
-            start += bar_duration
+            start += phrase_duration
 
         # Prefer earlier strong entries (intro/verse/drop) over late continuous choruses.
         candidates.sort(key=lambda cue: float(cue["timestamp"]))
@@ -1007,17 +985,18 @@ class StemMixin:
                 return True
             return loop_end <= min(later) - boundary_safety
 
-        # Step by one beat. Prefer starts on the 1 when ranking, but allow 2/3/4.
-        step_duration = beat_duration
+        # Phrase [1]s only — never beat 2/3/4 or in-between bar 1s.
+        step_duration = beat_duration * float(PHRASE_BEATS)
         candidates: List[Dict] = []
         max_beats = _max_loop_beats_for_tempo(beat_duration)
+        origin = float(transitions[0]) if transitions else 0.0
         # Prefer shorter lengths first; skip 32-beat on slow tracks (too long).
         length_order = tuple(b for b in (8, 16, 32) if b <= max_beats)
         for beats in length_order:
             duration_seconds = beats * beat_duration
             if duration_seconds >= song_length - 4.0:
                 continue
-            start = 0.0
+            start = origin
             while start + duration_seconds < song_length - 2.0:
                 if not fits_without_section_change(start, duration_seconds):
                     start += step_duration
@@ -1045,13 +1024,6 @@ class StemMixin:
                     profiles,
                     start=start,
                     duration_seconds=duration_seconds,
-                    elements=evidence.elements,
-                ):
-                    start += step_duration
-                    continue
-                if not is_clean_phrase_entry(
-                    profiles,
-                    timestamp=start,
                     elements=evidence.elements,
                 ):
                     start += step_duration

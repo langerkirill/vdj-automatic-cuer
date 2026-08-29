@@ -1,11 +1,13 @@
-# Automatic Music Cuer for VirtualDJ
+# VDJ Station
 
-AI-powered cue & loop generation for VirtualDJ, plus a **local Music Sorter UI** for reviewing markers, re-running AutoCue, and sorting cued tracks into House / Zouk folders **without losing VirtualDJ cues**.
+Local VirtualDJ booth: **AutoCue**, **Music Sorter**, live **Recs**, **Pajamathon assemble**, set overview, and practice mixes. Cue, confirm a lane, file the track — without losing VirtualDJ `FilePath`-linked markers.
+
+This used to be “just” an AutoCue CLI. The station is the day-to-day product; the CLI is still there for batch jobs.
 
 | Interface | What it’s for |
 |-----------|----------------|
+| **Music Sorter UI** (`ui/`) | Add Cues → lane + sort, Set Overview, Recs, Assemble, Practice, Best for set |
 | **CLI** (`automatic_music_cuer_gemini.py`) | Batch / scripted AutoCue on files or folders |
-| **Music Sorter UI** (`ui/`) | Day-to-day workflow: Add Cues review → Ready for Sort → library placement |
 
 Both share the same surgical `database.xml` writer (`vdj_database_safety.py`) so FilePath moves and cue edits stay CRLF-safe on large libraries.
 
@@ -17,36 +19,44 @@ Click the image above to watch the full CLI walkthrough on YouTube.
 
 ## Screenshots — Music Sorter UI
 
-### Sort mode (Ready for Sort → House / Zouk)
+Night-pool cassette deck: walnut rails, dusk palms, waveform in the cassette window. Night is the booth default; Day is linen noon. Cue colors stay VirtualDJ-literal (melodic / drums / vocals).
 
-![Sort mode](docs/screenshots/ui-sort.png)
-
-Pick a cued track, listen, take Gemini’s folder suggestion (or choose/create a folder), then **Sort into folder**. VirtualDJ `FilePath` is retargeted so cues stay attached.
-
-### Add Cues mode (review + AutoCue)
+### Add Cues (night)
 
 ![Add Cues mode](docs/screenshots/ui-add-cues.png)
 
-Review tracks under `Cues/Add Cues`: beatgrid preflight, waveform + cues/loops, **Both / Cues only / Loops only** AutoCue, delete markers, VDJ notes, then promote to Ready for Sort.
+Review the `Cues/Add Cues` queue: beatgrid preflight, waveform + cues/loops, AutoCue (both / cues only / loops only), confirm a color lane, then **Sort**. VirtualDJ `FilePath` is retargeted so cues stay attached.
 
-### Not cued queue
+### Day lighting
 
-![Not cued filter](docs/screenshots/ui-add-cues-not-cued.png)
+![Add Cues day](docs/screenshots/ui-add-cues-day.png)
 
-Filter to tracks that still need markers. Batch **Add cues** runs AutoCue across the queue (one database writer at a time; multiple jobs can queue).
+Same deck at noon — cream faceplate, espresso ink, hot-pink Sort CTA. Toggle Night / Day in the top bar.
 
-### Track detail while sorting
+### Cue review + sort
 
-![Sort detail](docs/screenshots/ui-sort-detail.png)
+![Sort rail](docs/screenshots/ui-sort.png)
 
-Waveform, cue list (Both / Cues / Loops tabs), half-BPM helpers, and **Already in library** placements with optional delete (Trash + remove that path’s Song entry from VirtualDJ).
+Gemini folder rec, lane colors, Sort CTA, and readiness checks. One primary action on the right rail.
+
+### Marker list
+
+![Cue list](docs/screenshots/ui-sort-detail.png)
+
+Cues and loops with colors, Both / Cues / Loops tabs, and Pajamathon copy. Scroll the stage to reach the list.
+
+### Needs sort queue
+
+![Needs sort filter](docs/screenshots/ui-add-cues-not-cued.png)
+
+Filter to cued tracks that still need a lane or folder. Batch **Add cues** / Pajamathon cues can queue AutoCue (one database writer at a time).
 
 ## Quick Start
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/langerkirill/vdj-automatic-cuer.git
-cd vdj-automatic-cuer
+git clone https://github.com/langerkirill/vdj-station.git
+cd vdj-station
 
 # 2. Run the setup script (venv + Gemini API key)
 ./setup.sh
@@ -57,7 +67,7 @@ source venv/bin/activate
 # 4a. CLI — analyze a track
 python3 automatic_music_cuer_gemini.py "path/to/song.mp3"
 
-# 4b. UI — Music Sorter (Add Cues + Sort)
+# 4b. UI — VDJ Station / Music Sorter
 ./ui/run.sh
 # open http://127.0.0.1:8787
 ```
@@ -73,12 +83,14 @@ The setup script installs CLI + UI dependencies and helps you set up your API ke
 - **Color Name Comments**: Labels each cue with the musical elements present, making it easy to filter and find specific sounds when DJing
 - **Write scopes**: full rewrite, **cues only**, or **loops only** (surgical; keeps the other kind)
 
-### Music Sorter UI (supported workflow view)
+### Music Sorter UI (the station)
 
-- **Add Cues** — review queue, beatgrid preflight, run AutoCue, edit/delete markers, promote to Ready
-- **Sort** — move cued tracks into House/Zouk emotion folders + Cues Sorted archive with FilePath relocate
-- **Library cleanup** — delete a placement copy and its VirtualDJ Song (cues) without touching Ready
-- **Gemini folder recommend** — suggests a destination crate from your folder catalog
+- **Add Cues** — review queue, beatgrid preflight, AutoCue, edit/delete markers, confirm a color lane, **Sort** into House/Zouk + Cues Sorted (FilePath-safe)
+- **Set Overview** — Pajamathon / set copies: copy cues, approve, must-play, send back
+- **Recs** — live-from-VirtualDJ next-track suggestions
+- **Assemble** — build a Pajamathon set folder
+- **Practice / Best for set** — mix scoring and keepers
+- **Library cleanup** — delete a placement copy and its VirtualDJ Song without touching the source
 ## Platform Support
 
 **Mac only** - This script automatically finds your VirtualDJ database at:
@@ -162,13 +174,25 @@ The setup script will:
 
 ### Gemini Model
 
-The default AutoCue model is `gemini-2.5-pro` (hears audio + stems). If 2.5 Pro is exhausted, AutoCue falls back to `gemini-pro-latest` then `gemini-2.5-flash`. Assemble, Recs, folder recommend, and practice mix scoring default to `gemini-2.5-flash`.
+Defaults are **Gemini 3.7 Flash**, not 2.5 Pro / 2.5 Flash. `gemini-2.5-flash` 404s on new keys and is skipped.
+
+| Job | Default | Fallback chain |
+|-----|---------|----------------|
+| **AutoCue** (CLI + UI) | `gemini-3.7-flash` | `gemini-3.6-flash` → `gemini-3.5-flash` → `gemini-2.5-pro` |
+| **Sorter** (Assemble, Recs, folder rec, practice scoring) | `gemini-3.7-flash` | `gemini-3.6-flash` → `gemini-3.5-flash` → `gemini-3.1-flash-lite` → `gemini-2.5-pro` |
 
 ```bash
-python3 automatic_music_cuer_gemini.py --model gemini-2.5-pro "path/to/song.mp3"
+python3 automatic_music_cuer_gemini.py --model gemini-3.7-flash "path/to/song.mp3"
 ```
 
-You can also set `GEMINI_MODEL=gemini-2.5-pro` and `MUSIC_SORTER_GEMINI_MODEL=gemini-2.5-flash` in `.env`.
+Override in `.env`:
+
+```
+GEMINI_MODEL=gemini-3.7-flash
+MUSIC_SORTER_GEMINI_MODEL=gemini-3.7-flash
+# optional AutoCue-only pin:
+# AUTOCUE_GEMINI_MODEL=gemini-3.7-flash
+```
 
 ## Music Sorter UI
 
@@ -234,7 +258,7 @@ python3 automatic_music_cuer_gemini.py --cues-only "path/to/song.mp3"
 python3 automatic_music_cuer_gemini.py --loops-only "path/to/song.mp3"
 
 # Force a different Gemini model
-python3 automatic_music_cuer_gemini.py --model gemini-2.5-flash "path/to/song.mp3"
+python3 automatic_music_cuer_gemini.py --model gemini-3.7-flash "path/to/song.mp3"
 
 # Process an entire folder (1 song at a time by default — safest for large libraries)
 python3 automatic_music_cuer_gemini.py "path/to/folder"
@@ -360,7 +384,7 @@ stem/name/color issues.
 
 - `automatic_music_cuer_gemini.py` - CLI and backwards-compatible imports
 - `vdj_cuer/` - Gemini analysis, stem handling, beatgrid checks, cue writing, and single/batch processing
-- `ui/` - **Music Sorter** local web UI (Add Cues + Sort); FastAPI + static frontend
+- `ui/` - **Music Sorter** local web UI (Add Cues, Set Overview, Recs, Assemble); Flask + static frontend
 - `ui/run.sh` - launch the UI on `http://127.0.0.1:8787`
 - `docs/screenshots/` - UI screenshots used in this README
 - `cue_visual_audit.py` - CLI and backwards-compatible imports for visual audit reports
@@ -449,7 +473,7 @@ After running the script:
 
 - Ensure `.env` file exists in this repository directory
 - Check that API key is correctly formatted: `GEMINI_API_KEY=AIza...`
-- Check that `GEMINI_MODEL` is set to a model your API key can access, such as `gemini-2.5-pro` or `gemini-2.5-flash`
+- Check that `GEMINI_MODEL` is set to a model your API key can access, such as `gemini-3.7-flash`
 
 ### "Database not found"
 

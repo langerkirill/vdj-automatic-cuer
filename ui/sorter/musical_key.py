@@ -50,6 +50,23 @@ _MINOR = {
 _OPEN_KEY_RE = re.compile(r"^(\d{1,2})\s*([dmab])$", re.I)
 
 
+def song_key_from_element(song) -> str:
+    """Best-effort VDJ key: Tags.Key / Tags.Harmonic, then Scan.Key."""
+    if song is None:
+        return ""
+    tags = song.find("Tags")
+    if tags is not None:
+        tagged = (tags.get("Key") or tags.get("Harmonic") or "").strip()
+        if tagged:
+            return tagged
+    scan = song.find("Scan")
+    if scan is not None:
+        scanned = (scan.get("Key") or "").strip()
+        if scanned:
+            return scanned
+    return ""
+
+
 def normalize_key_string(raw: str | None) -> str:
     if not raw:
         return ""

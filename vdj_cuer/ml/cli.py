@@ -175,11 +175,17 @@ def _eval_split(
         X = __import__("numpy").asarray(feature_matrix(rows), dtype=float)
         cue_scores = model.predict_cue_proba(X)
         loop_scores = model.predict_loop_proba(X)
+        unary = (
+            model.predict_unary(X)
+            if hasattr(model, "predict_unary")
+            else cue_scores
+        )
         scored = []
         loop_scored = []
-        for row, cs, ls in zip(rows, cue_scores, loop_scores):
+        for row, cs, ls, us in zip(rows, cue_scores, loop_scores, unary):
             item = dict(row)
             item["score"] = float(cs)
+            item["unary_score"] = float(us)
             scored.append(item)
             loop_item = dict(row)
             loop_item["score"] = float(ls)
@@ -308,10 +314,14 @@ def _ml_cue_times(rows: list[dict[str, Any]], model, *, bpm: float) -> list[floa
 
     X = np.asarray(feature_matrix(rows), dtype=float)
     scores = model.predict_cue_proba(X)
+    unary = (
+        model.predict_unary(X) if hasattr(model, "predict_unary") else scores
+    )
     scored = []
-    for row, score in zip(rows, scores):
+    for row, score, us in zip(rows, scores, unary):
         item = dict(row)
         item["score"] = float(score)
+        item["unary_score"] = float(us)
         scored.append(item)
     return [float(r["timestamp"]) for r in propose_cues(scored, bpm=bpm)]
 

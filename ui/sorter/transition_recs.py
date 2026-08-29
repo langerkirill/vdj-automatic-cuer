@@ -23,6 +23,7 @@ from .config import (
     LIBRARIES,
     LIBRARY_SKIP_DIR_NAMES,
     READY_FOR_SORT,
+    SETS_ROOT,
     VDJ_DATABASE,
 )
 from .musical_key import (
@@ -44,7 +45,11 @@ from .transition_timing import (
     parse_pois_from_song_xml,
 )
 from .transitions_db import lookup_options, normalize_key
-from .vdj_now_playing import get_now_playing, todays_history_plays
+from .vdj_now_playing import (
+    get_now_playing,
+    recent_history_play_groups,
+    todays_history_plays,
+)
 
 ensure_autocue_on_path()
 
@@ -54,6 +59,8 @@ BPM_TOLERANCE = float(os.getenv("MUSIC_SORTER_REC_BPM_TOLERANCE", "5"))
 MAX_CANDIDATES_TO_GEMINI = int(os.getenv("MUSIC_SORTER_REC_CANDIDATE_CAP", "48"))
 MAX_SCAN_SONGS = int(os.getenv("MUSIC_SORTER_REC_SCAN_CAP", "4000"))
 PICKS_PER_BUCKET = int(os.getenv("MUSIC_SORTER_REC_PICKS_PER_BUCKET", "5"))
+# Rolling calendar days ending today: Fri–Sat event plus the day before.
+REC_PLAY_WINDOW_DAYS = int(os.getenv("MUSIC_SORTER_REC_PLAY_WINDOW_DAYS", "3"))
 
 
 class EnergyPickSchema(BaseModel):
@@ -120,7 +127,7 @@ class RecJob:
             "message": self.message,
             "source_path": self.source_path,
             "source": self.source,
-            "result": self.result,
+            "result": stamp_picks_in_set(self.result),
             "error": self.error,
         }
 
@@ -157,7 +164,7 @@ def _scan_library_songs_from_database(
     force: bool = False,
 ) -> list[dict[str, Any]]:
     """
-    Lightweight pass over database.xml for songs under House/Zouk/Cues Sorted/Ready.
+    Lightweight pass over database.xml for House/Zouk/Cues Sorted/Ready/Sets.
 
     Returns dicts: path, artist, title, bpm, key, genre, vibe, cue_count, library, relative_path
     """
@@ -189,6 +196,7 @@ def _scan_library_songs_from_database(
         ("Zouk", LIBRARIES["Zouk"].resolve()),
         ("Cues Sorted", CUES_SORTED.resolve()),
         ("Ready for Sort", READY_FOR_SORT.resolve()),
+        ("Sets", SETS_ROOT.resolve()),
     ]
     root_strs = [(name, str(p)) for name, p in roots if p.is_dir()]
 
@@ -219,6 +227,8 @@ def _scan_library_songs_from_database(
                 except ValueError:
                     rel = Path(path).name
                 break
+        if lib == "Sets" and "pajamathon" in path.lower():
+            lib = "Pajamathon"
         if not lib:
             continue
         if Path(path).suffix.lower() not in AUDIO_EXTENSIONS:
@@ -346,6 +356,74 @@ def track_block_keys(
     return {k for k in keys if k and not k.endswith(":")}
 
 
+
+def is_pajamathon_set_filepath(path: str = "", library: str = "") -> bool:
+    """True when this FilePath is the Sets/Pajamathon copy (not Cues Sorted / Zouk)."""
+    lib = (library or "").strip()
+    p = (path or "").replace("\\", "/")
+    if lib == "Pajamathon":
+        return True
+    if lib == "Sets" and "pajamathon" in p.lower():
+        return True
+    return bool(re.search(r"/Sets/Pajamathon", p, flags=re.I))
+
+
+def pajamathon_set_block_keys(songs: list[dict[str, Any]] | None = None) -> set[str]:
+    """Identity keys for every scanned Sets/Pajamathon FilePath."""
+    if songs is None:
+        with _scan_lock:
+            songs = list(_scan_cache.get("songs") or [])
+    keys: set[str] = set()
+    for s in songs:
+        path = s.get("path") or ""
+        if not is_pajamathon_set_filepath(path, s.get("library") or ""):
+            continue
+        keys |= track_block_keys(
+            path=path,
+            artist=s.get("artist") or "",
+            title=s.get("title") or "",
+            name=s.get("name") or Path(path).name,
+        )
+    return keys
+
+
+def pick_has_pajamathon_set_filepath(
+    pick: dict[str, Any],
+    set_keys: set[str] | None = None,
+) -> bool:
+    """In-set = a Sets/Pajamathon FilePath exists for this song, not the rec folder."""
+    path = pick.get("path") or ""
+    if is_pajamathon_set_filepath(path, pick.get("library") or ""):
+        return True
+    if set_keys is None:
+        set_keys = pajamathon_set_block_keys()
+    if not set_keys:
+        return False
+    keys = track_block_keys(
+        path=path,
+        artist=pick.get("artist") or "",
+        title=pick.get("title") or "",
+        name=pick.get("name") or Path(path).name,
+    )
+    return bool(keys & set_keys)
+
+
+def stamp_picks_in_set(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Mark each rec pick in_set from Sets/Pajamathon FilePaths."""
+    if not result:
+        return result
+    set_keys = pajamathon_set_block_keys()
+    out = dict(result)
+    for bucket in ("higher_energy", "same_energy", "lower_energy"):
+        picks = []
+        for p in out.get(bucket) or []:
+            q = dict(p)
+            q["in_set"] = pick_has_pajamathon_set_filepath(q, set_keys)
+            picks.append(q)
+        out[bucket] = picks
+    return out
+
+
 def played_today_block_keys(
     plays: list[tuple[int, str, str, str]] | None = None,
 ) -> set[str]:
@@ -359,6 +437,51 @@ def played_today_block_keys(
             name=Path(path).name if path else "",
         )
     return blocked
+
+
+def recent_play_windows(
+    *,
+    days: int = REC_PLAY_WINDOW_DAYS,
+) -> dict[str, set[str]]:
+    """Identity keys for plays in the event window (today / yesterday / earlier)."""
+    groups = recent_history_play_groups(days=days)
+    today = played_today_block_keys(groups["today"])
+    yesterday = played_today_block_keys(groups["yesterday"])
+    earlier = played_today_block_keys(groups["earlier"])
+    return {
+        "today": today,
+        "yesterday": yesterday,
+        "earlier": earlier,
+        "all": today | yesterday | earlier,
+    }
+
+
+def format_removed_recent_plays_label(
+    today: int = 0,
+    yesterday: int = 0,
+    earlier: int = 0,
+) -> str:
+    """DJ-facing line for how many in-key recs were dropped as already played."""
+    today_n = max(0, int(today or 0))
+    yesterday_n = max(0, int(yesterday or 0))
+    earlier_n = max(0, int(earlier or 0))
+    total = today_n + yesterday_n + earlier_n
+    if total <= 0:
+        return ""
+    if yesterday_n and not today_n and not earlier_n:
+        return f"{yesterday_n} removed because played yesterday"
+    if today_n and not yesterday_n and not earlier_n:
+        return f"{today_n} removed because already played today"
+    bits: list[str] = []
+    if today_n:
+        bits.append(f"{today_n} today")
+    if yesterday_n:
+        bits.append(f"{yesterday_n} yesterday")
+    if earlier_n:
+        bits.append(f"{earlier_n} earlier")
+    return (
+        f"{total} removed because already played this event ({' · '.join(bits)})"
+    )
 
 
 def is_same_track(
@@ -418,6 +541,7 @@ def sanitize_recommendation_buckets(
     src_title = source.get("title") or ""
     src_name = source.get("name") or (Path(src_path).name if src_path else "")
     blocked = set(blocked_idents or ())
+    set_keys = pajamathon_set_block_keys()
 
     seen: set[str] = set()
     out = dict(recs)
@@ -456,7 +580,9 @@ def sanitize_recommendation_buckets(
             if not ident or ident in seen:
                 continue
             seen.add(ident)
-            cleaned.append(p)
+            q = dict(p)
+            q["in_set"] = pick_has_pajamathon_set_filepath(q, set_keys)
+            cleaned.append(q)
         return cleaned
 
     limit = max(1, PICKS_PER_BUCKET)
@@ -479,6 +605,7 @@ def build_candidates(
     source_cues: list[dict[str, Any]] | None = None,
     source_length: float | None = None,
     bpm_tolerance: float = BPM_TOLERANCE,
+    play_skip_stats: dict[str, int] | None = None,
 ) -> list[Candidate]:
     """Filter cued library tracks by BPM ±tol and Camelot-compatible key."""
     songs = _scan_library_songs_from_database()
@@ -491,7 +618,12 @@ def build_candidates(
         source_genre, source_vibe
     )
     source_markers = parse_markers(source_cues or [])
-    played_today = played_today_block_keys()
+    windows = recent_play_windows()
+    played_recent = windows.get("all") or set()
+    counted_skips: set[str] = set()
+    skip_today = 0
+    skip_yesterday = 0
+    skip_earlier = 0
 
     cands: list[Candidate] = []
     for s in songs:
@@ -514,10 +646,6 @@ def build_candidates(
             name=name,
         ):
             continue
-        if played_today and track_block_keys(
-            path=path, artist=artist, title=title, name=name
-        ) & played_today:
-            continue
 
         bpm = s.get("bpm")
         if source_bpm and bpm:
@@ -533,6 +661,23 @@ def build_candidates(
                 continue
         elif source_key and not key:
             # drop unknown keys when source has a key (strict harmonic filter)
+            continue
+
+        block_keys = track_block_keys(
+            path=path, artist=artist, title=title, name=name
+        )
+        if played_recent and block_keys & played_recent:
+            ident = track_identity_key(
+                path=path, artist=artist, title=title, name=name
+            )
+            if ident and ident not in counted_skips:
+                counted_skips.add(ident)
+                if block_keys & windows.get("today", set()):
+                    skip_today += 1
+                elif block_keys & windows.get("yesterday", set()):
+                    skip_yesterday += 1
+                else:
+                    skip_earlier += 1
             continue
 
         genre = s.get("genre") or ""
@@ -628,12 +773,21 @@ def build_candidates(
 
     # Prefer one copy of each track when it lives in multiple libs:
     # existing file first, then Cues Sorted, then richest genre/score.
-    _lib_rank = {"Cues Sorted": 3, "House": 2, "Zouk": 2, "Ready for Sort": 1}
+    _lib_rank = {
+        "Pajamathon": 4,
+        "Sets": 4,
+        "Cues Sorted": 3,
+        "House": 2,
+        "Zouk": 2,
+        "Ready for Sort": 1,
+    }
     best_by_label: dict[str, Candidate] = {}
     for c in cands:
         k = track_identity_key(
             path=c.path, artist=c.artist, title=c.title, name=c.name
         )
+        if c.library in {"Pajamathon", "Sets"}:
+            k = f"{k}|set:{c.library}"
         prev = best_by_label.get(k)
         if prev is None:
             best_by_label[k] = c
@@ -656,6 +810,11 @@ def build_candidates(
             best_by_label[k] = c
     cands = list(best_by_label.values())
     cands.sort(key=lambda c: c.score, reverse=True)
+    if play_skip_stats is not None:
+        play_skip_stats["today"] = skip_today
+        play_skip_stats["yesterday"] = skip_yesterday
+        play_skip_stats["earlier"] = skip_earlier
+        play_skip_stats["total"] = skip_today + skip_yesterday + skip_earlier
     return cands
 
 
@@ -723,7 +882,7 @@ CURRENT TRACK (on deck / just played):
 CANDIDATES (hard-filtered pool — ONLY these are legal):
 - Mixable Camelot key (same, relative major/minor, or ±1 adjacent on the wheel)
 - BPM within ±{BPM_TOLERANCE} of the current track
-- Cued library tracks the DJ can actually transition to
+- Cued library tracks the DJ can actually transition to, including Pajamathon/Sets copies
 - Each candidate lists genre (tag) and vibe/folder (library path context)
 
 From this filtered pool, pick the BEST next tracks in THREE energy buckets:
@@ -746,12 +905,13 @@ Genre / vibe rules (critical):
   genre bridge (don't jump from intimate R&B into festival psy without reason).
 - If you pick a genre contrast, say so honestly in reason and lower confidence.
 - Prefer closer genre/vibe over a "perfect" key that sounds like a different set.
+- Pajamathon/Sets copies are valid next tracks. If the current song is already in a set, prefer other Pajamathon/Sets candidates when they fit.
 - In every reason, mention genre/vibe fit (or mismatch) in plain language.
 
 Other rules:
 - ONLY use paths exactly as listed in candidates (copy path string verbatim).
 - NEVER recommend the CURRENT TRACK (or any library copy of it).
-- NEVER recommend a track already played today (those are already removed from the pool).
+- NEVER recommend a track already played in this event window (today, yesterday, and the day before — already removed from the pool).
 - Each track path may appear in AT MOST ONE bucket total (no repeats across higher/same/lower).
 - Every pick must stay in-key and within ±{BPM_TOLERANCE} BPM (already true of the list).
 - Prefer tracks with history×N when musical fit is equal.
@@ -1006,6 +1166,12 @@ def recommend_transitions(
     if resolved.get("genre_guess"):
         source["genre_guess"] = resolved["genre_guess"]
 
+    play_skip_stats: dict[str, int] = {
+        "today": 0,
+        "yesterday": 0,
+        "earlier": 0,
+        "total": 0,
+    }
     cands = build_candidates(
         source_path=source["path"],
         source_bpm=source.get("bpm"),
@@ -1017,6 +1183,12 @@ def recommend_transitions(
         source_genre_family=source.get("genre_family") or "",
         source_cues=source_cues,
         source_length=source_length or source.get("song_length"),
+        play_skip_stats=play_skip_stats,
+    )
+    removed_label = format_removed_recent_plays_label(
+        today=play_skip_stats["today"],
+        yesterday=play_skip_stats["yesterday"],
+        earlier=play_skip_stats["earlier"],
     )
 
     history_preview = lookup_options(
@@ -1024,6 +1196,15 @@ def recommend_transitions(
         or source.get("name", ""),
         limit=8,
     )
+
+    play_filters = {
+        "removed_recent_plays": int(play_skip_stats.get("total") or 0),
+        "removed_today": int(play_skip_stats.get("today") or 0),
+        "removed_yesterday": int(play_skip_stats.get("yesterday") or 0),
+        "removed_earlier": int(play_skip_stats.get("earlier") or 0),
+        "removed_recent_label": removed_label,
+        "play_window_days": REC_PLAY_WINDOW_DAYS,
+    }
 
     if not cands:
         empty = {
@@ -1035,9 +1216,13 @@ def recommend_transitions(
                 "higher_energy": [],
                 "same_energy": [],
                 "lower_energy": [],
-                "notes": "No in-key, ±BPM cued candidates found in House/Zouk/Cues Sorted.",
+                "notes": "No in-key, ±BPM cued candidates found in House/Zouk/Cues Sorted/Sets.",
                 "model": "",
                 "candidate_count": 0,
+            },
+            "filters": {
+                "bpm_tolerance": BPM_TOLERANCE,
+                **play_filters,
             },
         }
         try:
@@ -1058,12 +1243,12 @@ def recommend_transitions(
     else:
         recs = _fallback_buckets(cands, source=source)
 
-    # Final hard guarantee: no current track, no today's repeats, no dupes
+    # Final hard guarantee: no current track, no event-window repeats, no dupes
     recs = sanitize_recommendation_buckets(
         recs,
         source=source,
         allowed_paths=allowed,
-        blocked_idents=played_today_block_keys(),
+        blocked_idents=recent_play_windows()["all"],
     )
 
     payload = {
@@ -1081,7 +1266,7 @@ def recommend_transitions(
             "consider_timing": True,
             "genre_source": source.get("genre_source") or "",
             "genre_family": source.get("genre_family") or "",
-            "libraries": ["House", "Zouk", "Cues Sorted", "Ready for Sort"],
+            "libraries": ["House", "Zouk", "Cues Sorted", "Ready for Sort", "Pajamathon", "Sets"],
             "label": (
                 f"In-key · ±{int(BPM_TOLERANCE)} BPM · genre-aware"
                 + (
@@ -1089,8 +1274,9 @@ def recommend_transitions(
                     if source.get("genre_source") == "gemini"
                     else ""
                 )
-                + " · timing · no repeats today · cued"
+                + " · timing · no repeats this event · cued"
             ),
+            **play_filters,
         },
     }
     try:

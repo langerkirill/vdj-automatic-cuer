@@ -57,16 +57,72 @@ class StemEvidenceTests(unittest.TestCase):
         self.assertIn("vocals", evidence.uncertain_elements)
         self.assertEqual(evidence.activity["vocal"], "low")
 
-    def test_loop_rejects_component_changes_inside_the_loop(self):
+    def test_quiet_vocal_stem_bleed_is_not_vocals(self):
+        """Instrumental zouk: VDJ vocal stem is melody residue, self-relative 'high'."""
         profiles = {
             "kick": StemProfile.from_frames([0.8] * 40),
             "hihat": StemProfile.from_frames([0.5] * 40),
             "instruments": StemProfile.from_frames([0.7] * 40),
-            "bass": StemProfile.from_frames([0.001] * 40),
-            "vocal": StemProfile.from_frames([0.8] * 20 + [0.005] * 20),
+            "bass": StemProfile.from_frames([0.6] * 40),
+            "vocal": StemProfile.from_frames([0.08] * 40),
+        }
+        evidence = measure_stem_evidence(
+            profiles,
+            timestamp=1.0,
+            duration_seconds=3.0,
+            model_elements=["drums", "vocals", "bass", "synth"],
+        )
+        self.assertNotIn("vocals", evidence.elements)
+        self.assertEqual(evidence.activity["vocal"], "none")
+        self.assertIn("drums", evidence.elements)
+
+    def test_real_vocal_stem_still_asserts_vocals(self):
+        profiles = {
+            "kick": StemProfile.from_frames([0.8] * 40),
+            "hihat": StemProfile.from_frames([0.4] * 40),
+            "instruments": StemProfile.from_frames([0.5] * 40),
+            "bass": StemProfile.from_frames([0.6] * 40),
+            "vocal": StemProfile.from_frames([0.7] * 40),
+        }
+        evidence = measure_stem_evidence(
+            profiles,
+            timestamp=1.0,
+            duration_seconds=3.0,
+            model_elements=["drums", "vocals", "bass", "synth"],
+        )
+        self.assertIn("vocals", evidence.elements)
+        self.assertIn(evidence.activity["vocal"], {"medium", "high"})
+
+    def test_loop_rejects_component_changes_inside_the_loop(self):
+        """Kick/groove dropping out mid-loop is not a DJ-stable region."""
+        profiles = {
+            "kick": StemProfile.from_frames([0.8] * 20 + [0.005] * 20),
+            "hihat": StemProfile.from_frames([0.5] * 20 + [0.01] * 20),
+            "instruments": StemProfile.from_frames([0.7] * 40),
+            "bass": StemProfile.from_frames([0.6] * 20 + [0.005] * 20),
+            "vocal": StemProfile.from_frames([0.4] * 40),
         }
 
         self.assertFalse(
+            loop_is_stable(
+                profiles,
+                start=0.0,
+                duration_seconds=9.0,
+                model_elements=["drums", "vocals", "synth"],
+            )
+        )
+
+    def test_loop_is_stable_when_vocals_phrase_over_steady_groove(self):
+        """Alina/Zero 7-class: vocal rest inside an 8-count must not veto the loop."""
+        profiles = {
+            "kick": StemProfile.from_frames([0.8] * 40),
+            "hihat": StemProfile.from_frames([0.5] * 40),
+            "instruments": StemProfile.from_frames([0.7] * 40),
+            "bass": StemProfile.from_frames([0.6] * 40),
+            "vocal": StemProfile.from_frames([0.8] * 20 + [0.005] * 20),
+        }
+
+        self.assertTrue(
             loop_is_stable(
                 profiles,
                 start=0.0,
@@ -133,6 +189,27 @@ class StemEvidenceTests(unittest.TestCase):
                 start=0.0,
                 duration_seconds=8.0,
                 elements=["vocals", "synth"],
+            )
+        )
+
+    def test_loop_seam_sparse_kick_does_not_veto_when_bass_wraps(self):
+        """R&B/downtempo: syncopated kick envelope is not a wrap veto."""
+        steady = [0.55, 0.6, 0.5, 0.58] * 10
+        kick_sparse = [0.9, 0.02, 0.02, 0.02] * 10
+        profiles = {
+            "kick": StemProfile.from_frames(kick_sparse),
+            "hihat": StemProfile.from_frames([0.2] * 40),
+            "instruments": StemProfile.from_frames(steady),
+            "bass": StemProfile.from_frames(steady),
+            "vocal": StemProfile.from_frames([0.4] * 40),
+        }
+
+        self.assertTrue(
+            loop_seam_is_clean(
+                profiles,
+                start=0.0,
+                duration_seconds=8.0,
+                elements=["drums", "bass", "synth"],
             )
         )
 
@@ -330,9 +407,8 @@ class StemEvidenceTests(unittest.TestCase):
         self.assertEqual(cuer._loop_discovery_label(["synth"]), "Melodic")
         self.assertEqual(cuer._loop_discovery_label(["drums"]), "Drums")
 
-    def test_phrase_entry_rejects_pre_chorus_words_into_chorus(self):
-        """Need it Bad-class: words already running before the chorus hit."""
-        # Quiet then loud would be clean; loud-before-loud is mid-phrase.
+    def test_phrase_entry_rejects_already_rolling_vocal_for_jumps(self):
+        """Already-singing on the 1 is not jump-safe (info POI, not a pad)."""
         vocal = [0.7] * 20 + [0.9] * 20
         profiles = {
             "vocal": StemProfile.from_frames(vocal, frame_seconds=0.25),
@@ -341,14 +417,13 @@ class StemEvidenceTests(unittest.TestCase):
             "bass": StemProfile.from_frames([0.4] * 40, frame_seconds=0.25),
             "hihat": StemProfile.from_frames([0.1] * 40, frame_seconds=0.25),
         }
-        # t=5s is mid frames (index ~20) where pre-window is still loud
         self.assertFalse(
             is_clean_phrase_entry(
                 profiles, timestamp=5.0, elements=["drums", "vocals", "synth"]
             )
         )
 
-    def test_phrase_entry_allows_clean_vocal_attack(self):
+    def test_phrase_entry_rejects_vocal_onset_on_the_one(self):
         vocal = [0.02] * 24 + [0.8] * 16
         profiles = {
             "vocal": StemProfile.from_frames(vocal, frame_seconds=0.25),
@@ -357,7 +432,7 @@ class StemEvidenceTests(unittest.TestCase):
             "bass": StemProfile.from_frames([0.4] * 40, frame_seconds=0.25),
             "hihat": StemProfile.from_frames([0.1] * 40, frame_seconds=0.25),
         }
-        self.assertTrue(
+        self.assertFalse(
             is_clean_phrase_entry(
                 profiles, timestamp=6.0, elements=["drums", "vocals"]
             )
@@ -430,14 +505,13 @@ class StemEvidenceTests(unittest.TestCase):
             files = mixin._extract_vdj_stems(stems, tmp)
             profiles = load_stem_profiles(files)
 
-        # Clean vocal entry the user can jump to.
-        self.assertTrue(is_clean_cue_press(profiles, 9.999679))
+        # Vocal entering on the 1 — jump would catch the word.
+        self.assertFalse(is_clean_cue_press(profiles, 9.999679))
         # Intro instrumental 1.
         self.assertTrue(is_clean_cue_press(profiles, 2.173555))
-        # Mid-song 1s where the vocal is already sounding.
+        # Mid-song 1s where the vocal is already sounding: not jump-safe.
         self.assertFalse(is_clean_cue_press(profiles, 33.478))
         self.assertFalse(is_clean_cue_press(profiles, 70.000))
-        # Synth-labeled body 1 with vocal noise — old gate used to allow this.
         self.assertFalse(
             is_clean_phrase_entry(
                 profiles, timestamp=70.000, elements=["drums", "synth"]

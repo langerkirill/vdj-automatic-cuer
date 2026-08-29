@@ -38,13 +38,12 @@ class FilePreviewMixin:
             if loop_count >= 3:
                 break
 
+            from .cue_writer import _with_loop_suffix
+
             loop_name = loop_data.get("loop_name") or self.create_loop_name(
                 loop_data.get("elements", [])
             )
-            if loop_name.lower().endswith("loop"):
-                pass
-            elif not loop_name.endswith("l"):
-                loop_name = f"{loop_name}l"
+            loop_name = _with_loop_suffix(loop_name)
 
             if loop_name in used_loop_types:
                 continue
@@ -89,8 +88,7 @@ class FilePreviewMixin:
                 loop_name = loop_data.get("loop_name") or self.create_loop_name(
                     loop_data.get("elements", [])
                 )
-                if not loop_name.endswith("l"):
-                    loop_name = f"{loop_name}l"
+                loop_name = _with_loop_suffix(loop_name)
                 if loop_name == loop_info["name"]:
                     used_colors.add(loop_data.get("color", "green"))
                     break

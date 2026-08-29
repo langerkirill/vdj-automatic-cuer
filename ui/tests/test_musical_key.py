@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import unittest
 
-from sorter.musical_key import camelot_compatible, key_to_camelot, path_genre_is_clear
+from sorter.musical_key import (
+    camelot_compatible,
+    key_to_camelot,
+    path_genre_is_clear,
+    song_key_from_element,
+)
 
 
 class MusicalKeyTests(unittest.TestCase):
@@ -13,6 +18,25 @@ class MusicalKeyTests(unittest.TestCase):
         self.assertEqual(key_to_camelot("C"), "8B")
         self.assertEqual(key_to_camelot("F#m"), "11A")
         self.assertEqual(key_to_camelot("11A"), "11A")
+
+    def test_song_key_from_element_prefers_tags_then_scan(self):
+        class Fake:
+            def __init__(self, attrs):
+                self._attrs = attrs
+
+            def get(self, name, default=None):
+                return self._attrs.get(name, default)
+
+            def find(self, name):
+                return self._attrs.get(f"_{name}")
+
+        tags_only = Fake({"_Tags": Fake({"Key": "F#m"}), "_Scan": Fake({"Key": "C"})})
+        scan_only = Fake({"_Tags": Fake({}), "_Scan": Fake({"Key": "Em"})})
+        empty = Fake({})
+        self.assertEqual(song_key_from_element(tags_only), "F#m")
+        self.assertEqual(song_key_from_element(scan_only), "Em")
+        self.assertEqual(song_key_from_element(empty), "")
+        self.assertEqual(song_key_from_element(None), "")
 
     def test_compatible_relative_and_adjacent(self):
         self.assertTrue(camelot_compatible("Am", "C"))  # relative

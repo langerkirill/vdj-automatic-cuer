@@ -66,7 +66,7 @@ fi
 echo "🔑 Setting up Gemini API key..."
 echo ""
 echo "Get your API key from: https://aistudio.google.com/apikey"
-echo "Default AutoCue model: gemini-2.5-pro. Sorter uses gemini-2.5-flash."
+echo "Default AutoCue model: gemini-3.7-flash. Sorter uses gemini-3.7-flash."
 echo ""
 read -p "Enter your Gemini API key: " api_key
 
@@ -76,8 +76,8 @@ if [ -z "$api_key" ]; then
 fi
 
 echo "GEMINI_API_KEY=$api_key" > .env
-echo "GEMINI_MODEL=gemini-2.5-pro" >> .env
-echo "MUSIC_SORTER_GEMINI_MODEL=gemini-2.5-flash" >> .env
+echo "GEMINI_MODEL=gemini-3.7-flash" >> .env
+echo "MUSIC_SORTER_GEMINI_MODEL=gemini-3.7-flash" >> .env
 echo "✅ .env file created"
 echo ""
 

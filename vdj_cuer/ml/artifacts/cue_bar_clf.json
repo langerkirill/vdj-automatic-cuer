@@ -1,8 +1,6 @@
 {
   "schema": 1,
   "feature_names": [
-    "pos_frac",
-    "bar_index",
     "bpm",
     "mix_energy",
     "mix_prev",
@@ -63,31 +61,46 @@
     "chroma_change_8",
     "energy_ctx8_mean",
     "energy_ctx8_delta",
-    "centroid_ctx8_delta"
+    "centroid_ctx8_delta",
+    "mix_is_peak",
+    "kick_is_peak",
+    "phrase8_zero",
+    "phrase16_zero",
+    "mix_offset",
+    "kick_offset",
+    "vocal_offset",
+    "vocal_onset",
+    "mix_z",
+    "mix_rank_frac",
+    "mix_local8",
+    "kick_z",
+    "vocal_z",
+    "mix_vs_peak",
+    "stem_sig_changed_4",
+    "stem_sig_changed_8",
+    "chroma_local8",
+    "texture_change",
+    "energy_drop_held",
+    "next8_mix_delta",
+    "next16_mix_delta",
+    "prev8_mix_delta",
+    "kick_fwd8_delta",
+    "vocal_fwd8_delta",
+    "mix_vs_prev8_max",
+    "pre_decline",
+    "chroma_fwd8",
+    "kick_share",
+    "vocal_share",
+    "kick_share_fwd8",
+    "still_loud_kick_drop",
+    "still_loud_vocal_drop",
+    "phrase_pre_decline",
+    "after_peak"
   ],
-  "saved_at": "2026-08-14T19:31:51.012471+00:00",
+  "saved_at": "2026-08-28T02:43:49.265011+00:00",
   "metrics": {
-    "train": {
-      "tracks": 508.0,
-      "cue_recall_1bar": 0.6340176227971503,
-      "cue_precision_top6": 0.4351049868766404,
-      "loop_recall_1bar": 0.5274606299212599
-    },
-    "val": {
-      "tracks": 64.0,
-      "cue_recall_1bar": 0.5513020833333333,
-      "cue_precision_top6": 0.41015625,
-      "loop_recall_1bar": 0.40234375
-    },
-    "test": {
-      "tracks": 63.0,
-      "cue_recall_1bar": 0.6028344671201814,
-      "cue_precision_top6": 0.40740740740740744,
-      "loop_recall_1bar": 0.4880952380952381,
-      "cue_auc": 0.9086906044800782,
-      "loop_auc": 0.8901213568601849
-    },
-    "n_rows": 64669,
-    "n_tracks": 635
+    "n_rows": 67676,
+    "n_tracks": 668,
+    "seed": 0
   }
 }

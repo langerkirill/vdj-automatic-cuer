@@ -79,6 +79,54 @@ class CueEditXmlTests(unittest.TestCase):
         self.assertEqual(ch2["color_name"], "purple")
         self.assertIn(f'Color="{cue_mod.VDJ_CUE_COLORS["purple"]}"', out2)
 
+    def test_set_poi_color_finds_cue_by_num_after_move(self):
+        """UI sends the dragged time; XML still has the old Pos until color uses Num."""
+        xml = SAMPLE_SONG.format(path="/music/a.flac")
+        moved, _ = cue_mod.set_poi_position_in_song_xml(
+            xml, kind="cue", pos=32.0, new_pos=40.25, num="2"
+        )
+        out, ch = cue_mod.set_poi_color_in_song_xml(
+            moved, kind="cue", pos=32.0, color="yellow", num="2"
+        )
+        self.assertEqual(ch["color_name"], "yellow")
+        self.assertIn(f'Color="{cue_mod.VDJ_CUE_COLORS["yellow"]}"', out)
+        self.assertIn('Name="Drop"', out)
+        self.assertIn('Pos="40.25"', out)
+
+    def test_fill_missing_poi_colors_inserts_only_bare_tags(self):
+        xml = (
+            '<Song FilePath="/music/a.flac">\r\n'
+            '  <Poi Name="Intro" Pos="0.1" Num="1" Type="cue" />\r\n'
+            '  <Poi Name="Drop" Pos="32.0" Num="2" Color="4278255360" Type="cue" />\r\n'
+            '  <Poi Name="Loop A" Pos="16.0" Num="-1" Type="loop" Size="8.0" Slot="1" />\r\n'
+            "</Song>\r\n"
+        )
+        out, changes = cue_mod.fill_missing_poi_colors_in_song_xml(
+            xml, default_color="green"
+        )
+        names = {c["name"] for c in changes}
+        self.assertEqual(names, {"Intro", "Loop A"})
+        self.assertIn(f'Color="{cue_mod.VDJ_CUE_COLORS["green"]}"', out)
+        # Existing Drop color stays green (already set), Intro/Loop get Color.
+        self.assertEqual(out.count("Color="), 3)
+        self.assertIn('Name="Drop"', out)
+        self.assertIn("4278255360", out)
+
+    def test_fill_replaces_unknown_placeholder_color(self):
+        xml = (
+            '<Song FilePath="/music/a.flac">\r\n'
+            '  <Poi Name="Intro" Pos="0.1" Num="1" Color="4294901760" Type="cue" />\r\n'
+            '  <Poi Name="Drop" Pos="32.0" Num="2" Color="4278255360" Type="cue" />\r\n'
+            "</Song>\r\n"
+        )
+        out, changes = cue_mod.fill_missing_poi_colors_in_song_xml(
+            xml, default_color="yellow"
+        )
+        self.assertEqual([c["name"] for c in changes], ["Intro"])
+        self.assertIn(f'Color="{cue_mod.VDJ_CUE_COLORS["yellow"]}"', out)
+        self.assertNotIn("4294901760", out)
+        self.assertIn("4278255360", out)
+
     def test_set_poi_position_moves_loop(self):
         xml = SAMPLE_SONG.format(path="/music/a.flac")
         out, ch = cue_mod.set_poi_position_in_song_xml(
@@ -333,6 +381,55 @@ class CueEditDeleteTests(unittest.TestCase):
             self.assertIn('Name="Loop A"', text)
             self.assertIn('Name="Intro"', text)
             self.assertTrue(Path(result["database_backup"]).is_file())
+
+
+class CueEditAnywhereTests(unittest.TestCase):
+    def test_assert_allowed_accepts_sets_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = (
+                Path(tmp)
+                / "Sets"
+                / "Pajamathon 2026"
+                / "014. Simon Vuarambon - Quimera.flac"
+            )
+            audio.parent.mkdir(parents=True)
+            audio.write_bytes(b"x")
+            resolved = cue_mod._assert_allowed(audio)
+            self.assertEqual(resolved, audio.resolve())
+
+    def test_assert_allowed_rejects_missing_file(self):
+        missing = Path("/tmp/does-not-exist-cue-edit.flac")
+        with self.assertRaises(FileNotFoundError):
+            cue_mod._assert_allowed(missing)
+
+    def test_delete_cue_on_sets_track_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "Sets" / "Pajamathon 2026" / "track.flac"
+            audio.parent.mkdir(parents=True)
+            audio.write_bytes(b"x")
+            path = str(audio.resolve())
+            db = Path(tmp) / "database.xml"
+            db.write_bytes(
+                (
+                    "<VirtualDJ_Database>\r\n"
+                    + SAMPLE_SONG.format(path=path)
+                    + "</VirtualDJ_Database>\r\n"
+                ).encode("utf-8")
+            )
+            with patch.object(cue_mod, "VDJ_DATABASE", db), patch(
+                "sorter.cue_edit.is_virtualdj_running", return_value=False
+            ):
+                result = cue_mod.delete_cue_point(
+                    audio,
+                    kind="cue",
+                    pos=0.1,
+                    num="1",
+                    database_path=db,
+                    create_backup=False,
+                )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["removed"]["name"], "Intro")
+            self.assertNotIn('Name="Intro"', db.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

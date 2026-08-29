@@ -30,10 +30,15 @@ from .config import (
     VDJ_DATABASE,
 )
 from .db_lock import vdj_db_write
+from .cue_readiness import assess_cue_readiness, vdj_bpm_to_actual
+from .musical_key import key_to_camelot, song_key_from_element
 from .library import (
     expand_library_mode,
+    find_cues_sorted_matches,
+    find_library_matches,
     find_set_matches,
     is_pajamathon_event,
+    is_pajamathon_set_audio,
     resolve_destination,
 )
 
@@ -51,9 +56,12 @@ from vdj_database_safety import (  # noqa: E402
     _unescape_xml_attr,
     atomic_replace_database_parts,
     clone_song_entry_to_path,
+    directory_sort_label,
     iter_manual_poi_tags,
     load_song_element,
     normalize_database_path,
+    normalize_user2_dest,
+    patch_song_infos_and_user2,
     read_vdj_database_text,
     relocate_song_filepath_in_database,
     rewrite_song_xml_in_database,
@@ -86,27 +94,6 @@ class CuePoint:
         return asdict(self)
 
 
-def vdj_bpm_to_actual(vdj_bpm: Optional[float]) -> Optional[float]:
-    """
-    Convert VirtualDJ Scan/Tags Bpm values to musical BPM.
-
-    VDJ usually stores beat duration in seconds (e.g. 0.5 → 120 BPM).
-    Values already in a musical range (50–220) are returned as-is.
-    """
-    if vdj_bpm is None or vdj_bpm <= 0:
-        return None
-    if 50.0 <= vdj_bpm <= 220.0:
-        return float(vdj_bpm)
-    actual = 60.0 / vdj_bpm
-    if 40.0 <= actual <= 240.0:
-        return actual
-    # Odd encodings: try *120 heuristic used elsewhere in AutoCue
-    alt = vdj_bpm * 120.0
-    if 40.0 <= alt <= 240.0:
-        return alt
-    return None
-
-
 @dataclass
 class CueSummary:
     cue_count: int
@@ -120,6 +107,9 @@ class CueSummary:
     scan_phase: Optional[float] = None
     bpm: Optional[float] = None
     comment: str = ""  # VirtualDJ <Comment> notes field
+    key: str = ""
+    camelot: str = ""
+    user_color: str = ""
     points: list[CuePoint] = field(default_factory=list)
 
     @property
@@ -154,6 +144,7 @@ class SortResult:
     sets_paths: list[str] = field(default_factory=list)
     lane: str = ""
     lane_color: str = ""
+    dest_reused: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -246,6 +237,9 @@ def _empty_cue_summary() -> CueSummary:
         scan_phase=None,
         bpm=None,
         comment="",
+        key="",
+        camelot="",
+        user_color="",
         points=[],
     )
 
@@ -299,6 +293,7 @@ def _cue_summary_from_song_element(song: ET.Element) -> CueSummary:
     title = tags.get("Title", "") if tags is not None else ""
     author = tags.get("Author", "") if tags is not None else ""
     comment = (comment_el.text or "").strip() if comment_el is not None else ""
+    user_color = (infos.get("UserColor") if infos is not None else None) or ""
     song_length = _optional_float(infos.get("SongLength") if infos is not None else None)
     scan_phase = _optional_float(scan.get("Phase") if scan is not None else None)
     bpm = vdj_bpm_to_actual(
@@ -346,6 +341,7 @@ def _cue_summary_from_song_element(song: ET.Element) -> CueSummary:
         )
 
     points.sort(key=lambda p: (p.pos, 0 if p.kind == "cue" else 1, p.num))
+    key = song_key_from_element(song)
 
     return CueSummary(
         cue_count=cue_count,
@@ -359,6 +355,9 @@ def _cue_summary_from_song_element(song: ET.Element) -> CueSummary:
         scan_phase=scan_phase,
         bpm=bpm,
         comment=comment,
+        key=key,
+        camelot=key_to_camelot(key) or "",
+        user_color=str(user_color),
         points=points,
     )
 
@@ -464,64 +463,6 @@ def backup_database(database_path: Path | None = None) -> str:
     return backup_path
 
 
-READY_MIN_CUES = 2
-READY_MIN_LOOPS = 2
-
-
-def assess_cue_readiness(cues: CueSummary) -> dict[str, Any]:
-    """
-    Heuristic for whether a track looks ready to leave Add Cues → Ready for Sort.
-    Ready requires a beatgrid, at least 2 cues, and at least 2 loops.
-    """
-    checks = {
-        "in_database": cues.in_database,
-        "has_beatgrid": cues.has_beatgrid,
-        "has_cues": cues.cue_count > 0,
-        "multiple_cues": cues.cue_count >= READY_MIN_CUES,
-        "has_loops": cues.loop_count > 0,
-        "multiple_loops": cues.loop_count >= READY_MIN_LOOPS,
-    }
-    if not cues.in_database:
-        status = "missing"
-        label = "Missing from VDJ"
-        ready = False
-    elif cues.cue_count <= 0:
-        status = "not_cued"
-        label = "Not cued yet"
-        ready = False
-    elif (
-        cues.has_beatgrid
-        and cues.cue_count >= READY_MIN_CUES
-        and cues.loop_count >= READY_MIN_LOOPS
-    ):
-        status = "ready"
-        label = "Looks ready"
-        ready = True
-    elif cues.cue_count >= READY_MIN_CUES and cues.loop_count < READY_MIN_LOOPS:
-        status = "partial"
-        label = "Cued — needs 2 loops"
-        ready = False
-    elif cues.cue_count >= 1:
-        status = "partial"
-        label = "Partially cued — review"
-        ready = False
-    else:
-        status = "not_cued"
-        label = "Not cued yet"
-        ready = False
-
-    return {
-        "status": status,
-        "label": label,
-        "ready": ready,
-        "checks": checks,
-        "summary": (
-            f"{cues.cue_count} cues · {cues.loop_count} loops"
-            + (" · beatgrid" if cues.has_beatgrid else " · no beatgrid")
-        ),
-    }
-
-
 def _move_audio_and_retarget_db(
     source: Path,
     dest: Path,
@@ -532,14 +473,26 @@ def _move_audio_and_retarget_db(
     allow_vdj_running: bool,
     create_backup: bool,
     require_cued: bool,
+    reuse_existing: bool = False,
 ) -> SortResult:
     if require_cued and not cues.is_cued:
         raise PermissionError(
             "Track is not cued in VirtualDJ (no manual cue points)."
         )
 
-    if dest.exists():
+    if dest.exists() and not reuse_existing:
         raise FileExistsError(f"Destination already has a file named {dest.name}")
+
+    if dest.exists() and reuse_existing:
+        return _reuse_existing_dest_and_drop_source(
+            source,
+            dest,
+            db=db,
+            cues=cues,
+            dry_run=dry_run,
+            allow_vdj_running=allow_vdj_running,
+            create_backup=create_backup,
+        )
 
     stems_source = Path(f"{source}.vdjstems")
     stems_dest = Path(f"{dest}.vdjstems")
@@ -610,6 +563,85 @@ def _move_audio_and_retarget_db(
     )
 
 
+
+def _reuse_existing_dest_and_drop_source(
+    source: Path,
+    dest: Path,
+    *,
+    db: Path,
+    cues: CueSummary,
+    dry_run: bool,
+    allow_vdj_running: bool,
+    create_backup: bool,
+) -> SortResult:
+    """Dest filename already exists: use that file, retarget FilePath, drop source."""
+    if dry_run:
+        return SortResult(
+            source_path=str(source),
+            dest_path=str(dest),
+            stems_moved=False,
+            database_updated=cues.in_database,
+            database_backup=None,
+            cues=cues,
+            dry_run=True,
+            dest_reused=True,
+        )
+    if is_virtualdj_running() and not allow_vdj_running:
+        raise RuntimeError(
+            "VirtualDJ is running. Close it before sorting so it cannot overwrite "
+            "database.xml on exit. Pass allow_vdj_running=true only if you know "
+            "what you are doing."
+        )
+
+    backup: Optional[str] = None
+    db_path_in_db = _find_db_path_variant(source, db) if db.is_file() else None
+    dest_already_in_db = bool(db.is_file() and _find_db_path_variant(dest, db))
+    database_updated = False
+    if db_path_in_db and not dest_already_in_db:
+        if create_backup:
+            backup = backup_database(db)
+        with vdj_db_write():
+            relocate_song_filepath_in_database(
+                db,
+                db_path_in_db,
+                _normalize_path(dest),
+                validate=True,
+            )
+        database_updated = True
+    elif dest_already_in_db or cues.in_database:
+        database_updated = True
+
+    same_inode = False
+    try:
+        same_inode = source.exists() and dest.exists() and source.stat().st_ino == dest.stat().st_ino
+    except OSError:
+        same_inode = False
+    if source.exists() and source.resolve() != dest.resolve():
+        stems_source = Path(f"{source}.vdjstems")
+        if same_inode:
+            source.unlink(missing_ok=True)
+        else:
+            source.unlink(missing_ok=True)
+        if stems_source.is_file() and not Path(f"{dest}.vdjstems").is_file():
+            try:
+                shutil.move(str(stems_source), str(Path(f"{dest}.vdjstems")))
+            except OSError:
+                pass
+        elif stems_source.is_file():
+            stems_source.unlink(missing_ok=True)
+
+    return SortResult(
+        source_path=str(source),
+        dest_path=str(dest),
+        stems_moved=False,
+        database_updated=database_updated,
+        database_backup=backup,
+        cues=cues,
+        dry_run=False,
+        dest_reused=True,
+    )
+
+
 def cues_sorted_destination(relative_folder: str, filename: str) -> Path:
     """
     Mirror library relative path under Cues Sorted.
@@ -628,10 +660,12 @@ def cues_sorted_destination(relative_folder: str, filename: str) -> Path:
     return dest
 
 
-def _copy_file_and_stems(source: Path, dest: Path) -> bool:
+def _copy_file_and_stems(source: Path, dest: Path, *, reuse_existing: bool = False) -> bool:
     """Copy audio (+ .vdjstems if present). Returns whether stems were copied."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
+        if reuse_existing:
+            return False
         raise FileExistsError(f"Destination already has {dest.name} at {dest}")
     shutil.copy2(str(source), str(dest))
     stems_source = Path(f"{source}.vdjstems")
@@ -752,6 +786,7 @@ def sort_track(
     allow_vdj_running: bool = False,
     create_backup: bool = True,
     also_cues_sorted: bool = True,
+    lane: str | None = None,
 ) -> SortResult:
     """
     Move a Ready-for-Sort track into one or more House/Zouk folders and retarget VDJ cues.
@@ -774,12 +809,23 @@ def sort_track(
     if source.suffix.lower() not in AUDIO_EXTENSIONS:
         raise ValueError(f"Not an audio file: {source.name}")
 
-    try:
-        source.relative_to(ready)
-    except ValueError as exc:
+    source_kind = None
+    for kind, root in (
+        ("ready", ready),
+        ("add_cues", ADD_CUES.resolve()),
+        ("sets", SETS_ROOT.resolve()),
+    ):
+        try:
+            source.relative_to(root)
+            source_kind = kind
+            break
+        except ValueError:
+            continue
+    if source_kind is None:
         raise ValueError(
-            f"Source must live under Ready for Sort ({ready}), got {source}"
-        ) from exc
+            f"Source must live under Add Cues, Ready for Sort, or Sets, got {source}"
+        )
+    keep_source = source_kind == "sets"
 
     # Create missing folders when multi-targeting or Both (House may lack Zouk nests).
     create_missing = (
@@ -847,10 +893,7 @@ def sort_track(
             sets_paths=list(dry_set.get("paths") or []),
         )
 
-    # Fail early if any destination already has the file.
-    for lib, path, _rel in library_dests:
-        if path.exists():
-            raise FileExistsError(f"{lib} already has a file named {source.name}: {path}")
+    # Dest filename already present: use that file (still Cues Sorted + color + FilePath).
 
     # Transactional multi-dest:
     # 1) Copy secondaries + Cues Sorted while source is still under Ready
@@ -862,8 +905,9 @@ def sort_track(
     try:
         for lib, sec_dest, sec_rel in secondary:
             try:
-                _copy_file_and_stems(source, sec_dest)
-                secondary_copied.append(sec_dest)
+                if not sec_dest.exists():
+                    _copy_file_and_stems(source, sec_dest, reuse_existing=True)
+                    secondary_copied.append(sec_dest)
             except Exception as exc:
                 raise RuntimeError(
                     f"Failed to copy into {lib}/{sec_rel} at {sec_dest} "
@@ -872,7 +916,7 @@ def sort_track(
 
         if also_cues_sorted and cues_sorted_dest is not None and not cues_sorted_dest.exists():
             try:
-                _copy_file_and_stems(source, cues_sorted_dest)
+                _copy_file_and_stems(source, cues_sorted_dest, reuse_existing=True)
                 cues_sorted_created = True
             except Exception as exc:
                 raise RuntimeError(
@@ -892,16 +936,40 @@ def sort_track(
         except Exception:
             set_push = {"copied": 0, "skipped": 0, "failed": 1, "paths": []}
 
-        result = _move_audio_and_retarget_db(
-            source,
-            primary_dest,
-            db=db,
-            cues=cues,
-            dry_run=False,
-            allow_vdj_running=allow_vdj_running,
-            create_backup=create_backup,
-            require_cued=True,
-        )
+        if keep_source:
+            if not primary_dest.exists():
+                _copy_file_and_stems(source, primary_dest, reuse_existing=True)
+            result = SortResult(
+                source_path=str(source),
+                dest_path=str(primary_dest),
+                stems_moved=Path(f"{source}.vdjstems").is_file(),
+                database_updated=cues.in_database,
+                database_backup=None,
+                cues=cues,
+                dry_run=False,
+            )
+            if cues.in_database:
+                with vdj_db_write():
+                    clone_song_entry_to_path(
+                        db,
+                        _normalize_path(source),
+                        _normalize_path(primary_dest),
+                        validate=True,
+                        skip_if_exists=True,
+                    )
+                result.database_updated = True
+        else:
+            result = _move_audio_and_retarget_db(
+                source,
+                primary_dest,
+                db=db,
+                cues=cues,
+                dry_run=False,
+                allow_vdj_running=allow_vdj_running,
+                create_backup=create_backup,
+                require_cued=True,
+                reuse_existing=True,
+            )
     except Exception:
         for copied in secondary_copied:
             _remove_audio_and_stems(copied)
@@ -935,9 +1003,11 @@ def sort_track(
                 ) from exc
 
     dest_paths: list[Path] = [primary_dest, *[sec_dest for _lib, sec_dest, _rel in secondary]]
+    if keep_source:
+        dest_paths.append(source)
 
     if not also_cues_sorted or cues_sorted_dest is None:
-        return _paint_sort_destinations(result, db, dest_paths, cues)
+        return _paint_sort_destinations(result, db, dest_paths, cues, lane=lane)
 
     result.cues_sorted_path = str(cues_sorted_dest)
     result.cues_sorted_already_present = (
@@ -969,7 +1039,7 @@ def sort_track(
             ) from exc
 
     dest_paths.append(cues_sorted_dest)
-    return _paint_sort_destinations(result, db, dest_paths, cues)
+    return _paint_sort_destinations(result, db, dest_paths, cues, lane=lane)
 
 
 def _paint_sort_destinations(
@@ -977,14 +1047,15 @@ def _paint_sort_destinations(
     db: Path,
     dest_paths: list[Path],
     cues: CueSummary,
+    lane: str | None = None,
 ) -> SortResult:
-    """Set song-name UserColor from the folders this sort landed in."""
+    """Paint the confirmed lane (or a mapped dest). Never write white."""
     if not (result.database_updated or cues.in_database):
         return result
     try:
         from song_lane_color import apply_lane_color_after_move
 
-        painted = apply_lane_color_after_move(db, dest_paths)
+        painted = apply_lane_color_after_move(db, dest_paths, lane=lane)
         result.lane = str(painted.get("lane") or "")
         result.lane_color = str(painted.get("color") or "")
     except Exception:
@@ -1023,6 +1094,26 @@ def _trash_or_unlink(path: Path, *, to_trash: bool) -> None:
             f"Finder/osascript error: {err}"
         )
     path.unlink(missing_ok=True)
+
+
+def _drop_path(path: Path, *, to_trash: bool) -> dict[str, Any]:
+    """
+    Remove one directory name.
+
+    If the inode is shared (House/Zouk/inbox/set hard-link), unlink this
+    name only. Finder Trash of a hard-link can take the other copies.
+    """
+    kept = 0
+    try:
+        if path.is_file():
+            kept = max(0, path.stat().st_nlink - 1)
+    except OSError:
+        kept = 0
+    if kept > 0:
+        path.unlink(missing_ok=True)
+        return {"unlink_only": True, "kept_hardlinks": kept, "to_trash": False}
+    _trash_or_unlink(path, to_trash=to_trash)
+    return {"unlink_only": False, "kept_hardlinks": 0, "to_trash": to_trash}
 
 
 def _allowed_placement_roots() -> list[Path]:
@@ -1319,6 +1410,13 @@ def delete_library_placement(
         }
 
     root_name, relative_path = _placement_label(source)
+    try:
+        kept_hardlinks = (
+            max(0, source.stat().st_nlink - 1) if source.is_file() else 0
+        )
+    except OSError:
+        kept_hardlinks = 0
+    unlink_only = kept_hardlinks > 0
 
     if dry_run:
         db_preview = remove_song_entry_from_database(
@@ -1333,18 +1431,24 @@ def delete_library_placement(
             "root_name": root_name,
             "relative_path": relative_path,
             "removed_files": files_to_remove,
-            "to_trash": to_trash,
+            "to_trash": False if unlink_only else to_trash,
             "had_cues": cues_before.cue_count,
             "had_loops": cues_before.loop_count,
             "in_database": cues_before.in_database,
             "database": db_preview,
+            "kept_hardlinks": kept_hardlinks,
+            "unlink_only": unlink_only,
         }
 
-    # Trash/delete files first; only remove Song after files are gone.
-    # Prevents permanent cue+file loss if Trash fails (no hard-unlink when to_trash).
-    # Missing audio is still a valid delete: drop leftover stems + the VDJ Song.
+    # Drop this name first; only then remove the Song for this path.
+    # Shared inodes are unlinked (never Finder-trashed).
+    kept_hardlinks = 0
+    unlink_only = False
     for path_str in files_to_remove:
-        _trash_or_unlink(Path(path_str), to_trash=to_trash)
+        dropped = _drop_path(Path(path_str), to_trash=to_trash)
+        if dropped["unlink_only"]:
+            unlink_only = True
+            kept_hardlinks = max(kept_hardlinks, int(dropped["kept_hardlinks"]))
 
     db_result = remove_song_entry_from_database(
         source,
@@ -1361,14 +1465,102 @@ def delete_library_placement(
         "name": source.name,
         "root_name": root_name,
         "relative_path": relative_path,
+        "kept_hardlinks": kept_hardlinks,
+        "unlink_only": unlink_only,
         "removed_files": files_to_remove,
-        "to_trash": to_trash,
+        "to_trash": False if unlink_only else to_trash,
         "had_cues": cues_before.cue_count,
         "had_loops": cues_before.loop_count,
         "in_database": cues_before.in_database,
         "database": db_result,
         "database_backup": db_result.get("database_backup"),
     }
+
+
+_USER2_ATTR_RE = re.compile(r'\bUser2\s*=\s*"([^"]*)"', re.IGNORECASE)
+
+
+def _user2_from_song_xml(song_xml: str) -> str:
+    match = _USER2_ATTR_RE.search(song_xml)
+    if match is None:
+        return ""
+    return _unescape_xml_attr(match.group(1))
+
+
+def _fill_display_fields_from_source(
+    dest_xml: str,
+    source_xml: str,
+    source_path: Path,
+) -> str:
+    """Copy Directory Sort (User2) and title UserColor onto a Sets song.
+
+    Does not overwrite a dest that already has a valid library User2 or UserColor.
+    """
+    from song_lane_color import classify_path, color_for_lane, current_user_color
+
+    dest_user2 = normalize_user2_dest(_user2_from_song_xml(dest_xml))
+    src_user2 = normalize_user2_dest(_user2_from_song_xml(source_xml))
+    if not src_user2:
+        src_user2 = normalize_user2_dest(directory_sort_label(str(source_path)))
+    user2 = dest_user2 or src_user2 or None
+
+    dest_color = current_user_color(dest_xml)
+    src_color = current_user_color(source_xml)
+    if not src_color:
+        lane = classify_path(str(source_path))
+        src_color = color_for_lane(lane) if lane else None
+    color = dest_color or src_color or None
+
+    if user2 is None and color is None:
+        return dest_xml
+    return patch_song_infos_and_user2(dest_xml, user_color=color, user2=user2)
+
+
+def copy_display_fields_to_placement(
+    source_path: str | Path,
+    dest_path: str | Path,
+    *,
+    database_path: Path | None = None,
+    dry_run: bool = False,
+    allow_vdj_running: bool = False,
+    create_backup: bool = False,
+) -> dict[str, Any]:
+    """Copy Directory Sort + title color from a Zouk/library original onto a Sets file."""
+    source = _assert_under_queue_roots(Path(source_path))
+    dest = _assert_under_copy_cue_dests(Path(dest_path))
+    db = Path(database_path) if database_path else VDJ_DATABASE
+    if is_virtualdj_running() and not dry_run and not allow_vdj_running:
+        raise RuntimeError(
+            "VirtualDJ is running. Close it before writing Directory Sort / color."
+        )
+    content = read_vdj_database_text(db)
+    source_key, src_start, src_end = _song_span_for_path(content, source, source_path)
+    dest_key, dest_start, dest_end = _song_span_for_path(content, dest, dest_path)
+    new_dest = _fill_display_fields_from_source(
+        content[dest_start:dest_end], content[src_start:src_end], source
+    )
+    payload = {
+        "ok": True,
+        "dry_run": dry_run,
+        "source_path": str(source),
+        "dest_path": str(dest),
+        "user2": _user2_from_song_xml(new_dest),
+        "user_color": None,
+    }
+    from song_lane_color import current_user_color
+
+    payload["user_color"] = current_user_color(new_dest)
+    if dry_run or new_dest == content[dest_start:dest_end]:
+        payload["updated"] = False
+        return payload
+    backup = None
+    if create_backup:
+        backup = backup_database(db)
+    with vdj_db_write():
+        rewrite_song_xml_in_database(db, dest_key, new_dest, validate=False)
+    payload["updated"] = True
+    payload["database_backup"] = backup
+    return payload
 
 
 def copy_cues_to_placement(
@@ -1476,6 +1668,9 @@ def copy_cues_to_placement(
             )
             dest_xml = content[dest_start:dest_end]
             new_dest_xml = _replace_manual_pois_in_song_xml(dest_xml, poi_tags)
+            new_dest_xml = _fill_display_fields_from_source(
+                new_dest_xml, source_xml, source
+            )
             rewrite_song_xml_in_database(
                 db, dest_key, new_dest_xml, validate=True
             )
@@ -1637,6 +1832,132 @@ def _set_copy_basename(source: Path) -> str:
     return f"{stem}{source.suffix}"
 
 
+MUST_PLAY_FOLDER = "Must Play"
+
+
+def pajamathon_must_play_folder(sets_root: Path | None = None) -> Path:
+    return pajamathon_event_folder(sets_root) / MUST_PLAY_FOLDER
+
+
+def add_track_to_must_play(
+    source_path: str | Path,
+    *,
+    sets_root: Path | None = None,
+    database_path: Path | None = None,
+    dry_run: bool = False,
+    allow_vdj_running: bool = False,
+    create_backup: bool = True,
+) -> dict[str, Any]:
+    """Move/copy a queue track into Sets/Pajamathon/Must Play."""
+    source = _assert_under_queue_roots(Path(source_path))
+    if not source.is_file():
+        raise FileNotFoundError(f"Source file not found: {source}")
+    if source.suffix.lower() not in AUDIO_EXTENSIONS:
+        raise ValueError(f"Not an audio file: {source.name}")
+
+    root = (sets_root or SETS_ROOT).expanduser().resolve()
+    event = pajamathon_event_folder(root)
+    folder = event / MUST_PLAY_FOLDER
+    db = Path(database_path) if database_path else VDJ_DATABASE
+
+    try:
+        source.resolve().relative_to(folder.resolve())
+        return {
+            "ok": True,
+            "already_exists": True,
+            "moved": False,
+            "dry_run": dry_run,
+            "source_path": str(source),
+            "dest_path": str(source),
+            "event": event.name,
+            "relative_path": f"{event.name}/{MUST_PLAY_FOLDER}/{source.name}",
+        }
+    except ValueError:
+        pass
+
+    for hit in find_set_matches(source.name, sets_root=root):
+        rel = str(hit.get("relative_path") or hit.get("path") or "").lower()
+        if "must play" in rel:
+            return {
+                "ok": True,
+                "already_exists": True,
+                "moved": False,
+                "dry_run": dry_run,
+                "source_path": str(source),
+                "dest_path": str(hit.get("path") or ""),
+                "event": event.name,
+                "relative_path": str(hit.get("relative_path") or ""),
+                "existing": hit,
+            }
+
+    in_event = False
+    try:
+        source.resolve().relative_to(event.resolve())
+        in_event = True
+    except ValueError:
+        pass
+
+    if in_event:
+        dest = folder / source.name
+        if dest.exists() and dest.resolve() != source.resolve():
+            dest = folder / f"{source.stem} copy{source.suffix}"
+    else:
+        index = next_set_track_index(folder)
+        dest = folder / f"{index:03d}. {_set_copy_basename(source)}"
+        while dest.exists():
+            index += 1
+            dest = folder / f"{index:03d}. {_set_copy_basename(source)}"
+
+    payload: dict[str, Any] = {
+        "ok": True,
+        "already_exists": False,
+        "moved": in_event,
+        "dry_run": dry_run,
+        "source_path": str(source),
+        "dest_path": str(dest),
+        "event": event.name,
+        "relative_path": f"{event.name}/{MUST_PLAY_FOLDER}/{dest.name}",
+    }
+    if dry_run:
+        return payload
+
+    folder.mkdir(parents=True, exist_ok=True)
+    if in_event:
+        cues = summarize_cues(source, db)
+        moved = _move_audio_and_retarget_db(
+            source,
+            dest,
+            db=db,
+            cues=cues,
+            dry_run=False,
+            allow_vdj_running=allow_vdj_running,
+            create_backup=create_backup,
+            require_cued=False,
+        )
+        payload["dest_path"] = moved.dest_path
+        payload["database_backup"] = moved.database_backup
+        payload["copied_cues"] = cues.cue_count
+        payload["copied_loops"] = cues.loop_count
+        return payload
+
+    source_cues = summarize_cues(source, db)
+    _copy_file_and_stems(source, dest)
+    payload["copied_cues"] = source_cues.cue_count
+    payload["copied_loops"] = source_cues.loop_count
+    if source_cues.cue_count > 0 or source_cues.loop_count > 0:
+        copied = copy_cues_to_placement(
+            source,
+            dest,
+            overwrite=False,
+            database_path=db,
+            dry_run=False,
+            allow_vdj_running=allow_vdj_running,
+            create_backup=create_backup,
+        )
+        payload["database_backup"] = copied.get("database_backup")
+    return payload
+
+
 def add_track_to_event_set(
     source_path: str | Path,
     *,
@@ -1699,12 +2020,14 @@ def add_track_to_event_set(
         "event": folder.name,
         "relative_path": f"{folder.name}/{dest.name}",
         "index": index,
-        "copied_cues": source_cues.cue_count,
-        "copied_loops": source_cues.loop_count,
+        "copied_cues": 0,
+        "copied_loops": 0,
         "stems_copied": Path(f"{source}.vdjstems").is_file(),
         "database_backup": None,
     }
     if dry_run:
+        payload["copied_cues"] = source_cues.cue_count
+        payload["copied_loops"] = source_cues.loop_count
         return payload
 
     _copy_file_and_stems(source, dest)
@@ -1720,6 +2043,8 @@ def add_track_to_event_set(
         )
         payload["database_backup"] = copied.get("database_backup")
         payload["cue_mode"] = copied.get("mode")
+        payload["copied_cues"] = int(copied.get("copied_cues") or 0)
+        payload["copied_loops"] = int(copied.get("copied_loops") or 0)
     return payload
 
 
@@ -1781,6 +2106,95 @@ def _copy_cues_to_set_matches(
         "failed": failed,
         "paths": paths,
     }
+
+
+def best_cued_source_for_set_track(
+    dest_path: str | Path,
+    *,
+    placement_index: Optional[dict[str, list[dict[str, str]]]] = None,
+    database_path: Path | None = None,
+) -> Optional[Path]:
+    """Highest-cue Cues Sorted / House / Zouk copy of this Sets/Pajamathon file."""
+    dest = Path(dest_path).expanduser()
+    try:
+        dest_resolved = str(dest.resolve())
+    except OSError:
+        dest_resolved = str(dest)
+    names = [dest.name]
+    stripped = _LEADING_TRACK_NUM_RE.sub("", dest.stem).strip()
+    if stripped:
+        names.append(f"{stripped}{dest.suffix}")
+    seen: set[str] = set()
+    candidates: list[Path] = []
+    for name in names:
+        hits = list(find_cues_sorted_matches(name, index=placement_index))
+        hits.extend(find_library_matches(name, index=placement_index))
+        for hit in hits:
+            raw = str(hit.get("path") or "")
+            if not raw:
+                continue
+            path = Path(raw).expanduser()
+            try:
+                key = str(path.resolve())
+            except OSError:
+                key = str(path)
+            if key == dest_resolved or key in seen:
+                continue
+            seen.add(key)
+            candidates.append(path)
+    best: Optional[Path] = None
+    best_n = 0
+    for path in candidates:
+        cues = summarize_cues(path, database_path)
+        n = int(cues.cue_count or 0) + int(cues.loop_count or 0)
+        if n > best_n:
+            best_n = n
+            best = path
+    return best if best_n > 0 else None
+
+
+def copy_cues_onto_uncued_set_track(
+    dest_path: str | Path,
+    *,
+    overwrite: bool = False,
+    database_path: Path | None = None,
+    dry_run: bool = False,
+    allow_vdj_running: bool = False,
+    create_backup: bool = True,
+    source_path: str | Path | None = None,
+    placement_index: Optional[dict[str, list[dict[str, str]]]] = None,
+) -> dict[str, Any]:
+    """Clone cues from the library/Cues Sorted copy onto a Sets file that has none."""
+    dest = _assert_under_copy_cue_dests(Path(dest_path))
+    db = Path(database_path) if database_path else VDJ_DATABASE
+    dest_cues = summarize_cues(dest, db)
+    if (dest_cues.cue_count or dest_cues.loop_count) and not overwrite:
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "already_cued",
+            "dest_path": str(dest),
+            "copied_cues": dest_cues.cue_count,
+            "copied_loops": dest_cues.loop_count,
+        }
+    source = (
+        Path(source_path).expanduser()
+        if source_path
+        else best_cued_source_for_set_track(
+            dest, placement_index=placement_index, database_path=db
+        )
+    )
+    if source is None:
+        raise ValueError(f"No cued library/Cues Sorted source for {dest.name}")
+    return copy_cues_to_placement(
+        source,
+        dest,
+        overwrite=overwrite,
+        database_path=db,
+        dry_run=dry_run,
+        allow_vdj_running=allow_vdj_running,
+        create_backup=create_backup,
+    )
 
 
 def remove_from_ready_for_sort(
@@ -1866,6 +2280,7 @@ def delete_add_cues_track(
     source_path: str | Path,
     *,
     add_root: Path | None = None,
+    sets_root: Path | None = None,
     database_path: Path | None = None,
     dry_run: bool = False,
     to_trash: bool = True,
@@ -1873,8 +2288,11 @@ def delete_add_cues_track(
     create_backup: bool = True,
 ) -> dict[str, Any]:
     """
-    Permanently drop a track from Add Cues: trash/delete audio + stems and
+    Permanently drop a cue-queue track: trash/delete audio + stems and
     remove its VirtualDJ <Song> entry (cues + loops for that path).
+
+    Allowed roots: Add Cues (inbox) or Sets/Pajamathon* (event crate copies).
+    House/Zouk library files are never deleted here.
     """
     source = Path(source_path).expanduser().resolve()
     root = (add_root or ADD_CUES).resolve()
@@ -1884,12 +2302,17 @@ def delete_add_cues_track(
     if source.suffix.lower() not in AUDIO_EXTENSIONS:
         raise ValueError(f"Not an audio file: {source.name}")
 
+    in_add_cues = True
     try:
         source.relative_to(root)
-    except ValueError as exc:
+    except ValueError:
+        in_add_cues = False
+    set_copy = is_pajamathon_set_audio(source, sets_root=sets_root)
+    if not in_add_cues and not set_copy:
         raise ValueError(
-            f"Source must live under Add Cues ({root}), got {source}"
-        ) from exc
+            "Can only delete Add Cues inbox files or Pajamathon set copies "
+            f"(Add Cues: {root}), got {source}"
+        )
 
     if is_virtualdj_running() and not dry_run and not allow_vdj_running:
         raise RuntimeError(
@@ -1904,6 +2327,13 @@ def delete_add_cues_track(
         files_to_remove.append(str(stems))
 
     cues_before = summarize_cues(source, db)
+    # Shared inode with House/Zouk/inbox: drop this name only. Finder Trash
+    # on a hard-link can take the library copy with it.
+    try:
+        kept_hardlinks = max(0, source.stat().st_nlink - 1)
+    except OSError:
+        kept_hardlinks = 0
+    unlink_only = kept_hardlinks > 0
 
     if dry_run:
         db_preview = remove_song_entry_from_database(
@@ -1915,16 +2345,19 @@ def delete_add_cues_track(
             "path": str(source),
             "name": source.name,
             "removed_files": files_to_remove,
-            "to_trash": to_trash,
+            "to_trash": False if unlink_only else to_trash,
             "had_cues": cues_before.cue_count,
             "had_loops": cues_before.loop_count,
             "in_database": cues_before.in_database,
             "database": db_preview,
+            "set_copy": set_copy,
+            "kept_hardlinks": kept_hardlinks,
+            "unlink_only": unlink_only,
         }
 
-    # Trash/delete files first; only then remove the Song entry.
+    # Remove this path first; only then drop the Song entry for this path.
     for path_str in files_to_remove:
-        _trash_or_unlink(Path(path_str), to_trash=to_trash)
+        _drop_path(Path(path_str), to_trash=to_trash)
 
     db_result = remove_song_entry_from_database(
         source,
@@ -1939,12 +2372,15 @@ def delete_add_cues_track(
         "path": str(source),
         "name": source.name,
         "removed_files": files_to_remove,
-        "to_trash": to_trash,
+        "to_trash": False if unlink_only else to_trash,
         "had_cues": cues_before.cue_count,
         "had_loops": cues_before.loop_count,
         "in_database": cues_before.in_database,
         "database": db_result,
         "database_backup": db_result.get("database_backup"),
+        "set_copy": set_copy,
+        "kept_hardlinks": kept_hardlinks,
+        "unlink_only": unlink_only,
     }
 
 
@@ -1977,6 +2413,12 @@ def promote_add_cues_track(
     if source.suffix.lower() not in AUDIO_EXTENSIONS:
         raise ValueError(f"Not an audio file: {source.name}")
 
+    if is_pajamathon_set_audio(source):
+        raise ValueError(
+            "This file is already in the Pajamathon set. Cue it in place — "
+            "Move to Ready for Sort is only for Add Cues inbox tracks."
+        )
+
     try:
         source.relative_to(add_root)
     except ValueError as exc:
@@ -1995,7 +2437,7 @@ def promote_add_cues_track(
     if require_cued is None:
         require_cued = destination_stage == "ready_for_sort"
 
-    return _move_audio_and_retarget_db(
+    result = _move_audio_and_retarget_db(
         source,
         dest,
         db=db,
@@ -2005,6 +2447,14 @@ def promote_add_cues_track(
         create_backup=create_backup,
         require_cued=require_cued,
     )
+    if not dry_run:
+        from .ml_training import schedule_training_drop, schedule_training_update
+        if destination_stage == "ready_for_sort":
+            schedule_training_update(result.dest_path, result.cues)
+        elif destination_stage in {"no_cues_found", "ac_low_quality", "low_quality_skip"}:
+            schedule_training_drop(source)
+            schedule_training_drop(result.dest_path)
+    return result
 
 
 def demote_ready_to_add_cues(
@@ -2064,3 +2514,197 @@ def demote_ready_to_add_cues(
         create_backup=create_backup,
         require_cued=False,
     )
+
+
+def remove_set_copy(
+    source_path: str | Path,
+    *,
+    sets_root: Path | None = None,
+    add_root: Path | None = None,
+    database_path: Path | None = None,
+    dry_run: bool = False,
+    to_trash: bool = True,
+    allow_vdj_running: bool = False,
+    create_backup: bool = True,
+) -> dict[str, Any]:
+    """Delete the Sets copy only. Never touch Zouk / Cues Sorted / Add Cues."""
+    del add_root  # siblings are never passed through this writer
+    source = Path(source_path).expanduser().resolve()
+    root = (sets_root or SETS_ROOT).expanduser().resolve()
+    try:
+        source.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Remove only deletes a Sets/ copy (that path). Got {source}"
+        ) from exc
+    if not source.is_file():
+        raise FileNotFoundError(f"Set file not found: {source}")
+    if source.suffix.lower() not in AUDIO_EXTENSIONS:
+        raise ValueError(f"Not an audio file: {source.name}")
+
+    if is_virtualdj_running() and not dry_run and not allow_vdj_running:
+        raise RuntimeError(
+            "VirtualDJ is running. Close it before removing a set copy, "
+            "or pass allow_vdj_running=true (not recommended)."
+        )
+
+    db = Path(database_path) if database_path else VDJ_DATABASE
+    stems = Path(f"{source}.vdjstems")
+    files_to_remove = [str(source)]
+    if stems.is_file():
+        files_to_remove.append(str(stems))
+    cues_before = summarize_cues(source, db)
+
+    if dry_run:
+        kept = 0
+        try:
+            kept = max(0, source.stat().st_nlink - 1)
+        except OSError:
+            kept = 0
+        return {
+            "ok": True,
+            "dry_run": True,
+            "path": str(source),
+            "name": source.name,
+            "removed_files": files_to_remove,
+            "to_trash": False if kept else to_trash,
+            "had_cues": cues_before.cue_count,
+            "had_loops": cues_before.loop_count,
+            "in_database": cues_before.in_database,
+            "kept_hardlinks": kept,
+            "unlink_only": kept > 0,
+        }
+
+    kept_hardlinks = 0
+    unlink_only = False
+    for path_str in files_to_remove:
+        dropped = _drop_path(Path(path_str), to_trash=to_trash)
+        if dropped["unlink_only"]:
+            unlink_only = True
+            kept_hardlinks = max(kept_hardlinks, int(dropped["kept_hardlinks"]))
+
+    db_result = remove_song_entry_from_database(
+        source,
+        database_path=db,
+        create_backup=create_backup,
+        dry_run=False,
+    )
+    return {
+        "ok": True,
+        "dry_run": False,
+        "path": str(source),
+        "name": source.name,
+        "removed_files": files_to_remove,
+        "to_trash": False if unlink_only else to_trash,
+        "had_cues": cues_before.cue_count,
+        "had_loops": cues_before.loop_count,
+        "in_database": cues_before.in_database,
+        "database": db_result,
+        "database_backup": db_result.get("database_backup"),
+        "kept_hardlinks": kept_hardlinks,
+        "unlink_only": unlink_only,
+    }
+
+
+def send_set_copy_to_add_cues(
+    source_path: str | Path,
+    *,
+    add_root: Path | None = None,
+    sets_root: Path | None = None,
+    database_path: Path | None = None,
+    dry_run: bool = False,
+    allow_vdj_running: bool = False,
+    create_backup: bool = True,
+) -> dict[str, Any]:
+    """Relocate a Sets/Pajamathon copy to Add Cues/Pajamathon for new cues.
+
+    Zouk / Cues Sorted siblings stay. If the inbox already has this name,
+    drop the set name only (never overwrite the sibling).
+    """
+    source = Path(source_path).expanduser().resolve()
+    if not is_pajamathon_set_audio(source, sets_root=sets_root):
+        raise ValueError("Send-back is only for Sets/Pajamathon copies")
+    if not source.is_file():
+        raise FileNotFoundError(f"Set file not found: {source}")
+    if source.suffix.lower() not in AUDIO_EXTENSIONS:
+        raise ValueError(f"Not an audio file: {source.name}")
+
+    inbox_root = (add_root or ADD_CUES).expanduser().resolve()
+    dest_dir = inbox_root / "Pajamathon"
+    dest = (dest_dir / source.name).resolve()
+    try:
+        dest.relative_to(inbox_root)
+    except ValueError as exc:
+        raise ValueError("Destination escapes Add Cues root") from exc
+
+    db = Path(database_path) if database_path else VDJ_DATABASE
+    stems = Path(f"{source}.vdjstems")
+
+    if dest.exists():
+        if dry_run:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "already_in_inbox": True,
+                "source_path": str(source),
+                "dest_path": str(dest),
+                "name": source.name,
+            }
+        if is_virtualdj_running() and not allow_vdj_running:
+            raise RuntimeError(
+                "VirtualDJ is running. Close it before send-back, "
+                "or pass allow_vdj_running=true (not recommended)."
+            )
+        dropped = _drop_path(source, to_trash=False)
+        if stems.is_file():
+            _drop_path(stems, to_trash=False)
+        dest_cues = summarize_cues(dest, db)
+        src_in_db = _find_db_path_variant(source, db) if db.is_file() else None
+        database_updated = False
+        if src_in_db:
+            if dest_cues.in_database:
+                remove_song_entry_from_database(
+                    source,
+                    database_path=db,
+                    create_backup=create_backup,
+                    dry_run=False,
+                )
+                database_updated = True
+            else:
+                with vdj_db_write():
+                    relocate_song_filepath_in_database(
+                        db,
+                        src_in_db,
+                        _normalize_path(dest),
+                        validate=True,
+                    )
+                database_updated = True
+        return {
+            "ok": True,
+            "dry_run": False,
+            "already_in_inbox": True,
+            "unlink_only": dropped.get("unlink_only"),
+            "kept_hardlinks": dropped.get("kept_hardlinks"),
+            "source_path": str(source),
+            "dest_path": str(dest),
+            "name": source.name,
+            "database_updated": database_updated,
+        }
+
+    cues = summarize_cues(source, db)
+    moved = _move_audio_and_retarget_db(
+        source,
+        dest,
+        db=db,
+        cues=cues,
+        dry_run=dry_run,
+        allow_vdj_running=allow_vdj_running,
+        create_backup=create_backup,
+        require_cued=False,
+    )
+    payload = moved.to_dict()
+    payload["ok"] = True
+    payload["already_in_inbox"] = False
+    payload["name"] = source.name
+    return payload
+

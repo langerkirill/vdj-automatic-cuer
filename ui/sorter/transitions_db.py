@@ -84,6 +84,12 @@ CREATE TABLE IF NOT EXISTS practice_scores (
   analyzed_at TEXT NOT NULL,
   UNIQUE(mix_path, transition_index)
 );
+
+CREATE TABLE IF NOT EXISTS practice_mix_settings (
+  mix_path TEXT PRIMARY KEY,
+  exclude_from_best INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
 """
 
 
@@ -621,6 +627,78 @@ def _row_to_score_dict(r: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return d
 
 
+def mix_identity_keys(mix_path: str) -> set[str]:
+    """Path + basename keys so exclude still matches a relocated copy."""
+    raw = (mix_path or "").strip()
+    if not raw:
+        return set()
+    name = Path(raw).name
+    return {k for k in (raw, raw.lower(), name, name.lower()) if k}
+
+
+def excluded_practice_mix_keys(db_path: Path | None = None) -> set[str]:
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT mix_path FROM practice_mix_settings WHERE exclude_from_best = 1"
+        ).fetchall()
+        keys: set[str] = set()
+        for row in rows:
+            keys |= mix_identity_keys(row["mix_path"])
+        return keys
+    finally:
+        conn.close()
+
+
+def is_practice_mix_excluded(
+    mix_path: str, db_path: Path | None = None
+) -> bool:
+    return bool(mix_identity_keys(mix_path) & excluded_practice_mix_keys(db_path))
+
+
+def set_practice_mix_exclude(
+    mix_path: str,
+    exclude: bool,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Mark a practice mix as a real set: reviewable, omitted from Best."""
+    path = (mix_path or "").strip()
+    if not path:
+        raise ValueError("mix_path is required")
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO practice_mix_settings (mix_path, exclude_from_best, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(mix_path) DO UPDATE SET
+              exclude_from_best = excluded.exclude_from_best,
+              updated_at = excluded.updated_at
+            """,
+            (path, 1 if exclude else 0, _now_iso()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"mix_path": path, "exclude_from_best": bool(exclude)}
+
+
+def annotate_mixes_exclude_from_best(
+    mixes: list[dict[str, Any]],
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Copy mix dicts and stamp exclude_from_best without mutating the input."""
+    keys = excluded_practice_mix_keys(db_path)
+    out: list[dict[str, Any]] = []
+    for mix in mixes:
+        item = dict(mix)
+        item["exclude_from_best"] = bool(
+            mix_identity_keys(str(mix.get("path") or "")) & keys
+        )
+        out.append(item)
+    return out
+
+
 def list_best_practice_scores(
     prefix: str = "pj",
     min_overall: float = 7.0,
@@ -639,12 +717,20 @@ def list_best_practice_scores(
     try:
         _ensure_score_columns(conn)
         rows = conn.execute("SELECT * FROM practice_scores").fetchall()
+        excluded_keys: set[str] = set()
+        setting_rows = conn.execute(
+            "SELECT mix_path FROM practice_mix_settings WHERE exclude_from_best = 1"
+        ).fetchall()
+        for setting in setting_rows:
+            excluded_keys |= mix_identity_keys(setting["mix_path"])
         prefix_l = (prefix or "").lower()
         min_overall_f = float(min_overall)
         min_priority_i = int(min_priority or 0)
         out: list[dict[str, Any]] = []
         for r in rows:
             d = _row_to_score_dict(r)
+            if mix_identity_keys(d.get("mix_path") or "") & excluded_keys:
+                continue
             name = d["mix_name"]
             if prefix_l and not name.lower().startswith(prefix_l):
                 continue

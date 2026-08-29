@@ -1,16 +1,16 @@
-"""Detect the track most recently played in VirtualDJ (history m3u + DB LastPlay)."""
+"""Detect the track VirtualDJ is playing (History, LastPlay, or stale-history deck)."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
 from .config import AUDIO_EXTENSIONS, VDJ_CACHE_DB, VDJ_DATABASE, VDJ_HISTORY_DIR
 from .relocate import summarize_cues, vdj_bpm_to_actual
-from .musical_key import key_to_camelot, unescape_xml_text, vibe_label_from_path
+from .musical_key import key_to_camelot, song_key_from_element, unescape_xml_text, vibe_label_from_path
 
 _EXTVDJ_RE = re.compile(
     r"#EXTVDJ:(?P<meta>.*?)\n(?P<path>/[^\n]+)",
@@ -31,6 +31,12 @@ _DB_TAGS_RE = re.compile(
 )
 
 _lp_scan_cache: dict[str, Any] = {"mtime": None, "entry": None}
+_deck_scan_cache: dict[str, Any] = {"mtime": None, "entry": None}
+
+# History/LastPlay still wins while a set is in progress. Deck-load (waveform
+# cache) is only now-playing when those play clocks are this far behind — the
+# usual case is yesterday's History m3u while VDJ already has a track on deck.
+DECK_STALE_SECONDS = 15 * 60
 
 
 def best_lastplay_from_xml(text: str) -> Optional[tuple[int, str, str, str]]:
@@ -72,7 +78,7 @@ class NowPlaying:
     artist: str
     title: str
     lastplay_unix: Optional[int]
-    source: str  # history | database
+    source: str  # history | database | deck
     bpm: Optional[float] = None
     key: str = ""
     camelot: str = ""
@@ -124,30 +130,34 @@ def _newest_history_file() -> Optional[Path]:
     return max(files, key=lambda p: p.stat().st_mtime)
 
 
-def latest_deck_waveform() -> Optional[tuple[int, str, str, str]]:
-    """
-    Most recently loaded deck file from VDJ waveform cache.
+def _waveform_cache_mtime() -> float:
+    """cache.db / WAL mtime. Cheap; Recs stamp uses this to notice deck loads."""
+    db = VDJ_CACHE_DB
+    ts = 0.0
+    try:
+        if db.is_file():
+            ts = float(db.stat().st_mtime)
+        wal = db.with_name(db.name + "-wal")
+        if wal.is_file():
+            ts = max(ts, float(wal.stat().st_mtime))
+    except OSError:
+        pass
+    return ts
 
-    VDJ writes this when a track is loaded on a deck (before History logs a play).
+
+def _waveforms_latest_row() -> Optional[tuple[str, str]]:
+    """(filepath, filename) for the newest waveforms row, or None.
+
+    VDJ keeps cache.db locked while open, so a live sqlite connection times
+    out. Snapshot db+WAL instead; caller caches by WAL mtime.
     """
     db = VDJ_CACHE_DB
     if not db.is_file():
         return None
     import sqlite3
-    import tempfile
     import shutil
+    import tempfile
 
-    ts = 0
-    try:
-        ts = int(db.stat().st_mtime)
-        wal = db.with_name(db.name + "-wal")
-        if wal.is_file():
-            ts = max(ts, int(wal.stat().st_mtime))
-    except OSError:
-        pass
-
-    row = None
-    # Prefer a snapshot copy so a locked live DB does not block Refresh.
     try:
         with tempfile.TemporaryDirectory(prefix="vdj-cache-") as td:
             snap = Path(td) / "cache.db"
@@ -167,17 +177,37 @@ def latest_deck_waveform() -> Optional[tuple[int, str, str, str]]:
                 row = cur.fetchone()
             finally:
                 con.close()
+        if row:
+            return (row[0] or "", row[1] or "")
     except Exception:
-        row = None
-
-    if not row:
         return None
-    folder, name = (row[0] or ""), (row[1] or "")
+    return None
+
+
+def latest_deck_waveform() -> Optional[tuple[int, str, str, str]]:
+    """
+    Most recently loaded deck file from VDJ waveform cache.
+
+    VDJ writes this when a track is loaded on a deck (before History logs a play).
+    """
+    ts = _waveform_cache_mtime()
+    if _deck_scan_cache["mtime"] == ts:
+        return _deck_scan_cache["entry"]
+    row = _waveforms_latest_row()
+    if not row:
+        _deck_scan_cache["mtime"] = ts
+        _deck_scan_cache["entry"] = None
+        return None
+    folder, name = row
     path = str(Path(folder) / name) if folder else name
     if not path:
+        _deck_scan_cache["mtime"] = ts
+        _deck_scan_cache["entry"] = None
         return None
-    stem = Path(path).stem
-    return (ts, path, "", stem)
+    entry = (int(ts), path, "", Path(path).stem)
+    _deck_scan_cache["mtime"] = ts
+    _deck_scan_cache["entry"] = entry
+    return entry
 
 
 def latest_database_play(*, force: bool = False) -> Optional[tuple[int, str, str, str]]:
@@ -242,20 +272,41 @@ def latest_history_entry() -> Optional[tuple[int, str, str, str]]:
     return entries[-1]
 
 
-def todays_history_plays() -> list[tuple[int, str, str, str]]:
-    """VDJ History plays from today (local date). Path + artist/title."""
-    today = datetime.now().date()
+def _history_files_for_date(day: date) -> list[Path]:
+    """Dated History m3u paths VDJ uses (root + nested year/month)."""
+    root = VDJ_HISTORY_DIR
+    if not root.is_dir():
+        return []
+    candidates = (
+        root / f"{day.isoformat()}.m3u",
+        root / f"{day.year}" / f"{day:%m-%d}.m3u",
+        root / f"{day.year}" / f"{day:%m}" / f"{day.isoformat()}.m3u",
+        root / f"{day.year}" / f"{day:%m}" / f"{day:%m-%d}.m3u",
+    )
+    files: list[Path] = []
+    for path in candidates:
+        if path.is_file() and path not in files:
+            files.append(path)
+    return files
+
+
+def history_plays_on_dates(
+    dates: set[date] | frozenset[date],
+) -> list[tuple[int, str, str, str]]:
+    """VDJ History plays whose file date or lastplay falls on ``dates``."""
+    wanted = set(dates or ())
+    if not wanted:
+        return []
     root = VDJ_HISTORY_DIR
     if not root.is_dir():
         return []
     files: list[Path] = []
-    dated = root / f"{today.isoformat()}.m3u"
-    if dated.is_file():
-        files.append(dated)
-    # e.g. History/2026/08-12.m3u
-    nested = root / f"{today.year}" / f"{today:%m-%d}.m3u"
-    if nested.is_file() and nested not in files:
-        files.append(nested)
+    dated_files: set[Path] = set()
+    for day in wanted:
+        for path in _history_files_for_date(day):
+            if path not in files:
+                files.append(path)
+            dated_files.add(path)
     newest = _newest_history_file()
     if newest is not None and newest not in files:
         files.append(newest)
@@ -268,13 +319,13 @@ def todays_history_plays() -> list[tuple[int, str, str, str]]:
             mtime = int(m3u.stat().st_mtime)
         except OSError:
             continue
-        dated_file = m3u.name == dated.name or m3u == nested
+        dated_file = m3u in dated_files
         for lp, path, artist, title in _parse_history_text(text, file_mtime=mtime):
             if dated_file:
                 keep = True
             elif lp:
                 try:
-                    keep = datetime.fromtimestamp(lp).date() == today
+                    keep = datetime.fromtimestamp(lp).date() in wanted
                 except (OverflowError, OSError, ValueError):
                     keep = False
             else:
@@ -287,6 +338,60 @@ def todays_history_plays() -> list[tuple[int, str, str, str]]:
             seen.add(stamp)
             out.append((lp, path, artist, title))
     return out
+
+
+def todays_history_plays() -> list[tuple[int, str, str, str]]:
+    """VDJ History plays from today (local date). Path + artist/title."""
+    return history_plays_on_dates({datetime.now().date()})
+
+
+def recent_history_play_groups(
+    *,
+    days: int = 3,
+    today: date | None = None,
+) -> dict[str, list[tuple[int, str, str, str]]]:
+    """Split recent History plays into today / yesterday / earlier-in-window.
+
+    ``days`` is a rolling calendar window ending today (3 = Fri–Sat event plus
+    the day before). Each play is listed once; today wins, then yesterday.
+    """
+    window = max(1, int(days))
+    today_d = today or datetime.now().date()
+    yesterday = today_d - timedelta(days=1)
+    all_dates = {today_d - timedelta(days=i) for i in range(window)}
+    earlier_dates = all_dates - {today_d, yesterday}
+
+    today_plays = history_plays_on_dates({today_d})
+    yesterday_plays = history_plays_on_dates({yesterday}) if window >= 2 else []
+    earlier_plays = history_plays_on_dates(earlier_dates) if earlier_dates else []
+
+    today_stamps = {
+        (p[1].lower(), (p[2] or "").lower(), (p[3] or "").lower())
+        for p in today_plays
+    }
+    yesterday_only = [
+        p
+        for p in yesterday_plays
+        if (p[1].lower(), (p[2] or "").lower(), (p[3] or "").lower())
+        not in today_stamps
+    ]
+    yest_stamps = {
+        (p[1].lower(), (p[2] or "").lower(), (p[3] or "").lower())
+        for p in yesterday_only
+    } | today_stamps
+    earlier_only = [
+        p
+        for p in earlier_plays
+        if (p[1].lower(), (p[2] or "").lower(), (p[3] or "").lower())
+        not in yest_stamps
+    ]
+    all_plays = today_plays + yesterday_only + earlier_only
+    return {
+        "today": today_plays,
+        "yesterday": yesterday_only,
+        "earlier": earlier_only,
+        "all": all_plays,
+    }
 
 
 def _history_entries() -> list[tuple[int, str, str, str]]:
@@ -326,21 +431,7 @@ def _load_song_element(audio_path: str):
 
 def _song_key_from_database(audio_path: str) -> str:
     """Best-effort key lookup: Tags.Key / Tags.Harmonic, then Scan.Key (VDJ analysis)."""
-    song = _load_song_element(audio_path)
-    if song is None:
-        return ""
-    tags = song.find("Tags")
-    if tags is not None:
-        tagged = (tags.get("Key") or tags.get("Harmonic") or "").strip()
-        if tagged:
-            return tagged
-    # VirtualDJ often stores analyzed key on <Scan Key="…">, not Tags
-    scan = song.find("Scan")
-    if scan is not None:
-        scanned = (scan.get("Key") or "").strip()
-        if scanned:
-            return scanned
-    return ""
+    return song_key_from_element(_load_song_element(audio_path))
 
 
 def _song_genre_and_vibe(audio_path: str) -> tuple[str, str]:
@@ -382,20 +473,55 @@ def _song_genre_and_vibe(audio_path: str) -> tuple[str, str]:
     return genre, vibe
 
 
+def _same_track_path(left: str, right: str) -> bool:
+    a = (left or "").strip().lower()
+    b = (right or "").strip().lower()
+    return bool(a) and a == b
+
+
+def _deck_is_ahead(
+    play: Optional[tuple[int, str, str, str]],
+    deck: Optional[tuple[int, str, str, str]],
+) -> bool:
+    """True when deck-load is the only current signal (play clocks went stale)."""
+    if not deck:
+        return False
+    if not play:
+        return True
+    if _same_track_path(play[1], deck[1]):
+        return False
+    play_ts = int(play[0] or 0)
+    deck_ts = int(deck[0] or 0)
+    if deck_ts <= play_ts:
+        return False
+    return (deck_ts - play_ts) > DECK_STALE_SECONDS
+
+
 def pick_now_playing(
     hist: Optional[tuple[int, str, str, str]],
     db_play: Optional[tuple[int, str, str, str]],
+    deck: Optional[tuple[int, str, str, str]] = None,
 ) -> tuple[Optional[tuple[int, str, str, str]], str]:
-    """Choose the newer of History last line vs database LastPlay. Never deck-load."""
+    """
+    Choose History last line vs database LastPlay.
+
+    A deck-load (waveform cache) wins only when those play clocks are stale —
+    loading the next track during a live set must not steal Recs.
+    """
     if hist and db_play:
         if db_play[0] > hist[0]:
-            return db_play, "database"
-        return hist, "history"
-    if db_play:
-        return db_play, "database"
-    if hist:
-        return hist, "history"
-    return None, "history"
+            picked, source = db_play, "database"
+        else:
+            picked, source = hist, "history"
+    elif db_play:
+        picked, source = db_play, "database"
+    elif hist:
+        picked, source = hist, "history"
+    else:
+        picked, source = None, "history"
+    if _deck_is_ahead(picked, deck):
+        return deck, "deck"
+    return picked, source
 
 
 def get_now_playing(
@@ -407,12 +533,15 @@ def get_now_playing(
     """
     Track VirtualDJ is actually playing.
 
-    Uses History plus database LastPlay (play, not deck-load). A song only
-    loaded onto a slot is ignored because its LastPlay does not move.
+    Prefers History plus database LastPlay. Falls back to the latest deck-load
+    when those play clocks are stale (no History file for today, LastPlay from
+    yesterday, etc.). A song only loaded onto the other deck during a live set
+    is ignored.
     """
     hist = latest_history_entry() if prefer_latest_file else None
     db_play = latest_database_play(force=force_rescan)
-    picked, source = pick_now_playing(hist, db_play)
+    deck = latest_deck_waveform()
+    picked, source = pick_now_playing(hist, db_play, deck)
     if picked is None:
         entries = _history_entries()
         if not entries:
@@ -457,6 +586,51 @@ def get_now_playing(
     except Exception:
         np.mix_windows = []
     return np
+
+
+def now_playing_stamp() -> dict[str, Any]:
+    """Cheap history/db/cache mtime + last path. No enrich, no database XML scan."""
+    newest = _newest_history_file()
+    hist_mtime = 0.0
+    if newest is not None:
+        try:
+            hist_mtime = float(newest.stat().st_mtime)
+        except OSError:
+            hist_mtime = 0.0
+    db_mtime = 0.0
+    if VDJ_DATABASE.is_file():
+        try:
+            db_mtime = float(VDJ_DATABASE.stat().st_mtime)
+        except OSError:
+            db_mtime = 0.0
+    hist = latest_history_entry()
+    cache_mtime = _waveform_cache_mtime()
+    deck = None
+    if _deck_is_ahead(hist, (int(cache_mtime), "", "", "")):
+        deck = latest_deck_waveform()
+    picked, source = pick_now_playing(hist, None, deck)
+    play_mtime = max(hist_mtime, db_mtime)
+    if picked is None:
+        return {
+            "path": "",
+            "lastplay": 0,
+            "mtime": max(play_mtime, cache_mtime),
+            "source": source,
+            "artist": "",
+            "title": "",
+        }
+    lp, path, artist, title = picked
+    # Deck fingerprint is the path. Do not put cache WAL / database.xml mtime
+    # in lastplay or mtime or Recs would re-enrich on every VDJ write.
+    deck = source == "deck"
+    return {
+        "path": path,
+        "lastplay": 0 if deck else int(lp or 0),
+        "mtime": 0 if deck else play_mtime,
+        "source": source,
+        "artist": artist,
+        "title": title,
+    }
 
 
 def format_lastplay(unix_ts: Optional[int]) -> str:

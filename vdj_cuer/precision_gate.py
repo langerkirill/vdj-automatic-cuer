@@ -6,7 +6,12 @@ import math
 from typing import Dict, Iterable, Optional
 
 
-from .common import TARGET_MAX_LOOPS, is_on_downbeat, quantize_to_downbeat
+from .common import (
+    PHRASE_BEATS,
+    TARGET_MAX_LOOPS,
+    is_on_phrase_one,
+    quantize_to_phrase_one,
+)
 
 MIN_CUE_CONFIDENCE = 0.70
 MIN_LOOP_CONFIDENCE = 0.62
@@ -35,8 +40,8 @@ def _has_supported_components(item: Dict) -> bool:
 def _downbeat_index(timestamp: float, bpm: Optional[float], offset: float) -> int:
     if not bpm or bpm <= 0:
         return round(timestamp * 2.0)
-    bar_duration = (60.0 / bpm) * 4.0
-    return math.floor(((timestamp - offset) / bar_duration) + 0.5)
+    phrase_duration = (60.0 / bpm) * float(PHRASE_BEATS)
+    return math.floor(((timestamp - offset) / phrase_duration) + 0.5)
 
 
 def _best_cue_per_downbeat(
@@ -78,8 +83,8 @@ def apply_precision_gate(
             rejected["low_confidence_cues"] += 1
             continue
         if bpm:
-            timestamp = quantize_to_downbeat(timestamp, bpm, beatgrid_offset)
-            if not is_on_downbeat(timestamp, bpm, beatgrid_offset):
+            timestamp = quantize_to_phrase_one(timestamp, bpm, beatgrid_offset)
+            if not is_on_phrase_one(timestamp, bpm, beatgrid_offset):
                 rejected["off_downbeat_cues"] += 1
                 continue
         cue["timestamp"] = timestamp
@@ -106,8 +111,8 @@ def apply_precision_gate(
             rejected["low_confidence_loops"] += 1
             continue
         if bpm:
-            start = quantize_to_downbeat(start, bpm, beatgrid_offset)
-            if not is_on_downbeat(start, bpm, beatgrid_offset):
+            start = quantize_to_phrase_one(start, bpm, beatgrid_offset)
+            if not is_on_phrase_one(start, bpm, beatgrid_offset):
                 rejected["off_downbeat_loops"] += 1
                 continue
         loop["start"] = start

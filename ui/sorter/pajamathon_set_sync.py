@@ -33,7 +33,7 @@ from .library import (
     normalize_placement_key,
 )
 from .relocate import (
-    _trash_or_unlink,
+    _drop_path,
     is_virtualdj_running,
     remove_song_entry_from_database,
 )
@@ -333,7 +333,7 @@ def sync_pajamathon_set_deletes(
         if not dry_run:
             try:
                 for file_str in files:
-                    _trash_or_unlink(Path(file_str), to_trash=to_trash)
+                    _drop_path(Path(file_str), to_trash=to_trash)
                 if db.is_file() and not is_virtualdj_running():
                     db_result = remove_song_entry_from_database(
                         listed_path,

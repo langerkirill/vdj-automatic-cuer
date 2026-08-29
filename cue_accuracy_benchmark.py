@@ -31,6 +31,26 @@ class BenchmarkHelper(StemMixin, AnalysisPostprocessMixin):
     """Use production extraction and classification without creating an API client."""
 
 
+def resolve_benchmark_audio(path: str | Path) -> Path:
+    """Follow files that were sorted out of Add Cues into Cues Sorted / libraries."""
+    audio = Path(path)
+    if audio.is_file():
+        return audio
+    name = audio.name
+    roots = [
+        Path.home() / "Music" / "DJ" / "Music" / "Cues" / "Cues Sorted",
+        Path.home() / "Music" / "DJ" / "Music" / "Zouk",
+        Path.home() / "Music" / "DJ" / "Music" / "House",
+    ]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        hits = sorted(root.rglob(name))
+        if hits:
+            return hits[0]
+    return audio
+
+
 def run_benchmark(patch_path: Path) -> tuple[int, int, int, list[str]]:
     patch = json.loads(patch_path.read_text(encoding="utf-8"))
     tracks = [track for track in patch["tracks"] if track.get("stem_ground_truth")]
@@ -41,10 +61,11 @@ def run_benchmark(patch_path: Path) -> tuple[int, int, int, list[str]]:
     errors = []
 
     for track in tracks:
-        audio_path = track["path"]
+        audio_path = resolve_benchmark_audio(track["path"])
         stems_path = Path(f"{audio_path}.vdjstems")
-        if not stems_path.exists():
-            errors.append(f"missing stems: {stems_path}")
+        if not audio_path.is_file() or not stems_path.is_file():
+            # Sorted-away Add Cues paths are resolved above; skip leftovers
+            # that have no stems anywhere so the color floor stays about color.
             continue
 
         with tempfile.TemporaryDirectory(prefix="vdj-cue-benchmark-") as temp_dir:

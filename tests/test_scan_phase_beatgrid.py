@@ -69,6 +69,33 @@ class ScanPhaseBeatgridTests(unittest.TestCase):
         off = abs(snapped - phase) / beat
         self.assertLess(min(off % 4, 4 - (off % 4)), 0.08)
 
+    def test_add_cues_keeps_this_filepath_first_one(self):
+        """User-set Add Cues 1 wins over a sibling library 1."""
+        from vdj_cuer.vdj_database import VdjSongMetadata
+
+        cuer = AutomaticMusicCuer.__new__(AutomaticMusicCuer)
+        add = "/Users/k/Music/DJ/Music/Cues/Add Cues/Pajamathon/01 A bout de souffle.m4a"
+        lib = "/Users/k/Music/DJ/Music/Zouk/Lamba/01 A bout de souffle.m4a"
+        add_meta = VdjSongMetadata(
+            scan_bpm=0.697687,
+            beatgrid_offset=22.423852,
+            scan_phase=22.423852,
+            audio_sig="WJpoZ4aHaEhXaIh3ppdqmSYH",
+            file_size=9478034,
+        )
+        lib_meta = VdjSongMetadata(
+            scan_bpm=0.697687,
+            beatgrid_offset=24.440228,
+            scan_phase=24.440228,
+            audio_sig="WJpoZ4aHaEhXaIh3ppdqmSYH",
+            file_size=9478034,
+        )
+        cuer._get_song_metadata = lambda path: add_meta if "Add Cues" in path else lib_meta
+        cuer._get_metadata_index = lambda: {add: add_meta, lib: lib_meta}
+        cuer._normalize_database_path = lambda path: path
+        self.assertAlmostEqual(cuer.get_beatgrid_offset(add), 22.423852, places=5)
+        self.assertAlmostEqual(cuer.get_beatgrid_offset(lib), 24.440228, places=5)
+
 
 if __name__ == "__main__":
     unittest.main()

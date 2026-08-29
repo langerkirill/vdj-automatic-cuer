@@ -353,6 +353,51 @@ class AfterMoveTests(unittest.TestCase):
             self.assertIn(f'UserColor="{LANE_COLORS["cyan"]}"', text)
             self.assertIn('Type="cue"', text)
 
+    def test_confirmed_lane_paints_unmapped_bassy(self):
+        dest = "/Users/x/Music/DJ/Music/Zouk/Bassy/moved.flac"
+        set_path = "/Users/x/Music/DJ/Music/Sets/Pajamathon 2026/moved.flac"
+        db_xml = (
+            "<VirtualDJ_Database>\r\n"
+            f'<Song FilePath="{dest}">\r\n'
+            '<Infos SongLength="100" UserColor="4294967295" Cover="1" />\r\n'
+            '<Poi Name="Intro" Type="cue" Num="1" />\r\n'
+            "</Song>\r\n"
+            f'<Song FilePath="{set_path}">\r\n'
+            '<Infos SongLength="100" UserColor="4294967295" Cover="1" />\r\n'
+            '<Poi Name="Intro" Type="cue" Num="1" />\r\n'
+            "</Song>\r\n"
+            "</VirtualDJ_Database>\r\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "database.xml"
+            path.write_bytes(db_xml.encode("utf-8"))
+            with patch("vdj_database_safety.assert_safe_to_write_vdj_database"):
+                painted = apply_lane_color_after_move(path, [dest, set_path], lane="pink")
+            self.assertEqual(painted["lane"], "pink")
+            text = path.read_bytes().decode("utf-8")
+            self.assertIn(f'UserColor="{LANE_COLORS["pink"]}"', text)
+            self.assertNotIn('UserColor="4294967295"', text)
+
+    def test_bassy_without_lane_does_not_write_white(self):
+        dest = "/Users/x/Music/DJ/Music/Zouk/Bassy/moved.flac"
+        db_xml = (
+            "<VirtualDJ_Database>\r\n"
+            f'<Song FilePath="{dest}">\r\n'
+            '<Infos SongLength="100" Cover="1" />\r\n'
+            '<Poi Name="Intro" Type="cue" Num="1" />\r\n'
+            "</Song>\r\n"
+            "</VirtualDJ_Database>\r\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "database.xml"
+            path.write_bytes(db_xml.encode("utf-8"))
+            with patch("vdj_database_safety.assert_safe_to_write_vdj_database"):
+                painted = apply_lane_color_after_move(path, [dest])
+            self.assertIsNone(painted["lane"])
+            self.assertEqual(painted["updated"], 0)
+            text = path.read_bytes().decode("utf-8")
+            self.assertNotIn("UserColor", text)
+
 
 class InfosRewriteTests(unittest.TestCase):
     def test_inserts_usercolor(self):

@@ -44,3 +44,8 @@ ui/.venv/
 
 # Playwright / local test output
 test-results/
+
+# Local agent / editor scratch
+.codex/
+.cursor/
+.grok/

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .bpm_edit import halve_track_bpm
-from .config import ADD_CUES, CUES_ROOT, LIBRARIES
+from .config import ADD_CUES, CUES_ROOT, LIBRARIES, assert_existing_audio
 from .grid_edit import set_beatgrid_anchor
 from .relocate import is_virtualdj_running, summarize_cues, summarize_cues_for_paths
 from .autocue_path import ensure_autocue_on_path
@@ -856,21 +856,7 @@ def apply_grid_fix_plan(
 
 
 def _assert_allowed(path: Path) -> Path:
-    audio = path.expanduser().resolve()
-    if not audio.is_file():
-        raise FileNotFoundError(f"Audio not found: {audio}")
-    roots = [
-        ADD_CUES.resolve(),
-        CUES_ROOT.resolve(),
-        *[item.resolve() for item in LIBRARIES.values()],
-    ]
-    for root in roots:
-        try:
-            audio.relative_to(root)
-            return audio
-        except ValueError:
-            continue
-    raise ValueError("Grid fix is only allowed under Cues/ or House/Zouk libraries")
+    return assert_existing_audio(path)
 
 
 def _grid_anchor_from_cues(cues: Any) -> Optional[float]:

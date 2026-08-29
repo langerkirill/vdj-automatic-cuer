@@ -1,5 +1,6 @@
 import unittest
 
+from vdj_cuer.common import is_on_downbeat, is_on_phrase_one
 from vdj_cuer.precision_gate import apply_precision_gate
 
 
@@ -39,8 +40,10 @@ class PrecisionGateTests(unittest.TestCase):
 
         result = apply_precision_gate(analysis, bpm=120.0)
 
-        self.assertEqual([item["timestamp"] for item in result["measure_changes"]], [30.0])
-        self.assertEqual([item["start"] for item in result["loop_segments"]], [60.0])
+        self.assertEqual(
+            [item["timestamp"] for item in result["measure_changes"]], [32.0]
+        )
+        self.assertEqual([item["start"] for item in result["loop_segments"]], [64.0])
         self.assertEqual(result["precision_gate"]["rejected"]["low_confidence_cues"], 1)
         self.assertEqual(result["precision_gate"]["rejected"]["invalid_cues"], 1)
 
@@ -78,16 +81,13 @@ class PrecisionGateTests(unittest.TestCase):
         # After snap, on_two becomes nearest 1 (phase or phase+bar).
         # A time *exactly* one beat after Phase snaps to Phase or Phase+bar.
         result = apply_precision_gate(analysis, bpm=bpm, beatgrid_offset=phase)
+        self.assertGreaterEqual(len(result["measure_changes"]), 1)
         for marker in result["measure_changes"]:
-            pos = float(marker["timestamp"])
-            off = ((pos - phase) / beat) % 4.0
-            dist = min(off, 4.0 - off)
-            self.assertLessEqual(dist, 0.08)
+            self.assertTrue(
+                is_on_phrase_one(float(marker["timestamp"]), bpm, phase)
+            )
         for marker in result["loop_segments"]:
-            pos = float(marker["start"])
-            off = ((pos - phase) / beat) % 4.0
-            dist = min(off, 4.0 - off)
-            self.assertLessEqual(dist, 0.08)
+            self.assertTrue(is_on_phrase_one(float(marker["start"]), bpm, phase))
 
     def test_rejects_non_finite_times_and_unsupported_loop_lengths(self):
         analysis = {
@@ -101,6 +101,41 @@ class PrecisionGateTests(unittest.TestCase):
         self.assertEqual(result["loop_segments"], [])
         self.assertEqual(result["precision_gate"]["rejected"]["invalid_cues"], 2)
         self.assertEqual(result["precision_gate"]["rejected"]["invalid_loops"], 2)
+
+    def test_eight_beats_is_a_bar_one_not_a_phrase_one(self) -> None:
+        bpm = 90.0
+        phase = 0.030522
+        beat = 60.0 / bpm
+        two_bars = phase + 8 * beat
+        four_bars = phase + 16 * beat
+        self.assertTrue(is_on_downbeat(two_bars, bpm, phase))
+        self.assertFalse(is_on_phrase_one(two_bars, bpm, phase))
+        self.assertTrue(is_on_phrase_one(four_bars, bpm, phase))
+
+    def test_mid_phrase_bar_snaps_to_phrase_one(self) -> None:
+        """Come back: a 4-beat 1 that is not a yellow [1] must move to the phrase 1."""
+        phase = 0.030522
+        bpm = 90.0
+        beat = 60.0 / bpm
+        two_bars = phase + 8 * beat
+        next_phrase = phase + 16 * beat
+        analysis = {
+            "measure_changes": [cue(two_bars, name="Groove")],
+            "loop_segments": [loop(two_bars, beats=8)],
+        }
+        result = apply_precision_gate(
+            analysis, bpm=bpm, beatgrid_offset=phase
+        )
+        self.assertEqual(len(result["measure_changes"]), 1)
+        self.assertAlmostEqual(
+            result["measure_changes"][0]["timestamp"], next_phrase, places=4
+        )
+        self.assertTrue(
+            is_on_phrase_one(
+                result["measure_changes"][0]["timestamp"], bpm, phase
+            )
+        )
+        self.assertAlmostEqual(result["loop_segments"][0]["start"], next_phrase, places=4)
 
 
 if __name__ == "__main__":

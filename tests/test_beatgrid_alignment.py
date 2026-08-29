@@ -205,10 +205,10 @@ class BeatgridAlignmentTests(unittest.TestCase):
             file_path="/tmp/song.m4a",
         )
 
-        self.assertEqual(aligned, 4.0)
+        self.assertEqual(aligned, 0.0)
 
     def test_loop_timing_snaps_to_downbeat_not_mid_bar(self):
-        """Loops use the same bar grid as cues so they do not feel off-beat."""
+        """Within 1 bar of a yellow [1], stay on that [1] (do not jump a phrase)."""
         self.cuer.get_beatgrid_offset = Mock(return_value=0.0)
 
         aligned = self.cuer.validate_timing_hybrid(
@@ -218,7 +218,7 @@ class BeatgridAlignmentTests(unittest.TestCase):
             grid_beats=4,
         )
 
-        self.assertEqual(aligned, 4.0)
+        self.assertEqual(aligned, 0.0)
 
     def test_track_start_uses_first_nonnegative_downbeat_instead_of_zero(self):
         self.cuer.get_beatgrid_offset = Mock(return_value=1.9)
@@ -243,9 +243,9 @@ class BeatgridAlignmentTests(unittest.TestCase):
         )
 
         self.assertEqual(aligned["measure_changes"][0]["model_timestamp"], 2.2)
-        self.assertEqual(aligned["measure_changes"][0]["timestamp"], 4.0)
-        # Loops snap to downbeats (4s), not the nearest single beat (2s).
-        self.assertEqual(aligned["loop_segments"][0]["start"], 4.0)
+        self.assertEqual(aligned["measure_changes"][0]["timestamp"], 0.0)
+        # 2.2s is inside the first phrase — land on this [1], not 16s.
+        self.assertEqual(aligned["loop_segments"][0]["start"], 0.0)
 
 
 if __name__ == "__main__":
