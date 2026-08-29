@@ -2,7 +2,7 @@
 
 Booth UI for **VDJ Station**: review AutoCue markers, re-run cues/loops, recs, assemble, then sort cued tracks into House / Zouk emotion folders while **preserving VirtualDJ FilePath-linked cues**.
 
-This package lives at `ui/` inside the [vdj-automatic-cuer](https://github.com/langerkirill/vdj-automatic-cuer) monorepo. It reuses `vdj_database_safety.py` and `vdj_cuer/` from the repo root — it does **not** reimplement VirtualDJ XML safety.
+This package lives at `ui/` inside the [vdj-station](https://github.com/langerkirill/vdj-station) monorepo. It reuses `vdj_database_safety.py` and `vdj_cuer/` from the repo root — it does **not** reimplement VirtualDJ XML safety.
 
 ## Quick start
 

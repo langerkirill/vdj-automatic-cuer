@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from sorter.ml_training import ingest_cli_argv, ingest_subprocess_env
@@ -24,7 +25,8 @@ class MlTrainingSubprocessTests(unittest.TestCase):
         env = ingest_subprocess_env()
         self.assertEqual(env.get("OMP_NUM_THREADS"), "1")
         self.assertEqual(env.get("PYTHONUNBUFFERED"), "1")
-        self.assertIn("vdj-automatic-cuer", env.get("PYTHONPATH", ""))
+        repo_root = str(Path(__file__).resolve().parents[2])
+        self.assertIn(repo_root, env.get("PYTHONPATH", ""))
 
     def test_ingest_slot_serializes_children(self) -> None:
         import threading

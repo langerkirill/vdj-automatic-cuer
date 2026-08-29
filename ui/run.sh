@@ -42,13 +42,15 @@ _load_env() {
 }
 _load_env .env \
   || _load_env "$REPO_ROOT/.env" \
+  || _load_env "$HOME/src/vdj-station/.env" \
+  || _load_env "$HOME/Desktop/vdj-station/.env" \
   || _load_env "$HOME/Desktop/vdj-automatic-cuer/.env" \
   || _load_env "$HOME/Desktop/vdj-automatic-cuer/ui/.env" \
   || true
 
 if [[ -z "${GEMINI_API_KEY:-}" ]]; then
   echo "WARNING: GEMINI_API_KEY is not set. AutoCue will fail until you add it to" >&2
-  echo "  $REPO_ROOT/.env  or  $HOME/Desktop/vdj-automatic-cuer/.env" >&2
+  echo "  $REPO_ROOT/.env" >&2
 fi
 
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
